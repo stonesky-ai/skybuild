@@ -30,10 +30,10 @@ def relay_assignment(pinned, request, monkeypatch):
     return repo, path, brief
 
 
-def dispatch_assignment(relay_assignment, tmp_path, client_factory, project="skybuild"):
+def dispatch_assignment(relay_assignment, tmp_path, client_factory, project="skybuild", token_value="x" * 32):
     repo, path, brief = relay_assignment
     token = tmp_path / "dispatcher-token"
-    token.write_text("x" * 32)
+    token.write_text(token_value)
     token.chmod(0o600)
     return manual_dispatch.dispatch(
         repo, path, worker=brief["worker"], dispatcher=brief["dispatcher"],
@@ -65,8 +65,9 @@ def test_authenticated_assignment_and_result_roundtrip(relay_assignment, restric
     dispatcher, worker = brief["dispatcher"], brief["worker"]
     admin = Store(admin_dsn, database)
     scopes = ["cord:send", "cord:read", "cord:handle"]
-    admin.provision_principal(dispatcher, "x" * 32, grants={project: scopes})
-    admin.provision_principal(worker, "y" * 32, grants={project: scopes})
+    dispatcher_token, worker_token = uuid4().hex + uuid4().hex, uuid4().hex + uuid4().hex
+    admin.provision_principal(dispatcher, dispatcher_token, grants={project: scopes})
+    admin.provision_principal(worker, worker_token, grants={project: scopes})
     with TestClient(create_app(Store(runtime_dsn, database))) as api:
         def transport(request):
             response = api.request(request.method, str(request.url),
@@ -76,9 +77,9 @@ def test_authenticated_assignment_and_result_roundtrip(relay_assignment, restric
         def client_factory(url, token, **kwargs):
             return Client(url, token, transport=httpx.MockTransport(transport), **kwargs)
 
-        sent = dispatch_assignment(relay_assignment, tmp_path, client_factory, project)
+        sent = dispatch_assignment(relay_assignment, tmp_path, client_factory, project, dispatcher_token)
         destination = tmp_path / "received.json"
-        with client_factory("https://controller.ts.net", "y" * 32) as receiver:
+        with client_factory("https://controller.ts.net", worker_token) as receiver:
             receive_assignment(receiver, project, repo, worker=worker, dispatcher=dispatcher,
                                message_id=sent["message_id"], destination=destination)
             assignment = json.loads(destination.read_text())
@@ -89,7 +90,7 @@ def test_authenticated_assignment_and_result_roundtrip(relay_assignment, restric
                       "checks": [], "changed_paths": [], "risks": [], "next_action": "Reconcile blocker"}
             report = send_result(receiver, project, repo, worktree, worker=worker,
                                  assignment=assignment, result=result)
-        with client_factory("https://controller.ts.net", "x" * 32) as sender:
+        with client_factory("https://controller.ts.net", dispatcher_token) as sender:
             inbox = sender.inbox(project)
             assert len(inbox) == 1
             message = inbox[0]
