@@ -70,6 +70,11 @@ def main(argv: list[str] | None = None) -> int:
         if command != "get":
             view.add_argument("--limit", type=int, default=100)
             view.add_argument("--offset", type=int, default=0)
+    execution = commands.add_parser("execution-status", help="Read one task's bounded cached execution evidence")
+    execution.add_argument("--ca-file", type=Path, default=argparse.SUPPRESS)
+    execution.add_argument("project_id")
+    execution.add_argument("task_id")
+    execution.add_argument("--limit", type=int, default=20)
     inbox = commands.add_parser("cord-inbox", help="Read pending Cord messages for this credential")
     inbox.add_argument("--ca-file", type=Path, default=argparse.SUPPRESS)
     inbox.add_argument("project_id")
@@ -138,9 +143,11 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(json.dumps(plan, ensure_ascii=False, indent=2))
             return 0
-        if args.command in {"tasks", "get", "history"}:
+        if args.command in {"tasks", "get", "history", "execution-status"}:
             with Client(_environment("SKYBUILD_API_URL"), _environment("SKYBUILD_TOKEN"), ca_file=args.ca_file) as client:
-                if args.command == "get":
+                if args.command == "execution-status":
+                    result = client.execution_status(args.project_id, args.task_id, limit=args.limit)
+                elif args.command == "get":
                     result = client.get_task(args.project_id, args.task_id)
                 elif args.command == "history":
                     result = client.task_history(args.project_id, args.task_id, limit=args.limit, offset=args.offset)
