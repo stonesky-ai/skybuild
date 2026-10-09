@@ -28,6 +28,18 @@ nice -n 10 ./.venv/bin/python scripts/manual_pilot_controller.py --promotion --c
 
 The guard checks published clean source/ancestry, installed package hashes against retained source, exact retained container/image/cluster identities, unchanged migration digests 001–011 and only authority migration 012, private runtime environment, TLS/CA/readiness, binds/mounts/UID, resources, empty Serve/Funnel, niceness and headroom. It checks the running API against the retained immutable API image ID; the historical `:local` tag can name an older image. PostgreSQL reads use a bounded repeatable-read/read-only administrator transaction. The current restricted-role audit must pass with no findings; the candidate role audit must pass after migration 012. A failure changes no services or database state. Remote worker reachability remains a separate qualification.
 
+## Isolated schema rehearsal
+
+This is a partial implementation tranche for `SKYBUILD-MVP-CONTROLLER-UPDATE`, adapted from source commit `c605f5dd46769e2622ad007402b1f75564e83bcd` onto the schema-012 controller. The task remains incomplete; its resolver must still qualify candidate construction from an accepted published bundle, pinned controller identities, external responsiveness, one writable authority and an actionable deployment journal record in an isolated runtime. No live task state changes are part of this source tranche.
+
+Run the focused rehearsal through `scripts/disposable_pg_gate.py` with a disposable PostgreSQL image. The test creates a unique database and runtime role, applies only migrations 001–010, and drops both resources in `finally`. It seeds one task journal and one Cord message, keeps a schema-010 API test server responsive while it checks the candidate migration digest, then injects a failed atomic migration qualification and verifies the old API and records remain available. It next applies migrations 011–012 from the pinned candidate, confirms the old server refuses the incompatible schema, injects candidate readiness failure, and starts a compatible candidate against the same database to verify retained task and Cord records.
+
+This is an in-process rehearsal, not a container image build or published-bundle promotion. Candidate preparation is represented by hashing the migration source; readiness failure is injected. It demonstrates transaction rollback before the schema commit and forward candidate recovery after the schema commit. It does not qualify production recovery, candidate binary provenance, external service responsiveness, a journaled deployment event, remote worker connectivity, or operator rollback. Do not treat it as deployment acceptance.
+
+```sh
+./.venv/bin/python scripts/disposable_pg_gate.py --checkout "$PWD" --min-available-gib 10 -- ./.venv/bin/python -m pytest -q tests/test_manual_pilot_promotion.py::test_schema_010_role_audit_and_atomic_candidate_requalification
+```
+
 ## Later build and recovery evidence
 
 Do not execute this section during source preparation. After explicit authority, stop new manual dispatch and reconcile pending assignments/results without renewing authority. Retain allowlisted source/image/container/TLS/role/message evidence privately. Never dump full Docker environments or credentials. Build at nice level 10 with a separately qualified bounded builder, using a separate source tag. Do not overwrite the accepted `:local` image tag; the preflight verifies that it still names the old image.
