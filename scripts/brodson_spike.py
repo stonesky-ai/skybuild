@@ -17,7 +17,7 @@ FIXTURES = ROOT / "docs/research/brodson-spike"
 LIMITS = {"cases": 3, "requests": 6, "attempts_per_case": 2,
           "prompt_bytes": 8192, "input_tokens": 2048, "output_tokens": 512,
           "response_bytes": 16384, "latency_ms": 60000, "returned_tokens": 15360,
-          "concurrency": 1}
+          "concurrency": 1, "total_wall_seconds": 60}
 CLIP_SOURCE = '''def clip_utf8(text, byte_limit):
     if not isinstance(text, str) or type(byte_limit) is not int:
         raise ValueError("Invalid clipping arguments")
@@ -376,15 +376,20 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
-def _fake_http_child(connection, transport, method, path, body):
+def _fake_http_child(connection, transport, method, path, body, deadline_at):
     """Fixed owned child: stream, bound and sanitize before crossing IPC."""
     import httpx
     started = time.monotonic()
     try:
+        remaining = deadline_at - time.monotonic()
+        if remaining <= 0:
+            raise SpikeError("wall_deadline_before_dispatch")
         with httpx.Client(transport=transport, base_url=HTTP_ORIGIN,
                           trust_env=False, follow_redirects=False,
-                          timeout=httpx.Timeout(60),
+                          timeout=httpx.Timeout(remaining),
                           headers={"Authorization": "Bearer " + SYNTHETIC_TOKEN}) as client:
+            if time.monotonic() >= deadline_at:
+                raise SpikeError("wall_deadline_before_dispatch")
             with client.stream(method, path, json=body if body is not None else None) as response:
                 if response.status_code != 200:
                     raise SpikeError("HTTP_status_error")
@@ -413,8 +418,8 @@ def _fake_http_child(connection, transport, method, path, body):
         connection.close()
 
 
-def fake_http_request(transport, method, path, body, *, deadline_seconds=60):
-    """Hard parent wall deadline covers dispatch, headers, streaming and parsing."""
+def fake_http_request(transport, method, path, body, *, deadline_seconds=60, deadline_at=None):
+    """Hard parent deadline covers dispatch, headers, streaming and parsing."""
     import httpx
     import multiprocessing
     import select
@@ -424,10 +429,17 @@ def fake_http_request(transport, method, path, body, *, deadline_seconds=60):
         raise SpikeError("request_scope_invalid")
     if type(deadline_seconds) not in (float, int) or not 0 < deadline_seconds <= 60:
         raise SpikeError("invalid_wall_deadline")
+    now = time.monotonic()
+    end = min(now + deadline_seconds, deadline_at) if deadline_at is not None else now + deadline_seconds
+    if end <= now:
+        raise SpikeError("wall_deadline_before_dispatch")
     context = multiprocessing.get_context("fork")
     receiving, sending = context.Pipe(duplex=False)
-    child = context.Process(target=_fake_http_child, args=(sending, transport, method, path, body))
-    end = time.monotonic() + deadline_seconds
+    child = context.Process(target=_fake_http_child, args=(sending, transport, method, path, body, end))
+    if time.monotonic() >= end:
+        receiving.close()
+        sending.close()
+        raise SpikeError("wall_deadline_before_dispatch")
     child.start()
     sending.close()
     try:
@@ -516,9 +528,23 @@ class FakeHTTPJournal:
                         os.close(directory)
                 finally:
                     os.close(descriptor)
-                if (self.state.get("identity") != identity or self.state.get("synthetic") is not True
+                saved_identity = self.state.get("identity")
+                expected_identity = {key: value for key, value in identity.items()
+                                     if key != "run_deadline_unix"}
+                existing_identity = ({key: value for key, value in saved_identity.items()
+                                      if key != "run_deadline_unix"}
+                                     if isinstance(saved_identity, dict) else None)
+                if (existing_identity != expected_identity or self.state.get("synthetic") is not True
                         or not isinstance(self.state.get("entries"), list)):
                     raise SpikeError("journal_identity_changed")
+            saved_deadline = self.state["identity"].get("run_deadline_unix")
+            requested_deadline = identity.get("run_deadline_unix")
+            if (type(saved_deadline) not in (int, float) or type(requested_deadline) not in (int, float)
+                    or not 0 < saved_deadline < float("inf")
+                    or not 0 < requested_deadline < float("inf")):
+                raise SpikeError("journal_deadline_invalid")
+            self.deadline_at = time.monotonic() + max(
+                0, min(saved_deadline, requested_deadline) - time.time())
             self.cursor = 0
         except BlockingIOError:
             os.close(self.lock)
@@ -542,7 +568,7 @@ class FakeHTTPJournal:
             raise SpikeError("journal_too_large")
         write_result(self.path, payload)
 
-    def obtain(self, request, transport, *, deadline_seconds):
+    def obtain(self, request, transport, *, deadline_seconds, run_deadline=None):
         if (not isinstance(request, dict) or set(request) != {"method", "path", "body", "case_id"}
                 or (request["method"], request["path"]) not in {
                     ("GET", "/v1/models"), ("POST", "/v1/chat/completions")}
@@ -562,6 +588,9 @@ class FakeHTTPJournal:
             raise SpikeError("consumed_attempt_not_reconciled")
         if time.time() >= self.state["identity"]["expires_at"]:
             raise SpikeError("synthetic_authority_expired")
+        deadline = min(self.deadline_at, run_deadline) if run_deadline is not None else self.deadline_at
+        if time.monotonic() >= deadline:
+            raise SpikeError("total_wall_deadline_exhausted")
         generations = [entry for entry in entries if entry["request"]["method"] == "POST"]
         discovery = [entry for entry in entries if entry["request"]["method"] == "GET"]
         if request["method"] == "GET":
@@ -577,7 +606,7 @@ class FakeHTTPJournal:
         started = time.monotonic()
         try:
             packet = fake_http_request(transport, request["method"], request["path"], request["body"],
-                                       deadline_seconds=deadline_seconds)
+                                       deadline_seconds=deadline_seconds, deadline_at=deadline)
         except SpikeError as error:
             entry["parent_elapsed_wall_ms"] = round((time.monotonic() - started) * 1000, 3)
             entry["failure"] = str(error)
@@ -625,6 +654,10 @@ def run_fake_http(manifest, recordings, transport, journal_root, *, authority,
                   count_tokens, deadline_seconds=60):
     """Exercise future protocol on explicit mocks; this is NOT live admission."""
     import httpx
+    if type(deadline_seconds) not in (float, int) or not 0 < deadline_seconds <= 60:
+        raise SpikeError("invalid_total_wall_deadline")
+    run_deadline_unix = time.time() + deadline_seconds
+    run_deadline_mono = time.monotonic() + deadline_seconds
     if type(transport) is not httpx.MockTransport:
         raise SpikeError("only_explicit_fake_transport_allowed")
     validate_manifest(manifest, recordings)
@@ -636,7 +669,9 @@ def run_fake_http(manifest, recordings, transport, journal_root, *, authority,
         raise SpikeError("explicit_synthetic_authority_required")
     if not callable(count_tokens):
         raise SpikeError("tokenization_unknown")
-    identity = authority | {"manifest_sha256": digest(canonical(manifest)), "origin": HTTP_ORIGIN,
+    run_deadline_unix = min(run_deadline_unix, authority["expires_at"])
+    identity = authority | {"run_deadline_unix": run_deadline_unix,
+                            "manifest_sha256": digest(canonical(manifest)), "origin": HTTP_ORIGIN,
                             "model": HTTP_MODEL, "limits": LIMITS,
                             "journal_root": str(Path(journal_root).resolve())}
     result = {"synthetic": True, "mode": "mock-http", "live_calls": 0, "status": "prepared",
@@ -644,7 +679,8 @@ def run_fake_http(manifest, recordings, transport, journal_root, *, authority,
     journal = FakeHTTPJournal(journal_root, identity)
     try:
         discovery = journal.obtain({"method": "GET", "path": "/v1/models", "body": None,
-                                    "case_id": None}, transport, deadline_seconds=deadline_seconds)["response"]
+                                    "case_id": None}, transport, deadline_seconds=deadline_seconds,
+                                    run_deadline=run_deadline_mono)["response"]
         if "error" in discovery:
             raise SpikeError("discovery_endpoint_error")
         # Synthetic metadata only: real loaded identity/capacity remains unqualified.
@@ -672,7 +708,8 @@ def run_fake_http(manifest, recordings, transport, journal_root, *, authority,
                         "chat_template_kwargs": {"enable_thinking": False}}
                 packet = journal.obtain({"method": "POST", "path": "/v1/chat/completions",
                                          "case_id": case["id"], "body": body}, transport,
-                                        deadline_seconds=deadline_seconds)
+                                        deadline_seconds=deadline_seconds,
+                                        run_deadline=run_deadline_mono)
                 candidate, content, usage = _http_candidate(packet)
                 result["returned_tokens"] += usage["total_tokens"]
                 if result["returned_tokens"] > LIMITS["returned_tokens"]:

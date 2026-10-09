@@ -605,7 +605,12 @@ def test_fake_http_failed_generation_retains_parent_wall_latency_and_exposure(ht
     generation = entries[1]
     assert generation["request"]["method"] == "POST"
     assert generation["status"] == "consumed_uncertain"
-    assert generation["parent_elapsed_wall_ms"] >= (95 if outcome == "timeout" else 25)
+    if outcome == "timeout":
+        # Discovery and generation share the same total wall budget.
+        assert sum(entry["parent_elapsed_wall_ms"] for entry in entries) >= 95
+        assert generation["parent_elapsed_wall_ms"] > 0
+    else:
+        assert generation["parent_elapsed_wall_ms"] >= 25
 
     def forbidden(request):
         raise AssertionError("failed generation remains consumed on restart")
@@ -614,3 +619,34 @@ def test_fake_http_failed_generation_retains_parent_wall_latency_and_exposure(ht
     assert restarted["stop_reason"] == "consumed_attempt_not_reconciled"
     assert restarted["consumed_generation"] == 1 and restarted["reserved_token_exposure"] == 2560
     assert json.loads(path.read_text())["entries"] == entries
+
+
+def test_fake_http_total_deadline_is_persisted_across_restart(http_setup):
+    import httpx
+    import time
+    manifest, recordings, root, _ = http_setup
+    baseline = http_transport(manifest, recordings)
+
+    def slow_handler(request):
+        time.sleep(0.05)
+        return baseline.handle_request(request)
+
+    started = time.monotonic()
+    result = run_http(http_setup, httpx.MockTransport(slow_handler), deadline_seconds=0.12)
+    elapsed = time.monotonic() - started
+    assert result["status"] == "stopped"
+    assert elapsed < 0.5
+    assert result["consumed_discovery"] == 1
+    state = json.loads((root / "attempts.json").read_text())
+    assert state["identity"]["limits"]["total_wall_seconds"] == 60
+    assert state["identity"]["run_deadline_unix"] < state["identity"]["expires_at"]
+    assert all("parent_elapsed_wall_ms" in entry for entry in state["entries"])
+
+    def forbidden(request):
+        raise AssertionError("restart must retain the original total wall deadline")
+
+    restarted = run_http(http_setup, httpx.MockTransport(forbidden))
+    assert restarted["consumed_discovery"] == result["consumed_discovery"]
+    assert restarted["consumed_generation"] == result["consumed_generation"]
+    assert restarted["reserved_token_exposure"] == result["reserved_token_exposure"]
+    assert json.loads((root / "attempts.json").read_text())["entries"] == state["entries"]

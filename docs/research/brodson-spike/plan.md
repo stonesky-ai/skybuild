@@ -204,3 +204,20 @@ qualified tokenizer/template/profile/capacity and enforce finite shared budgets.
 Until REST workers qualify and the parent delivers explicit later clearance
 through REST, the unconditional live boundary remains closed. There are no
 endpoint observations or live attempts in this assignment, including discovery.
+
+## Restart recovery checkpoint, 2026-10-09
+
+The recovered mock HTTP changes now share one total wall deadline across
+discovery and generation, persist its expiry in the journal, and retain the
+earliest deadline across restart. Child transport timeouts use the remaining
+budget. An expired run cannot dispatch another request or renew its budget.
+The timeout regression checks parent time across discovery and generation;
+the new restart regression preserves consumed attempts and token exposure.
+All 90 focused tests passed in 2.51 seconds. These are synthetic checks only.
+The previously committed preparation artifact describes the earlier runner;
+it has not been regenerated as evidence for this recovered change.
+
+The owner requested committing and pushing the recovered work. Jeltz's
+authenticated dispatcher was notified through Cord. Independent exact-head
+review and frozen-bundle integration remain with the dispatcher; this
+checkpoint does not claim either gate has passed.
