@@ -294,6 +294,11 @@ def create_app(store: Any) -> FastAPI:
         return store.task_action(actor, project_id, task_id, action,
                                  body.model_dump(mode="json", exclude_unset=True), expected, idem)
 
+    @app.post(base + "/tasks/{task_id}/complete")
+    def complete_task(project_id: ProjectPath, task_id: RecordPath, body: dict[str, Any],
+                      actor: Actor, idem: Key, expected: Revision) -> dict:
+        return store.complete_task(actor, project_id, task_id, body, expected, idem)
+
     @app.post(base + "/tasks/{task_id}/split")
     def split_task(project_id: ProjectPath, task_id: RecordPath, body: TaskSplit,
                    actor: Actor, idem: Key, expected: Revision) -> dict:
