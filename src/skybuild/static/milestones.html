@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Milestones · SkyBuild</title>
+  <link rel="stylesheet" href="/workbench/assets/workbench-shell.css">
+  <link rel="stylesheet" href="/workbench/assets/milestones.css">
+</head>
+<body class="milestones-page">
+  <!--WORKBENCH_NAV-->
+  <header class="milestone-hero">
+    <p class="eyebrow">SKYBUILD · PROJECT ROADMAP</p>
+    <div class="hero-copy">
+      <div>
+        <p class="status-label"><span></span> DESIGN HANDOFF · NOT LIVE TASK STATUS</p>
+        <h1>Build SkyBuild into its own build system.</h1>
+        <p class="lede">A dependency journey from a validated bootstrap to the self-build MVP acceptance demonstration.</p>
+      </div>
+      <aside class="hero-note"><strong>Read this as a path, not a schedule.</strong><br>Parallel branches stay parallel. The current task ledger is the authority for exact edges and progress.</aside>
+    </div>
+  </header>
+
+  <main>
+    <section class="roadmap panel" aria-labelledby="roadmap-title">
+      <div class="section-head">
+        <div><p class="kicker">THE MILESTONE FLOW</p><h2 id="roadmap-title">From bootstrap to acceptance</h2></div>
+        <span class="count">8 milestones · 1 target</span>
+      </div>
+      <figure>
+        <img src="/workbench/assets/milestone-roadmap.png" alt="Roadmap flow from SkyBuild Bootstrap through Task Cutover, parallel Workbench and Execution Controls, then parallel Keeper Adoption, Author and Reviewer Route, and Bundled Integration, converging on the Self-Build MVP acceptance task.">
+        <figcaption>Stage arrows summarize the handoff. They do not declare dependencies between every card; verify direct edges in the current ledger.</figcaption>
+      </figure>
+      <div class="path-legend"><span><i class="dot foundation"></i>Foundation</span><span><i class="dot authority"></i>Task authority</span><span><i class="dot delivery"></i>Build capability</span><span><i class="dot target"></i>Acceptance target</span></div>
+    </section>
+
+    <div class="notice"><strong>Snapshot warning</strong><span>This roadmap came from a design discovery at architecture revision A40. Ledger and plan states can change. Nothing here reports current task status or authorizes task, API, runtime, or deployment changes.</span></div>
+
+    <section class="milestone-grid" aria-label="Milestone details">
+      <article class="milestone-card foundation" id="bootstrap">
+        <div class="card-top"><span class="step">01</span><span class="phase">FOUNDATION</span></div>
+        <h2>Bootstrap</h2><code>SKYBUILD-BOOTSTRAP</code>
+        <p>Establish a trustworthy starting point: a SkyBuild checkout that can validate the repository and produce reviewable evidence.</p>
+        <div class="card-foot"><b>Unlocks</b><span>A known-good base for task authority cutover.</span></div>
+      </article>
+      <article class="milestone-card authority" id="task-cutover">
+        <div class="card-top"><span class="step">02</span><span class="phase">TASK AUTHORITY</span></div>
+        <h2>Task Cutover</h2><code>SKYBUILD-TASK-CUTOVER</code>
+        <p>Move task authority to the selected system with an explicit import and authority receipt. Writes must fail closed while there is a gap.</p>
+        <div class="card-foot"><b>Unlocks</b><span>One well-defined source of task truth.</span></div>
+      </article>
+      <article class="milestone-card delivery" id="task-workbench">
+        <div class="card-top"><span class="step">03A</span><span class="phase">PARALLEL BRANCH</span></div>
+        <h2>Task Workbench</h2><code>SKYBUILD-TASK-WORKBENCH</code>
+        <p>Give people a thin, dependable view to find tasks, understand their contracts, and follow their history.</p>
+        <div class="card-foot"><b>Enables</b><span>Human visibility and task handling.</span></div>
+      </article>
+      <article class="milestone-card delivery" id="execution-controls">
+        <div class="card-top"><span class="step">03B</span><span class="phase">PARALLEL BRANCH</span></div>
+        <h2>Execution Controls</h2><code>SKYBUILD-EXECUTION-CONTROLS</code>
+        <p>Put the controls around task execution in place so declared authority and workflow rules constrain what can run.</p>
+        <div class="card-foot"><b>Enables</b><span>Controlled execution and evidence.</span></div>
+      </article>
+      <article class="milestone-card delivery" id="keeper-adoption">
+        <div class="card-top"><span class="step">04A</span><span class="phase">PARALLEL BRANCH</span></div>
+        <h2>Keeper Adoption</h2><code>SKYBUILD-KEEPER-ADOPTION</code>
+        <p>Adopt the keeper workflow under SkyBuild task contracts, with the right task selection, lifecycle, and evidence.</p>
+        <div class="card-foot"><b>Enables</b><span>Repeatable task execution by workers.</span></div>
+      </article>
+      <article class="milestone-card delivery" id="author-reviewer-route">
+        <div class="card-top"><span class="step">04B</span><span class="phase">PARALLEL BRANCH</span></div>
+        <h2>Qualified author / reviewer route</h2><span class="id-note">Named in the handoff; stable task ID not supplied.</span>
+        <p>Qualify at least one route that can produce work and independently review it against the expected evidence.</p>
+        <div class="card-foot"><b>Enables</b><span>A reviewed change path.</span></div>
+      </article>
+      <article class="milestone-card delivery" id="bundled-integration">
+        <div class="card-top"><span class="step">04C</span><span class="phase">PARALLEL BRANCH</span></div>
+        <h2>Bundled Integration</h2><code>SKYBUILD-BUNDLED-INTEGRATION</code>
+        <p>Bring reviewed work through the integration path as a coherent bundle with its expected checks and provenance.</p>
+        <div class="card-foot"><b>Enables</b><span>Reviewed changes can land together.</span></div>
+      </article>
+      <article class="milestone-card target" id="self-build-mvp">
+        <div class="card-top"><span class="step">05</span><span class="phase">ACCEPTANCE TARGET</span></div>
+        <h2>Self-build MVP</h2><code>SKYBUILD-SELF-BUILD-MVP</code>
+        <p>Demonstrate the end-to-end acceptance recorded by the MVP task: SkyBuild uses its own task, worker, review, and integration path to build SkyBuild.</p>
+        <div class="card-foot"><b>Proof</b><span>Use the task's current acceptance criteria and evidence; this page does not replace them.</span></div>
+      </article>
+    </section>
+
+    <section class="design panel" aria-labelledby="analysis-title">
+      <div class="section-head"><div><p class="kicker">THE TOOL PROPOSED BY THIS HANDOFF</p><h2 id="analysis-title">Dependency path first. Schedule claims only with data.</h2></div></div>
+      <div class="concept-grid">
+        <article><span class="concept-index">01</span><h3>Dependency path</h3><p>Walk declared prerequisites backward from one target. This is deterministic for a fixed, validated task snapshot.</p></article>
+        <article><span class="concept-index">02</span><h3>Blocked and ready view</h3><p>Classify unfinished prerequisites using task state and acceptance evidence. A status label alone does not prove completion.</p></article>
+        <article><span class="concept-index">03</span><h3>Schedule critical path</h3><p>Keep this separate. It needs duration estimates and scheduling assumptions; shared people and worker limits add resource constraints.</p></article>
+      </div>
+      <div class="rules-grid">
+        <div><h3>Deterministic core</h3><ul>
+          <li>Read one frozen snapshot and identify its commit or API version.</li>
+          <li>Validate IDs, project boundaries, missing references, self-edges, and cycles.</li>
+          <li>Return only the target's transitive prerequisite graph; keep parallel branches visible.</li>
+          <li>Sort topological layers deterministically without inventing edges.</li>
+          <li>Show blockers, next actions, missing evidence, unknowns, and data-quality errors.</li>
+          <li>Emit machine-readable JSON and a concise human report with task IDs and direct edges.</li>
+        </ul></div>
+        <div><h3>Source-of-truth boundary</h3><p>Before cutover, analyze a frozen Git-backed ledger snapshot. After cutover, use the versioned read-only task API or export. Do not blend authorities or snapshots.</p><p>Milestones point to an accepted task or an explicit owner-recorded event. The MVP target is the task <code>SKYBUILD-SELF-BUILD-MVP</code>, not a guessed title match.</p></div>
+      </div>
+    </section>
+
+    <section class="design panel" aria-labelledby="scope-title">
+      <div class="section-head"><div><p class="kicker">BOUNDS FOR A FIRST SLICE</p><h2 id="scope-title">Keep analysis read-only and verifiable</h2></div></div>
+      <div class="scope-columns">
+        <div><h3>In scope</h3><p>One project, one frozen task snapshot, one target, dependency validation, deterministic paths and layers, incomplete blockers, and a concise report with a JSON form.</p></div>
+        <div><h3>Not in the first slice</h3><p>No automatic task creation or edge edits, model-based dependency authority, live ledger migration, schedule optimizer, workforce planner, GUI, notifications, launches, integration, or deployment.</p></div>
+        <div><h3>Optional model skill</h3><p>Only after the CLI contract settles. A model can summarize tool output and cite IDs and edges; it cannot mutate tasks, dependencies, authority, budgets, or execution state.</p></div>
+      </div>
+      <details class="decisions"><summary>Open decisions for task selection</summary><ol>
+        <li>Is this a planning task or implementation of an already selected task? Assign a stable ID if it is new.</li>
+        <li>Which input contract matches the current authority phase: frozen ledger, canonical export, or read-only API?</li>
+        <li>What evidence means “accepted” for generic tasks, including work that does not need review or merge?</li>
+        <li>Is the first release dependency-only, or is there real duration and resource data for schedule estimates?</li>
+        <li>Where should the CLI and output live? Is the model skill a later task?</li>
+        <li>Which consumers need the first output: CLI, future UI/API, or both?</li>
+      </ol></details>
+    </section>
+
+    <footer class="source-note"><span>Design handoff · historical discovery snapshot · read-only presentation</span><a href="/workbench/assets/project-dependency-design.md">Open complete source handoff</a><a href="/workbench">Back to task workbench</a></footer>
+  </main>
+</body>
+</html>

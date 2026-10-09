@@ -1,0 +1,30 @@
+digraph roadmap {
+  graph [rankdir=TB, bgcolor="#f7faf9", pad="0.32", nodesep="0.28", ranksep="0.42", splines=ortho,
+         fontname="DejaVu Sans", label="SKYBUILD SELF-BUILD · DEPENDENCY JOURNEY", labelloc=t, fontsize=20,
+         fontcolor="#244c55", outputorder=edgesfirst];
+  node [shape=box, style="rounded,filled", fontname="DejaVu Sans", fontsize=12, margin="0.18,0.12",
+        color="#d5e2e0", penwidth=1.2, fontcolor="#183b43"];
+  edge [color="#73959a", penwidth=1.7, arrowsize=0.72, arrowhead=vee];
+  bootstrap [label="01  ·  SKYBUILD-BOOTSTRAP\nValidated starting point", fillcolor="#e2f2ef", color="#378c87"];
+  cutover [label="02  ·  SKYBUILD-TASK-CUTOVER\nOne task authority", fillcolor="#e9efff", color="#5c7ad5"];
+  workbench [label="03A  ·  SKYBUILD-TASK-WORKBENCH\nHuman task visibility", fillcolor="#fff4df", color="#bd8b3e"];
+  controls [label="03B  ·  SKYBUILD-EXECUTION-CONTROLS\nControlled execution", fillcolor="#fff4df", color="#bd8b3e"];
+  keeper [label="04A  ·  SKYBUILD-KEEPER-ADOPTION\nWorker lifecycle", fillcolor="#fff4df", color="#bd8b3e"];
+  route [label="04B  ·  AUTHOR / REVIEWER ROUTE\nOne qualified path", fillcolor="#fff4df", color="#bd8b3e"];
+  integration [label="04C  ·  SKYBUILD-BUNDLED-INTEGRATION\nReviewed work lands", fillcolor="#fff4df", color="#bd8b3e"];
+  mvp [label="05  ·  SKYBUILD-SELF-BUILD-MVP\nAcceptance demonstration", fillcolor="#f3e9f8", color="#8f5aaa", penwidth=2.0];
+  bootstrap -> cutover;
+  cutover -> workbench;
+  cutover -> controls;
+  workbench -> keeper;
+  controls -> keeper;
+  workbench -> route;
+  controls -> route;
+  workbench -> integration;
+  controls -> integration;
+  keeper -> mvp;
+  route -> mvp;
+  integration -> mvp;
+  { rank=same; workbench; controls; }
+  { rank=same; keeper; route; integration; }
+}

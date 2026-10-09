@@ -59,6 +59,9 @@ def install_workbench(app: FastAPI, *, dev_reload: bool = False) -> None:
         ("/workbench/assets/workbench-shell.css", "workbench-shell.css", "text/css"),
         ("/workbench/assets/tasks.js", "tasks.js", "text/javascript"),
         ("/workbench/assets/tasks.css", "tasks.css", "text/css"),
+        ("/workbench/assets/milestones.css", "milestones.css", "text/css"),
+        ("/workbench/assets/milestone-roadmap.png", "milestone-roadmap.png", "image/png"),
+        ("/workbench/assets/project-dependency-design.md", "project-dependency-design.md", "text/markdown; charset=utf-8"),
     ):
         app.add_api_route(route, _asset_handler(filename, media_type), methods=["GET"], include_in_schema=False)
 
@@ -72,6 +75,17 @@ def install_workbench(app: FastAPI, *, dev_reload: bool = False) -> None:
         return HTMLResponse(body, headers={
             **HEADERS,
             "Content-Security-Policy": "default-src 'self'; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'",
+        })
+
+    @app.get("/workbench/milestones", include_in_schema=False)
+    def milestones_page() -> HTMLResponse:
+        body = (STATIC / "milestones.html").read_text(encoding="utf-8")
+        body = body.replace("<!--WORKBENCH_NAV-->", navigation.sidebar("milestones"))
+        if dev_reload:
+            body = body.replace("</body>", _dev_script(_revision()) + "</body>")
+        return HTMLResponse(body, headers={
+            **HEADERS,
+            "Content-Security-Policy": "default-src 'self'; img-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'",
         })
 
     @app.get("/workbench/views/{view_name}", include_in_schema=False)
