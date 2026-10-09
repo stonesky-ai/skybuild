@@ -636,7 +636,10 @@ class Store:
                     {'status': 'superseded', 'phase': 'superseded', 'blocker': 'Replaced by split tasks',
                      'next_action': 'Review linked replacement tasks', 'metadata': metadata},
                     operation='split', reason=reason)
-                return {'source': superseded, 'children': created, 'rewired': rewired}
+                # Cascading invalidation can change an earlier returned row later in this transaction.
+                return {'source': self._task(connection, project_id, task_id),
+                        'children': [self._task(connection, project_id, row['task_id']) for row in created],
+                        'rewired': [self._task(connection, project_id, row['task_id']) for row in rewired]}
             return self._idempotent(connection, principal, project_id, 'task.split', idempotency_key, payload, mutation)
 
     def task_lineage(self, principal, project_id, task_id) -> list[dict]:
@@ -752,7 +755,10 @@ class Store:
                         operation='merge', reason=reason))
                     connection.execute('INSERT INTO task_lineage (event_id, project_id, source_task_id, target_task_id, action) VALUES (%s, %s, %s, %s, %s)',
                                        (uuid4(), project_id, source['task_id'], target_id, 'merge'))
-                return {'sources': replaced, 'target': merged, 'rewired': rewired}
+                # Persist the final committed projection in the idempotency receipt.
+                return {'sources': [self._task(connection, project_id, row['task_id']) for row in replaced],
+                        'target': self._task(connection, project_id, target_id),
+                        'rewired': [self._task(connection, project_id, row['task_id']) for row in rewired]}
             return self._idempotent(connection, principal, project_id, 'task.merge', idempotency_key, payload, mutation)
 
     @staticmethod

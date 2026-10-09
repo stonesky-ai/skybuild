@@ -139,3 +139,40 @@ def test_merge_internal_edges_keep_contiguous_journal_snapshots(store, actors):
     assert [event['operation'] for event in history] == ['created', 'dependency_invalidated', 'merge']
     assert history[-1]['before_state'] == history[-2]['after_state']
     assert history[-1]['after_state'] == store.get_task(owner, project, 'b')
+
+
+@pytest.mark.parametrize('action', ['split', 'merge'])
+def test_structural_response_and_retry_use_final_reverse_order_projections(store, actors, action):
+    project, people = actors
+    owner = people['owner']
+    create(store, owner, project, 'a', acceptance_criteria=['A'])
+    create(store, owner, project, 'b', acceptance_criteria=['B'])
+    create(store, owner, project, 'x', dependencies=['a'])
+    create(store, owner, project, 'y', dependencies=['a', 'x'])
+    if action == 'merge':
+        target = {'task_id': 'merged', 'title': 'Merged', 'description': 'Both scopes',
+                  'acceptance_criteria': ['A', 'B'], 'dependencies': [], 'architecture_refs': []}
+        def apply():
+            return store.merge_tasks(owner, project, ['a', 'b'], target, ['y', 'x'],
+                                     {'a': 1, 'b': 1}, 'Combine scopes', 'reverse-merge')
+    else:
+        children = [
+            {'task_id': 'child-a', 'title': 'Child A', 'description': 'Scope A',
+             'acceptance_criteria': ['A'], 'architecture_refs': [], 'dependencies': []},
+            {'task_id': 'child-b', 'title': 'Child B', 'description': 'Scope B',
+             'acceptance_criteria': ['A'], 'architecture_refs': [], 'dependencies': []},
+        ]
+        def apply():
+            return store.split_task(owner, project, 'a', children,
+                                    {'y': ['child-a'], 'x': ['child-b']}, 'Separate scopes', 1, 'reverse-split')
+    result = apply()
+    replay = apply()
+    assert replay == result
+    assert [task['task_id'] for task in result['rewired']] == ['y', 'x']
+    for task in result['rewired']:
+        assert task == store.get_task(owner, project, task['task_id'])
+        assert task == store.task_history(owner, project, task['task_id'])[-1]['after_state']
+    assert result['rewired'][0]['revision'] == 3
+    for key, value in result.items():
+        for task in value if isinstance(value, list) else [value]:
+            assert task == store.get_task(owner, project, task['task_id'])
