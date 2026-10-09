@@ -291,7 +291,11 @@ def test_no_headroom_has_confirmed_no_start(fake_gate, monkeypatch):
     monkeypatch.setattr(gate, "available_memory_bytes", lambda: 1)
     result, code = run()
     assert code == 1 and not calls and "cleaned_up" not in result
-    assert json.loads(path.read_text())["cleanup"] == "not_started"
+    expected = "Available memory below gate minimum: 1 bytes available; 10737418240 bytes required"
+    assert result["error_detail"] == expected
+    record = json.loads(path.read_text())
+    assert record["cleanup"] == "not_started"
+    assert record["error_detail"] == expected
 
 
 def test_default_output_remains_unchanged(fake_gate):
