@@ -14,6 +14,7 @@ from psycopg.types.json import Jsonb
 
 from .contracts import DomainError, Principal, valid_identifier
 from .claims import Claims
+from .admission import CPUAdmission
 
 
 OPERATIONS = frozenset({'tasks:read', 'tasks:write', 'tasks:claim', 'cord:send', 'cord:read', 'cord:handle'})
@@ -92,7 +93,7 @@ def _public(value):
     return value
 
 
-class Store(Claims):
+class Store(Claims, CPUAdmission):
     def __init__(self, dsn: str, expected_database: str):
         self.dsn = dsn
         self.expected_database = _text(expected_database, 'expected_database', 63)
