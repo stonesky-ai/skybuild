@@ -187,7 +187,7 @@ def provision_with_existing_store(tmp_path, monkeypatch):
     return run
 
 
-def test_provision_dispatcher_has_only_project_cord_grants(provision_with_existing_store):
+def test_provision_dispatcher_has_only_project_scoped_grants(provision_with_existing_store):
     class RecordingStore:
         def __init__(self):
             self.principals = {}
@@ -201,7 +201,7 @@ def test_provision_dispatcher_has_only_project_cord_grants(provision_with_existi
     store = RecordingStore()
     provision_with_existing_store(store)
     assert store.principals["pilot_dispatcher"] == (
-        False, {"skybuild": {"cord:read", "cord:send", "cord:handle"}})
+        False, {"skybuild": {"tasks:read", "cord:read", "cord:send", "cord:handle"}})
     assert set(store.principals) == {"pilot_owner", "pilot_dispatcher", "wonko", "wowbagger"}
     assert store.principals["pilot_owner"] == (True, None)
     for worker in ("wonko", "wowbagger"):
@@ -228,7 +228,7 @@ def test_provisioned_dispatcher_receives_worker_result_over_api(
         identity = client.get("/api/v1/me", headers=dispatcher)
         assert identity.status_code == 200
         assert identity.json() == {"principal_id": "pilot_dispatcher", "is_admin": False,
-                                   "grants": {"skybuild": ["cord:handle", "cord:read", "cord:send"]}}
+                                   "grants": {"skybuild": ["cord:handle", "cord:read", "cord:send", "tasks:read"]}}
         base = "/api/v1/projects/skybuild/cord"
         assignment = client.post(base + "/messages", headers=dispatcher, json={
             "recipient": "wonko", "subject": "Pilot assignment", "category": "manual-work",

@@ -19,7 +19,7 @@ class PreflightError(ValueError):
 
 
 _WORKER_SCOPES = {"tasks:read", "cord:read", "cord:send", "cord:handle"}
-_REQUIRED_SCOPES = {"cord:read", "cord:send", "cord:handle"}
+_REQUIRED_SCOPES = {"tasks:read", "cord:read", "cord:send", "cord:handle"}
 _TAILNET_V4 = ipaddress.ip_network("100.64.0.0/10")
 _TAILNET_V6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
 
@@ -88,10 +88,14 @@ def probe_private_api(url: str, project_id: str, token_file: Path, expected_prin
                 raise PreflightError("Token grants are missing or broader than the pilot contract")
             if not isinstance(client.inbox(project_id, limit=1), list):
                 raise PreflightError("Cord inbox response is invalid")
+            tasks = client.list_tasks(project_id, limit=1, by_id=True)
+            if not isinstance(tasks, list) or len(tasks) > 1:
+                raise PreflightError("Task list response is invalid")
     except ClientError as error:
         raise PreflightError(f"SkyBuild API check failed ({error.code})") from None
     return {"ready": True, "project_id": project_id, "principal_id": expected_principal,
-            "scopes": sorted(scopes), "inbox_access": True, "host": endpoint.host}
+            "scopes": sorted(scopes), "inbox_access": True, "task_list_access": True,
+            "host": endpoint.host}
 
 
 def main() -> int:

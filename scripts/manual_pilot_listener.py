@@ -69,6 +69,15 @@ def listen(client, *, project, worker, dispatcher, assignment_id, checkout, base
         def inbox(self, *_args, **_kwargs):
             return [selected]
 
+        def get_task(self, project_id, task_id):
+            check_checkout()
+            if remaining() <= 0:
+                raise ListenerError("Deadline reached before task check; preserve snapshot")
+            _check_identity(client, project, worker)
+            if project_id != project:
+                raise ListenerError("Task check project differs")
+            return client.get_task(project_id, task_id)
+
         def message_action(self, *args, **kwargs):
             check_checkout()
             if remaining() <= 0:

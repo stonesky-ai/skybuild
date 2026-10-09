@@ -185,6 +185,8 @@ def dispatch(repo: Path, brief_path: str, *, worker: str, dispatcher: str, proje
                 raise DispatchError("Pinned assignment no longer verifies") from error
             if envelope["dispatcher"] != dispatcher or envelope["brief_path"] != brief_path:
                 raise DispatchError("Dispatch request differs from pinned assignment")
+            if envelope.get("schema") == "manual-work-v1" and state.get("status") == "sending":
+                raise DispatchError("Legacy sending intent needs manual reconciliation")
             mode = "pinned_retry" if state.get("status") == "sending" else "prepared_retry"
         identity = hashlib.sha256(f"{project}\0{envelope['assignment_id']}".encode()).hexdigest()
         key = f"manual-work-v1:{identity}"
@@ -221,9 +223,41 @@ def dispatch(repo: Path, brief_path: str, *, worker: str, dispatcher: str, proje
                 if (not isinstance(identity_response, dict) or identity_response.get("principal_id") != principal
                         or identity_response.get("is_admin") is not False or not isinstance(grants, dict)
                         or set(grants) != {project} or not isinstance(grants[project], list)
-                        or sorted(grants[project]) != ["cord:handle", "cord:read", "cord:send"]):
+                        or sorted(grants[project]) != ["cord:handle", "cord:read", "cord:send", "tasks:read"]):
                     raise DispatchError("Token does not identify the scoped dispatcher")
                 if state["status"] == "prepared":
+                    if envelope["schema"] == "manual-work-v1":
+                        task = client.get_task(project, envelope["task_id"])
+                        if (not isinstance(task, dict) or task.get("task_id") != envelope["task_id"]
+                                or not isinstance(task.get("status"), str)
+                                or task["status"] not in {"ready", "in-progress"}
+                                or type(task.get("revision")) is not int or task["revision"] < 1):
+                            raise DispatchError("Task is unavailable or not ready for manual dispatch")
+                        envelope = {**envelope, "schema": "manual-work-v2",
+                                    "task_status": task["status"], "task_revision": task["revision"]}
+                        try:
+                            verify_assignment(envelope, repo, worker=worker)
+                        except AssignmentError as error:
+                            raise DispatchError("Task-bound assignment no longer verifies") from error
+                        body = {"recipient": worker, "subject": f"Manual assignment {envelope['assignment_id']}",
+                                "body": json.dumps(envelope, sort_keys=True, separators=(",", ":")),
+                                "category": "manual-work", "urgency": "normal"}
+                        if len(body["body"]) > 32768 or len(body["subject"]) > 500:
+                            raise DispatchError("Cord assignment exceeds message size limit")
+                        intended = {"schema": "manual-dispatch-intent-v1", "project": project,
+                                    "principal": principal, "endpoint": endpoint, "idempotency_key": key,
+                                    "message": body, "assignment": envelope}
+                        if ca_sha256 is not None:
+                            intended["ca_sha256"] = ca_sha256
+                        state = {**intended, "status": "prepared", "result": None}
+                        _atomic_json(path, state)
+                    else:
+                        task = client.get_task(project, envelope["task_id"])
+                        if (not isinstance(task, dict) or task.get("task_id") != envelope["task_id"]
+                                or task.get("status") != envelope["task_status"]
+                                or type(task.get("revision")) is not int
+                                or task["revision"] != envelope["task_revision"]):
+                            raise DispatchError("Task changed before assignment send")
                     if mode == "new" and _published_head(repo) != envelope["base_sha"]:
                         raise DispatchError("Published development head changed before send")
                     state = {**intended, "status": "sending", "result": None}
