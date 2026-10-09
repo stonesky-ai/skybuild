@@ -12,6 +12,43 @@ from .contracts import DomainError
 from .importer import LEDGERS, prepare_import
 from .ledger import build_manifest
 
+_DEPENDENCIES = re.compile(r"(?:^|[.;][ \t]+)Dependencies:[ \t]*")
+_NEXT_FIELD = re.compile(r"[.;][ \t]+(?=[A-Z][A-Za-z -]*:[ \t]*)")
+_TASK_ID = re.compile(r"SKYBUILD-[A-Z0-9]+(?:-[A-Z0-9]+)*")
+
+
+def _dependency_evidence(task: dict, current_ids: set[str]) -> dict:
+    """Expose literal source evidence without converting prose into graph edges."""
+    lines = []
+    values = []
+    for line in task["raw"].splitlines():
+        if not line.lstrip().startswith("- "):
+            continue
+        match = _DEPENDENCIES.search(line.lstrip()[2:])
+        if match:
+            lines.append(line)
+            value = line.lstrip()[2:][match.end():]
+            next_field = _NEXT_FIELD.search(value)
+            values.append(value[:next_field.start()] if next_field else value)
+
+    mentions = [match.group() for value in values for match in _TASK_ID.finditer(value)]
+    resolved = sorted(set(mentions) & current_ids)
+    unknown = sorted(set(mentions) - current_ids)
+    remainder = []
+    for value in values:
+        prose = _TASK_ID.sub("", value).strip(" \t,;.")
+        if prose and prose.lower() != "none":
+            remainder.append(prose)
+    counts = Counter(mentions)
+    return {
+        "dependency_lines": lines,
+        "literal_references": resolved,
+        "unknown_references": unknown,
+        "self_references": [task["task_id"]] if task["task_id"] in mentions else [],
+        "duplicate_references": sorted(ref for ref, count in counts.items() if count > 1),
+        "unresolved_prose": remainder,
+    }
+
 
 def _fields(task: dict, order: int) -> dict:
     raw = task["raw"]
@@ -30,8 +67,8 @@ def _fields(task: dict, order: int) -> dict:
 def audit_ledgers(ledger_dir: Path, contract_path: Path) -> dict:
     """Validate frozen projection, then compare current ledger bytes and fields.
 
-    Current prose dependencies and workflow defaults require human reconciliation;
-    this audit deliberately does not infer or approve their destination values.
+    Dependency evidence and workflow defaults require human reconciliation;
+    this audit deliberately does not infer or approve destination values.
     """
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
     commit = contract.get("commit")
@@ -51,6 +88,27 @@ def audit_ledgers(ledger_dir: Path, contract_path: Path) -> dict:
     current = build_manifest([ledger_dir / name for name in LEDGERS])
     before = {task["task_id"]: _fields(task, order) for order, task in enumerate(frozen["tasks"])}
     after = {task["task_id"]: _fields(task, order) for order, task in enumerate(current["tasks"])}
+    current_ids = set(after)
+    frozen_ids = set(before)
+    frozen_lines = {task["task_id"]: _dependency_evidence(task, current_ids)["dependency_lines"]
+                    for task in frozen["tasks"]}
+    dependency_reconciliation = []
+    for task in current["tasks"]:
+        task_id = task["task_id"]
+        evidence = _dependency_evidence(task, current_ids)
+        if task_id in frozen_ids:
+            explicit = sorted(contract["dependencies"][task_id])
+            literal = set(evidence["literal_references"])
+            evidence["frozen_comparison"] = {
+                "explicit_dependencies": explicit,
+                "frozen_dependency_lines": frozen_lines[task_id],
+                "dependency_lines_changed": evidence["dependency_lines"] != frozen_lines[task_id],
+                "literal_only": sorted(literal - set(explicit)),
+                "frozen_only": sorted(set(explicit) - literal),
+            }
+        else:
+            evidence["frozen_comparison"] = None
+        dependency_reconciliation.append({"task_id": task_id, **evidence})
     changes = []
     for task_id in sorted(before.keys() & after.keys()):
         fields = {field: {"frozen": before[task_id][field], "current": after[task_id][field]}
@@ -70,5 +128,6 @@ def audit_ledgers(ledger_dir: Path, contract_path: Path) -> dict:
         "sources": [{"name": old["name"], "frozen_sha256": old["sha256"], "current_sha256": new["sha256"]}
                     for old, new in zip(frozen["sources"], current["sources"])],
         "added_task_ids": sorted(after.keys() - before.keys()), "removed_task_ids": sorted(before.keys() - after.keys()),
-        "changed_tasks": changes, "warnings": warnings,
+        "changed_tasks": changes, "dependency_reconciliation": dependency_reconciliation,
+        "warnings": warnings,
     }
