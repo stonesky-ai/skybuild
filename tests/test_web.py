@@ -113,6 +113,8 @@ async function run() {
   get("project").value = " project "; get("token").value = "test-token";
   get("connection-form").listeners.submit({preventDefault() {}}); await tick();
   get("task-list").querySelectorAll()[0].listeners.click(); await tick();
+  assert.match(get("full-task-record").textContent, /"task_id": " task "/);
+  assert.match(get("full-task-record").textContent, /"acceptance_criteria": \[/);
   assert.equal(get("lineage").children[0].textContent, " task  → <child> (split)");
   assert.ok(requests.some(request => request.url.endsWith("/tasks/%20task%20/lineage")));
   assert.deepEqual(JSON.parse(get("edit-acceptance").value), ["one\ntwo"]);
@@ -167,6 +169,9 @@ async function run() {
   assert.match(get("structure-preview").textContent, /"description": "All scope"/);
   assert.match(get("structure-preview").textContent, /" dependent "/);
   assert.equal(get("apply-structure").disabled, false);
+  get("logout").listeners.click();
+  assert.equal(get("full-task-record").textContent, "No task selected.");
+  assert.equal(get("lineage").children.length, 0);
 }
 run().catch(error => { console.error(error); process.exitCode = 1; });
 '''

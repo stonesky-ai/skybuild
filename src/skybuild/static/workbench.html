@@ -51,6 +51,7 @@
       <section class="panel detail" aria-labelledby="detail-title">
         <div class="section-heading"><h2 id="detail-title">Selected task</h2><button id="refresh-selected" type="button" disabled>Refresh selected task</button></div>
         <p id="selection">Select a task to view its definition and history.</p>
+        <details id="full-task"><summary>Full task record and provenance</summary><pre id="full-task-record">No task selected.</pre></details>
         <form id="edit-form">
           <label for="edit-title">Title</label><input id="edit-title" required maxlength="500" disabled>
           <label for="edit-description">Description</label><textarea id="edit-description" required maxlength="32768" rows="8" disabled></textarea>

@@ -49,6 +49,7 @@
     byId("lineage").replaceChildren();
     byId("task-count").textContent = "Not connected";
     byId("selection").textContent = "Select a task to view its definition and history.";
+    byId("full-task-record").textContent = "No task selected.";
     controls();
   }
 
@@ -125,6 +126,7 @@
     const history = await request(`${path}/history?limit=100&offset=0`);
     const lineage = await request(`${path}/lineage`);
     selected = task; stale = false;
+    byId("full-task-record").textContent = JSON.stringify(task, null, 2);
     structuralPlan = null; byId("structure-preview").textContent = "No plan previewed.";
     byId("selection").textContent = `${task.task_id} · Revision ${task.revision}`;
     for (const [id, field] of [
