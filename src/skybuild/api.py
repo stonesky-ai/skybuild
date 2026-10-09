@@ -301,6 +301,11 @@ def create_app(store: Any) -> FastAPI:
     def get_task(project_id: ProjectPath, task_id: RecordPath, actor: Actor) -> dict:
         return store.get_task(actor, project_id, task_id)
 
+    @app.get(base + "/tasks/{task_id}/execution-status")
+    def execution_status(project_id: ProjectPath, task_id: RecordPath, actor: Actor,
+                         limit: Limit = 20) -> dict:
+        return store.execution_status(actor, project_id, task_id, limit=limit)
+
     @app.patch(base + "/tasks/{task_id}")
     def update_task(project_id: ProjectPath, task_id: RecordPath, body: TaskFields, actor: Actor, idem: Key, expected: Revision) -> dict:
         return store.update_task(actor, project_id, task_id, body.model_dump(mode="json", exclude_unset=True), expected, idem)
