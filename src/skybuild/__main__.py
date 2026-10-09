@@ -56,6 +56,8 @@ def main(argv: list[str] | None = None) -> int:
     provision.add_argument("--token-stdin", action="store_true")
     serve = commands.add_parser("serve", help="Serve an already migrated database on loopback")
     serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument("--host", choices=("127.0.0.1", "0.0.0.0"), default="127.0.0.1",
+                       help="Bind inside a private container; keep the published host port on loopback")
     for command in ("tasks", "get", "history"):
         view = commands.add_parser(command, help="Read tasks through the authenticated API")
         view.add_argument("project_id")
@@ -222,7 +224,7 @@ def main(argv: list[str] | None = None) -> int:
             from .api import create_app
             import uvicorn
 
-            uvicorn.run(create_app(store), host="127.0.0.1", port=args.port)
+            uvicorn.run(create_app(store), host=args.host, port=args.port)
         return 0
     except (ValueError, DomainError, ClientError) as error:
         # Driver failures may contain connection strings; never print arbitrary exceptions.

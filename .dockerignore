@@ -1,0 +1,14 @@
+# The manual pilot image needs only its package and pinned dependencies.
+# Exclude the checkout's ignored secrets, virtualenv, Git data and graph index.
+**
+!pyproject.toml
+!src/
+!src/**
+!ops/
+!ops/manual-pilot/
+!ops/manual-pilot/Dockerfile
+!ops/manual-pilot/requirements.txt
+**/.env
+**/.env.*
+**/__pycache__/
+**/*.pyc
