@@ -69,7 +69,7 @@ def verify_backup(path: Path, expected_sha256: str, repository: Path, *,
     except (OSError, subprocess.SubprocessError) as error:
         raise DomainError("cutover_backup", "Could not inspect the PostgreSQL backup", 409) from error
     archive_text = checked.stdout.decode("utf-8", errors="replace")
-    archive_databases = re.findall(r"^;\s+Database: ([^\r\n]*)\s*$", archive_text, re.MULTILINE)
+    archive_databases = re.findall(r"^;\s+(?:Database|dbname): ([^\r\n]*)\s*$", archive_text, re.MULTILINE)
     if (checked.returncode or not checked.stdout or len(checked.stdout) > 1_048_576
             or archive_databases != [expected_database]):
         raise DomainError("cutover_backup", "PostgreSQL backup archive listing failed", 409)
