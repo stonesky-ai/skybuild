@@ -1,6 +1,6 @@
 # SkyBuild current tasks
 
-Authority: Git-backed planning ledger, revision A34, 2026-10-08. API cutover has not occurred. See [architecture section 4](architecture.md#4-temporary-task-authority-and-transition) for the lifecycle. Order below is proposed priority, not execution authorization. Implementation remains unauthorized.
+Authority: Git-backed planning ledger, revision A35, 2026-10-08. API cutover has not occurred. See [architecture section 4](architecture.md#4-temporary-task-authority-and-transition) for the lifecycle. Order below is proposed priority. The owner authorizes repository implementation and isolated validation toward the parallel MVP; live authority cutover, unqualified inference, paid starts and deployment retain separate controls.
 
 Each task ID lives in exactly one ledger. Related ledgers: [deferred](deferred.md), [alreadydone](alreadydone.md). These are new SkyBuild project records, not updates to the old SkyKeep queue. Until claims/fencing exist, coordinate any later authorized execution manually and serially.
 
@@ -27,6 +27,14 @@ Each task ID lives in exactly one ledger. Related ledgers: [deferred](deferred.m
 - Brief: establish hello-world/version/liveness/readiness first, then project-scoped tasks/history and durable mailbox with shared CLI/Python client. Preserve full task briefs, revision conflicts, owner/admin access, separate project-scoped worker tokens and retry deduplication. Provide the initial private Tailscale website/API endpoint for all intended enrolled boxes, with application scopes still enforced and PostgreSQL kept local. No worker launch path.
 - Acceptance: implementation-plan area 2 checks pass against disposable dedicated PostgreSQL, including restart persistence and refusal of wrong targets/credentials. A manual client can retrieve a task and exchange a handoff.
 - Architecture: sections 3, 5–7. Model requirement when selected: size/capability to be chosen from the actual brief; no vendor fixed.
+
+## SKYBUILD-MANUAL-WORKER-PILOT — Run two bounded parallel coding assignments
+
+- Status: in-progress (preflight only). Phase: access and CLI preparation. Responsible: lead dispatcher. Next action: verify restricted runtime database role, private HTTPS/API access and scoped credentials from `wonko` and `wowbaggers`; finish thin Cord CLI commands before dispatch.
+- Area: pre-MVP parallel coding. Dependencies: usable SKYBUILD-BOOTSTRAP Cord and two disjoint committed task briefs; no dependency on automatic worker admission.
+- Brief: manually relay versioned, pinned assignments/results through Cord while Git-backed ledgers remain task authority. Start one interactive worker per box; each owns a branch/worktree, checks and pushed head. Main session coordinates exact-head independent review and frozen bundle integration.
+- Acceptance: both boxes exchange durable authenticated messages; two disjoint tasks overlap without duplicate ownership on lost/duplicate delivery; exact heads receive checks and separate review; accepted work reaches verified bundle publication. Controller remains usable. No worker daemon, second queue, direct task merge or implied live authority switch.
+- Architecture: section 2. Plan: [manual worker pilot](implementation/manual_worker_pilot.md) in the pre-MVP parallel path.
 
 ## SKYBUILD-DAILY-DB-BACKUP — Commit a scheduled PostgreSQL dump daily
 
@@ -77,7 +85,7 @@ Each task ID lives in exactly one ledger. Related ledgers: [deferred](deferred.m
 ## SKYBUILD-BUNDLED-INTEGRATION — Automatically integrate reviewed task bundles
 
 - Status: proposed. Priority: normal. Area: integration. Dependencies: SKYBUILD-BOOTSTRAP, SKYBUILD-EXECUTION-CONTROLS and relevant migrated integration/gate authority for legacy projects.
-- Brief: adapt integration-set/scan concepts into a deterministic fenced pipeline that collects ready reviewed tasks, freezes heads/base/membership, gates a combined candidate and automatically publishes its verified result. Tasks arriving during a long gate collect for the next bundle. Select coalescing/size/age limits and the bundle PR/publication mechanism; core bundling is not deferred cloud-batch optimization.
+- Brief: adapt integration-set/scan concepts into a deterministic fenced pipeline. Keep each code task on its own pushed branch with cheap checks and independent exact-head review; create no individual task PR. Collect ready heads, admit urgent work at the next opportunity, coalesce routine work for at most five minutes, freeze heads/base/membership/policy, run one full combined gate and publish the exact passed candidate through one bundle PR. Arrivals after freeze collect for the next bundle. Keep one standing dev-to-main PR and run its full gate only at cycle closeout. Select remaining bundle size/failure limits; optional pre-bundler preparation is deferred under SKYBUILD-PREBUNDLE-PRECHECK.
 - Acceptance: one authorized integrator per target; exact tested result and confirmed per-task inclusion; new arrivals do not mutate active candidates; head/base changes invalidate evidence; mixed profiles receive required combined gates; failures/subsets/retries and unknown merge acknowledgment remain bounded and honest. Task acceptance and post-merge cleanup follow verified publication. CPU status exposes backlog/age/gate time without model polling; runtime promotion remains separately controlled.
 - A33 refinement: MVP includes existing applicable checks and separate-session adversarial review for every code task, actionable fix/test findings, immutable dispositions and bounded correction. Dedicated complexity/size gates, metric reports, GUI controls and scoped legacy baselines are retained but deferred under SKYBUILD-QUALITY-GATES; they do not block MVP. Stale evidence or self-approval cannot produce acceptance. See [review policy](review_policy.md) and [ADR 0033](../adr/quality.md#adr-0033).
 - A30 refinement: union required checks; qualify remote head/base enforcement and trusted result origin. Preserve unresolved publication intents across owner changes/timeouts. Journal every member's inclusion, exclusion, failure and final outcome with a known next action. Adapt mergeprep facts/reasons rather than reproducing its old Git/JSON authority.
