@@ -15,6 +15,31 @@ from .ledger import build_manifest
 _DEPENDENCIES = re.compile(r"(?:^|[.;][ \t]+)Dependencies:[ \t]*")
 _NEXT_FIELD = re.compile(r"[.;][ \t]+(?=[A-Z][A-Za-z -]*:[ \t]*)")
 _TASK_ID = re.compile(r"SKYBUILD-[A-Z0-9]+(?:-[A-Z0-9]+)*")
+_WORKFLOW_FIELDS = {"phase": "Phase", "responsible": "Responsible", "next_action": "Next action"}
+
+
+def _workflow_evidence(task: dict) -> dict:
+    """Retain each labeled occurrence; no source value is an approved default."""
+    fields = {}
+    for field, label in _WORKFLOW_FIELDS.items():
+        pattern = re.compile(r"(?:^|[.;][ \t]+)" + re.escape(label) + r":[ \t]*")
+        occurrences = []
+        for line in task["raw"].splitlines():
+            bullet = line.lstrip()
+            if not bullet.startswith("- "):
+                continue
+            text = bullet[2:]
+            for match in pattern.finditer(text):
+                value = text[match.end():]
+                next_field = _NEXT_FIELD.search(value)
+                occurrences.append({"line": line, "value": value[:next_field.start()] if next_field else value})
+        empty = any(not item["value"].strip(" \t.;") for item in occurrences)
+        fields[field] = {
+            "occurrences": occurrences, "missing": not occurrences,
+            "repeated": len(occurrences) > 1, "empty": empty,
+            "state": "missing" if not occurrences else "ambiguous" if empty or len(occurrences) > 1 else "unreviewed",
+        }
+    return fields
 
 
 def _dependency_evidence(task: dict, current_ids: set[str]) -> dict:
@@ -93,6 +118,9 @@ def audit_ledgers(ledger_dir: Path, contract_path: Path) -> dict:
     frozen_lines = {task["task_id"]: _dependency_evidence(task, current_ids)["dependency_lines"]
                     for task in frozen["tasks"]}
     dependency_reconciliation = []
+    frozen_workflow = {task["task_id"]: _workflow_evidence(task) for task in frozen["tasks"]}
+    imported = {record["task_id"]: record for record in plan["records"]}
+    workflow_reconciliation = []
     for task in current["tasks"]:
         task_id = task["task_id"]
         evidence = _dependency_evidence(task, current_ids)
@@ -109,6 +137,15 @@ def audit_ledgers(ledger_dir: Path, contract_path: Path) -> dict:
         else:
             evidence["frozen_comparison"] = None
         dependency_reconciliation.append({"task_id": task_id, **evidence})
+        workflow = _workflow_evidence(task)
+        workflow_reconciliation.append({
+            "task_id": task_id, "source": task["source"], "fields": workflow,
+            "frozen_comparison": {
+                "importer_defaults": {field: imported[task_id][field] for field in _WORKFLOW_FIELDS},
+                "fields": frozen_workflow[task_id],
+                "source_changed": workflow != frozen_workflow[task_id] or task["source"] != before[task_id]["source"],
+            } if task_id in frozen_ids else None,
+        })
     changes = []
     for task_id in sorted(before.keys() & after.keys()):
         fields = {field: {"frozen": before[task_id][field], "current": after[task_id][field]}
@@ -129,5 +166,6 @@ def audit_ledgers(ledger_dir: Path, contract_path: Path) -> dict:
                     for old, new in zip(frozen["sources"], current["sources"])],
         "added_task_ids": sorted(after.keys() - before.keys()), "removed_task_ids": sorted(before.keys() - after.keys()),
         "changed_tasks": changes, "dependency_reconciliation": dependency_reconciliation,
+        "workflow_reconciliation": workflow_reconciliation,
         "warnings": warnings,
     }
