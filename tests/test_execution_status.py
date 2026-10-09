@@ -34,11 +34,18 @@ def effect(store, owner, project, request, suffix):
 def captured_state(store, project):
     tables = ('tasks', 'task_claims', 'cpu_reservations', 'task_effects',
               'observation_events', 'observation_projections', 'claim_journal',
-              'cpu_journal', 'effect_journal', 'task_journal')
+              'cpu_journal', 'task_journal')
     with store._connection() as connection:
-        return {table: connection.execute('SELECT to_jsonb(t) AS row FROM ' + table +
-                                         ' t WHERE project_id = %s ORDER BY to_jsonb(t)::text',
-                                         (project,)).fetchall() for table in tables}
+        captured = {table: connection.execute('SELECT to_jsonb(t) AS row FROM ' + table +
+                                             ' t WHERE project_id = %s ORDER BY to_jsonb(t)::text',
+                                             (project,)).fetchall() for table in tables}
+        # Effect journals inherit project identity through their immutable
+        # operation reference; the journal has no project_id column.
+        captured['effect_journal'] = connection.execute(
+            'SELECT to_jsonb(j) AS row FROM effect_journal j '
+            'JOIN task_effects e ON e.operation_id = j.operation_id '
+            'WHERE e.project_id = %s ORDER BY to_jsonb(j)::text', (project,)).fetchall()
+        return captured
 
 
 @pytest.mark.parametrize('limit', [0, -1, 101, True, 1.5, '20'])
