@@ -1,0 +1,19 @@
+{
+  "schema": "manual-work-brief-v1",
+  "assignment_id": "MWP-20261009-WONKO-LISTENER-QUALIFICATION-011",
+  "task_id": "SKYBUILD-MANUAL-WORKER-PILOT",
+  "worker": "wonko",
+  "dispatcher": "pilot_dispatcher",
+  "branch": "task/manual-rest-listener-qualification-worker-011",
+  "owned_paths": [
+    "docs/design/implementation/manual_pilot_listener.md"
+  ],
+  "checks": [
+    "This is harmless CPU-only REST listener qualification. Do not execute a task, edit source, create a task branch, call an inference endpoint, queue Codex, launch a model, start a service/timer/unit, or spend money.",
+    "Arm the published manual_pilot_listener before dispatcher sends this assignment. Pin this assignment ID, the exact published base, committed brief path and SHA-256, worker wonko and sender pilot_dispatcher. Use only existing own worker token and approved public CA file references.",
+    "Use an isolated clean pinned qualification checkout and private state/destination separate from assignment010. Set approved-until exactly 2026-10-09T15:20:53Z and duration no greater than 600 seconds. Do not acknowledge or handle assignment010 or any unrelated message.",
+    "The listener must save and fsync the verified private snapshot before submitting receipt, then exit. Record sanitized timing, exact source/base, assignment/message IDs and receipt outcome. Do not mark the message handled through the listener; any matching-only cleanup requires parent coordination."
+  ],
+  "model_limit": "No model calls or task execution. One CPU-only listener; existing worker token/public CA only. Maximum 600 seconds; approval cutoff 2026-10-09T15:20:53Z. No service, timer, daemon or worker queue.",
+  "next_action": "Wait for parent clearance to arm the bounded listener. Parent independently dispatches only after observing that the listener is waiting. Save and receipt only this harmless expected assignment, then exit and report sanitized evidence. Do not execute this brief as coding instructions."
+}
