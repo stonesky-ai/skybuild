@@ -1,0 +1,181 @@
+"""One-shot marshall checks use real isolated Git, explicit reviews, and fake REST."""
+import json
+import os
+import subprocess
+from pathlib import Path
+import sys
+from types import SimpleNamespace
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import marshall_bundle as marshall
+from skybuild.bundling import BundlePlanningError
+from test_prepare_bundle import repository, git  # noqa: F401
+
+
+class API:
+    def __init__(self, ids):
+        self.tasks = {task_id: {"task_id": task_id, "status": "ready", "revision": 1,
+                               "phase": "ready-for-work", "dependencies": []} for task_id in ids}
+        self.reads = []
+
+    def whoami(self):
+        return {"principal_id": "owner"}
+
+    def get_task(self, project, task_id):
+        assert project == "skybuild"
+        self.reads.append(task_id)
+        return dict(self.tasks[task_id])
+
+
+@pytest.fixture
+def catalog(repository, monkeypatch):
+    root, source, _, values, member, _ = repository
+    monkeypatch.setattr(marshall, "verify_skybuild", lambda checkout: root)
+    def build(names, *, conflicting=False):
+        for name in names:
+            head = member(name, "shared.txt", name + "\n" if conflicting else "same reviewed change\n")
+            ref = "refs/heads/task/" + name
+            git(root, "branch", "task/" + name, head)
+            git(root, "push", "origin", ref)
+            values["members"][-1]["ref"] = ref
+        path = source.parent / "catalog.json"
+        path.write_text(json.dumps({**values, "schema": "skybuild.marshall-input.v1"}))
+        return root, path, source.parent / "marshall", API(names)
+    return build
+
+
+def invoke(inputs, **kwargs):
+    root, path, output, client = inputs
+    return marshall.marshall(root, path, output, client, project="skybuild", principal="owner", **kwargs)
+
+
+def test_five_related_heads_prepare_without_publication(catalog):
+    inputs = catalog(["one", "two", "three", "four", "five"])
+    report = invoke(inputs, prepare_next=True)
+    assert len(report["bundles"]) == 1
+    assert len(report["bundles"][0]["task_ids"]) == 5
+    assert report["bundles"][0]["shared_paths"] == ["shared.txt"]
+    assert report["prepared"]["ok"] is True
+    assert report["published"] is False and report["gate"] is None
+    candidate = Path(report["prepared"]["candidate"])
+    for member in report["prepared"]["included"]:
+        git(candidate, "merge-base", "--is-ancestor", member["head"], "HEAD")
+    with pytest.raises(BundlePlanningError, match="new output"):
+        invoke(inputs)
+
+
+def test_blocked_and_in_flight_tasks_do_not_prepare_or_fetch(catalog):
+    inputs = catalog(["one", "two"])
+    root, path, _, client = inputs
+    client.tasks["one"]["status"] = "blocked"
+    values = json.loads(path.read_text())
+    values["in_flight"] = ["two"]
+    path.write_text(json.dumps(values))
+    before = git(root, "worktree", "list", "--porcelain")
+    report = invoke(inputs, prepare_next=True)
+    assert report["bundles"] == [] and report["prepared"] is None
+    assert len(report["skipped"]) == 2
+    assert client.reads == ["one"]
+    assert git(root, "worktree", "list", "--porcelain") == before
+
+
+def test_task_change_before_preparation_preserves_failure_without_candidate(catalog):
+    inputs = catalog(["one"])
+    _, _, output, client = inputs
+    read = client.get_task
+    def change(project, task_id):
+        task = read(project, task_id)
+        if len(client.reads) > 1:
+            task["revision"] = 2
+        return task
+    client.get_task = change
+    with pytest.raises(BundlePlanningError, match="API task changed"):
+        invoke(inputs, prepare_next=True)
+    report = json.loads((output / "report.json").read_text())
+    assert report["error"] == "BundlePlanningError"
+    assert not (output / "next" / "candidate").exists()
+
+
+def test_conflict_is_retained_and_never_reported_green(catalog):
+    inputs = catalog(["one", "two"], conflicting=True)
+    with pytest.raises(marshall.preparation.PreparationError):
+        invoke(inputs, prepare_next=True)
+    output = inputs[2]
+    child = json.loads((output / "next" / "report.json").read_text())
+    assert child["ok"] is False and child["conflicts"] == ["shared.txt"]
+    assert (output / "next" / "candidate").exists()
+    report = json.loads((output / "report.json").read_text())
+    assert report["gate_passed"] is False and report["published"] is False
+
+
+@pytest.mark.parametrize("ok, cleanup", [(False, True), (True, False), (True, True)])
+def test_gate_requires_success_cleanup_and_unchanged_snapshot(catalog, ok, cleanup):
+    inputs = catalog(["one"])
+    client = inputs[3]
+    def gate(argv, **kwargs):
+        assert argv[-2:] == ["--min-available-gib", "6"]
+        assert Path(kwargs["cwd"]).name == "candidate"
+        return SimpleNamespace(returncode=0 if ok else 1,
+                               stdout=json.dumps({"ok": ok, "cleaned_up": cleanup}))
+    report = invoke(inputs, gate_next=True, gate_runner=gate)
+    assert report["gate_passed"] is (ok and cleanup)
+    assert report["published"] is False
+    if not ok or not cleanup:
+        assert report["next_action"].startswith("Resolve failed gate")
+
+
+def test_task_change_during_passing_gate_blocks_green_handoff(catalog):
+    inputs = catalog(["one"])
+    def gate(*args, **kwargs):
+        inputs[3].tasks["one"]["revision"] = 2
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"ok": True, "cleaned_up": True}))
+    with pytest.raises(BundlePlanningError, match="API task changed"):
+        invoke(inputs, gate_next=True, gate_runner=gate)
+    report = json.loads((inputs[2] / "report.json").read_text())
+    assert report["gate_passed"] is False
+
+
+def test_cli_imports_its_own_checkout_with_a_shared_interpreter(tmp_path):
+    script = Path(marshall.__file__).resolve()
+    environment = dict(os.environ)
+    environment.pop("PYTHONPATH", None)
+    result = subprocess.run([sys.executable, str(script), "--help"], cwd=tmp_path,
+                            env=environment, text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert "--gate-next" in result.stdout
+
+
+@pytest.mark.parametrize("result", ["[]", "not-json"])
+def test_invalid_gate_result_preserves_red_evidence(catalog, result):
+    inputs = catalog(["one"])
+    def gate(*args, **kwargs):
+        return SimpleNamespace(returncode=0, stdout=result)
+    with pytest.raises(ValueError):
+        invoke(inputs, gate_next=True, gate_runner=gate)
+    report = json.loads((inputs[2] / "report.json").read_text())
+    assert report["gate_passed"] is False and report["published"] is False
+    assert report["error"] in {"BundlePlanningError", "JSONDecodeError"}
+
+
+def test_review_requires_complete_contract(catalog):
+    inputs = catalog(["one"])
+    values = json.loads(inputs[1].read_text())
+    del values["members"][0]["review"]["reviewer"]
+    inputs[1].write_text(json.dumps(values))
+    with pytest.raises(BundlePlanningError):
+        invoke(inputs)
+
+
+def test_changed_frozen_evidence_blocks_green_gate(catalog):
+    inputs = catalog(["one"])
+    def gate(*args, **kwargs):
+        evidence = inputs[2] / "evidence" / "001.txt"
+        evidence.chmod(0o600)
+        evidence.write_text("changed")
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"ok": True, "cleaned_up": True}))
+    with pytest.raises(BundlePlanningError, match="Frozen evidence changed"):
+        invoke(inputs, gate_next=True, gate_runner=gate)
+    report = json.loads((inputs[2] / "report.json").read_text())
+    assert report["gate_passed"] is False

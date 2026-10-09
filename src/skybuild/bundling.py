@@ -19,7 +19,6 @@ class BundlePlanningError(ValueError):
 class BundleCandidate:
     task_id: str
     status: str
-    phase: str
     ref: str
     head_sha: str
     base_sha: str
@@ -33,11 +32,12 @@ class BundleCandidate:
     def __post_init__(self) -> None:
         if not isinstance(self.task_id, str) or not self.task_id.strip():
             raise BundlePlanningError("Task IDs must be nonempty text")
-        if self.status != "in-progress" or self.phase != "ready-for-integration":
+        if self.status not in {"ready", "in-progress"}:
             raise BundlePlanningError(f"{self.task_id}: task is not ready for integration")
         if not isinstance(self.ref, str) or not self.ref.startswith("refs/heads/task/"):
             raise BundlePlanningError(f"{self.task_id}: member ref must name a task branch")
-        if not SHA_RE.fullmatch(self.head_sha) or not SHA_RE.fullmatch(self.base_sha):
+        if (not isinstance(self.head_sha, str) or not isinstance(self.base_sha, str)
+                or not SHA_RE.fullmatch(self.head_sha) or not SHA_RE.fullmatch(self.base_sha)):
             raise BundlePlanningError(f"{self.task_id}: use full lowercase base and head SHAs")
         if self.review_verdict != "pass" or self.review_head_sha != self.head_sha:
             raise BundlePlanningError(f"{self.task_id}: exact-head review has not passed")
@@ -67,7 +67,7 @@ class BundleGroup:
 @dataclass(frozen=True)
 class BundlePlan:
     bundles: tuple[BundleGroup, ...]
-    unbundled: tuple[str, ...]
+    excluded: tuple[str, ...]
 
 
 def _shared_paths(left: BundleCandidate, right: BundleCandidate, ignored: tuple[str, ...]) -> set[str]:
@@ -104,25 +104,29 @@ def _ordered(members: Iterable[BundleCandidate]) -> tuple[BundleCandidate, ...]:
 def plan_bundles(
     candidates: Iterable[BundleCandidate],
     *,
-    max_members: int = 8,
+    max_members: int = 20,
     ignored_paths: Iterable[str] = (),
     already_bundled: Iterable[str] = (),
     in_flight: Iterable[str] = (),
 ) -> BundlePlan:
-    """Form bounded groups by changed-file overlap or explicit task dependency.
+    """Prefer related work while coalescing every eligible head up to the cap.
 
-    Candidates must already satisfy task readiness and exact-head review checks.
-    SkyBuild task IDs share a project prefix, so ID-prefix similarity carries no weight.
+    Exact-head reviews establish integration readiness; task status comes from
+    authority. Dependencies order members across bundles as well as within them.
+    Task ID prefixes do not imply related code. The publisher still owns freeze,
+    the full combined gate, and final remote-ref/inclusion verification.
     """
-    if type(max_members) is not int or max_members < 2:
-        raise BundlePlanningError("max_members must be an integer of at least two")
+    if type(max_members) is not int or not 2 <= max_members <= 20:
+        raise BundlePlanningError("max_members must be an integer from two to twenty")
     ignored = tuple(sorted(set(ignored_paths)))
     excluded = set(already_bundled) | set(in_flight)
+    skipped: set[str] = set()
     remaining: dict[str, BundleCandidate] = {}
     refs: set[str] = set()
     bases: set[str] = set()
     for candidate in candidates:
         if candidate.task_id in excluded:
+            skipped.add(candidate.task_id)
             continue
         if candidate.task_id in remaining:
             raise BundlePlanningError(f"Duplicate task ID: {candidate.task_id}")
@@ -133,53 +137,29 @@ def plan_bundles(
         remaining[candidate.task_id] = candidate
     if len(bases) > 1:
         raise BundlePlanningError("Every candidate must use the same frozen base")
+    _ordered(remaining.values())  # Detect cycles before bounded grouping can hide one.
 
     bundles: list[BundleGroup] = []
     while remaining:
         ids = sorted(remaining)
-        seed = max(
-            ids,
-            key=lambda task_id: (
-                sum(_edge_weight(remaining[task_id], remaining[other], ignored)
-                    for other in ids if other != task_id),
-                task_id,
-            ),
-        )
-        group_ids = [seed]
+        group_ids: list[str] = []
         while len(group_ids) < max_members:
-            choices = [
-                task_id for task_id in ids
-                if task_id not in group_ids
-                and any(_edge_weight(remaining[task_id], remaining[member], ignored) for member in group_ids)
-            ]
+            choices = [task_id for task_id in ids if task_id not in group_ids
+                       and (remaining[task_id].dependencies & remaining.keys()) <= set(group_ids)]
             if not choices:
                 break
-            next_id = max(
-                choices,
-                key=lambda task_id: (
-                    sum(_edge_weight(remaining[task_id], remaining[member], ignored) for member in group_ids),
-                    task_id,
-                ),
-            )
-            group_ids.append(next_id)
-        if len(group_ids) < 2:
-            break
-
+            def score(task_id):
+                peers = group_ids or [other for other in ids if other != task_id]
+                return (sum(_edge_weight(remaining[task_id], remaining[other], ignored)
+                            for other in peers), task_id)
+            group_ids.append(max(choices, key=score))
         group = _ordered(remaining[task_id] for task_id in group_ids)
         member_ids = {member.task_id for member in group}
-        shared = sorted({
-            path
-            for index, left in enumerate(group)
-            for right in group[index + 1:]
-            for path in _shared_paths(left, right, ignored)
-        })
-        dependencies = sorted({
-            (dependency, member.task_id)
-            for member in group
-            for dependency in member.dependencies & member_ids
-        })
+        shared = sorted({path for index, left in enumerate(group) for right in group[index + 1:]
+                         for path in _shared_paths(left, right, ignored)})
+        dependencies = sorted({(dependency, member.task_id) for member in group
+                               for dependency in member.dependencies & member_ids})
         bundles.append(BundleGroup(group, tuple(shared), tuple(dependencies)))
         for task_id in group_ids:
             remaining.pop(task_id)
-
-    return BundlePlan(tuple(bundles), tuple(sorted(remaining)))
+    return BundlePlan(tuple(bundles), tuple(sorted(skipped)))

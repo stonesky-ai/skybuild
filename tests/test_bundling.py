@@ -17,14 +17,12 @@ def candidate(
     dependencies: set[str] | None = None,
     base: str = BASE,
     status: str = "in-progress",
-    phase: str = "ready-for-integration",
     reviewed_head: str | None = None,
 ) -> BundleCandidate:
     head = hashlib.sha1(name.encode()).hexdigest()
     return BundleCandidate(
         task_id=f"SKYBUILD-{name}",
         status=status,
-        phase=phase,
         ref=f"refs/heads/task/{name.lower()}",
         head_sha=head,
         base_sha=base,
@@ -49,25 +47,23 @@ def test_five_manual_worker_cases_group_by_overlapping_paths():
     plan = plan_bundles(tasks)
 
     assert [[item.task_id for item in group.members] for group in plan.bundles] == [[
-        "SKYBUILD-MANUAL-A", "SKYBUILD-MANUAL-B", "SKYBUILD-MANUAL-C", "SKYBUILD-MANUAL-D"
+        "SKYBUILD-MANUAL-A", "SKYBUILD-MANUAL-B", "SKYBUILD-MANUAL-C", "SKYBUILD-MANUAL-D",
+        "SKYBUILD-MANUAL-E"
     ]]
     assert plan.bundles[0].shared_paths == (
         "src/skybuild/manual_assignment.py",
         "src/skybuild/manual_dispatch.py",
         "tests/test_manual_assignment.py",
     )
-    assert plan.unbundled == ("SKYBUILD-MANUAL-E",)
+    assert plan.excluded == ()
 
 
-def test_common_ignored_path_does_not_create_false_overlap():
-    plan = plan_bundles(
-        [candidate("A", {"docs/design/implementation_plan.md"}),
-         candidate("B", {"docs/design/implementation_plan.md"})],
-        ignored_paths=("docs/design/*",),
-    )
-
-    assert plan.bundles == ()
-    assert plan.unbundled == ("SKYBUILD-A", "SKYBUILD-B")
+def test_ignored_paths_do_not_count_as_relatedness():
+    tasks = [candidate("A", {"docs/shared.md", "src/shared.py"}),
+             candidate("Z", {"docs/shared.md"}), candidate("C", {"src/shared.py"})]
+    plan = plan_bundles(tasks, max_members=2, ignored_paths=("docs/*",))
+    assert {item.task_id for item in plan.bundles[0].members} == {"SKYBUILD-A", "SKYBUILD-C"}
+    assert plan.bundles[0].shared_paths == ("src/shared.py",)
 
 
 def test_dense_group_respects_maximum_and_leaves_singleton_unbundled():
@@ -75,10 +71,10 @@ def test_dense_group_respects_maximum_and_leaves_singleton_unbundled():
 
     plan = plan_bundles(tasks, max_members=2)
 
-    assert [len(group.members) for group in plan.bundles] == [2, 2]
+    assert [len(group.members) for group in plan.bundles] == [2, 2, 1]
     grouped = {item.task_id for group in plan.bundles for item in group.members}
-    assert len(grouped) == 4
-    assert len(plan.unbundled) == 1
+    assert len(grouped) == 5
+    assert plan.excluded == ()
 
 
 def test_dependency_order_precedes_dependent_within_bundle():
@@ -97,7 +93,6 @@ def test_dependency_order_precedes_dependent_within_bundle():
 @pytest.mark.parametrize("changes, message", [
     ({"reviewed_head": "f" * 40}, "exact-head review"),
     ({"status": "blocked"}, "not ready for integration"),
-    ({"phase": "working"}, "not ready for integration"),
 ])
 def test_unready_or_stale_review_is_refused(changes, message):
     with pytest.raises(BundlePlanningError, match=message):
@@ -113,5 +108,17 @@ def test_previous_bundle_and_in_flight_members_are_not_selected_twice():
         in_flight={"SKYBUILD-B"},
     )
 
-    assert plan.bundles == ()
-    assert plan.unbundled == ("SKYBUILD-C",)
+    assert [item.task_id for item in plan.bundles[0].members] == ["SKYBUILD-C"]
+    assert plan.excluded == ("SKYBUILD-A", "SKYBUILD-B")
+
+
+def test_dependencies_order_split_bundles_and_cycles_cannot_hide_across_cap():
+    a = candidate("A", {"a.py"})
+    b = candidate("B", {"b.py"}, dependencies={a.task_id})
+    c = candidate("C", {"c.py"}, dependencies={b.task_id})
+    plan = plan_bundles([c, b, a], max_members=2)
+    assert [[member.task_id for member in group.members] for group in plan.bundles] == [
+        [a.task_id, b.task_id], [c.task_id]]
+    a = candidate("A", {"a.py"}, dependencies={c.task_id})
+    with pytest.raises(BundlePlanningError, match="cycle"):
+        plan_bundles([a, b, c], max_members=2)
