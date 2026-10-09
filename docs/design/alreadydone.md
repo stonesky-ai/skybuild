@@ -1,6 +1,6 @@
 # SkyBuild completed tasks
 
-Authority: Git-backed planning ledger, revision A33, 2026-10-08. API cutover has not occurred. Record actual completion evidence, not planned milestones. Related ledgers: [mastertodo](mastertodo.md), [deferred](deferred.md).
+Authority: Git-backed planning ledger, revision A34, 2026-10-08. API cutover has not occurred. Record actual completion evidence, not planned milestones. Related ledgers: [mastertodo](mastertodo.md), [deferred](deferred.md).
 
 ## SKYBUILD-REPOSITORY — Establish the dedicated repository and first plan
 

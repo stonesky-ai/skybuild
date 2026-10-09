@@ -1,6 +1,6 @@
 # Review and compactness policy
 
-Derived from architecture revision A33, 2026-10-08. [Architecture section 13](architecture.md#13-compact-component-design) governs. Independent adversarial review is accepted; exact metric/enforcement mechanics below are proposed. The owner explicitly defers dedicated complexity/size gates and their GUI until the self-building MVP is running. This document is planning, not implemented policy.
+Derived from architecture revision A34, 2026-10-08. [Architecture section 13](architecture.md#13-compact-component-design) governs. Independent adversarial review is accepted; exact metric/enforcement mechanics below are proposed. The owner explicitly defers dedicated complexity/size gates and their GUI until the self-building MVP is running. This document is planning, not implemented policy.
 
 ## MVP review path
 
@@ -14,6 +14,8 @@ The author responds to each finding with a fix/test artifact or a reasoned dispu
 
 Implement under SKYBUILD-QUALITY-GATES after SKYBUILD-SELF-BUILD-MVP is running. Begin with deterministic measurement and explicit rule selection; pin tool versions and counting semantics before enforcement. Defaults are practical tool conventions, not a universal Python code-quality standard.
 
+Make pinned Ruff checks, including McCabe `C901`, part of the post-MVP code-review path before the independent reviewer. Scan the entire existing repository when enabling the checks. Track every actual finding as early cleanup work until its behavior-preserving fix passes applicable checks, independent review and publication. Do not let a legacy baseline silently turn real debt into permanent acceptance. A verified false positive or non-debt exception needs a narrow authorized disposition and a review trigger.
+
 | Criterion | Proposed initial policy | Meaning |
 | --- | --- | --- |
 | Control-flow complexity | Ruff `C901`, maximum McCabe complexity 10 | New or worsened violations block; a trusted legacy baseline preserves visible inherited debt without forcing unrelated refactors. |
@@ -25,6 +27,8 @@ Implement under SKYBUILD-QUALITY-GATES after SKYBUILD-SELF-BUILD-MVP is running.
 GUI settings cover thresholds, severity, applicable paths, baseline/exceptions and correction limits. Owner/admin policy changes are journaled versions. Candidate edits to linter configuration, suppressions, generated-file labels or reviewer prompts cannot lower their own acceptance requirements. Baselines bind the original symbol/rule and evidence; moving or renaming code cannot silently launder debt. Narrow exceptions retain reason, scope, authorized actor and review trigger. Do not combine incompatible metrics from different tool versions as if they were identical.
 
 Show before/after metrics and unresolved findings on the task page. A required analyzer failure means unavailable evidence, not a zero score. Deterministic failures return directly to rework. Required exceptions or unresolved disputes use existing task/owner-question handling, not an additional multi-person approval framework. Exact correction-count defaults and exception lifetime are implementation-time choices.
+
+Additional whole-repository code review is a serialized background task. Its initial trigger is the first of 1,000 accepted commits or 5,000 changed source-code lines after the last completed review. Count accepted code additions plus deletions once; exclude documentation and generated files. Persist the source baseline, counters, run identity, owner fence, findings and fix dispositions. One review owns the active slot. Do not start the next review until all actionable findings from the previous review have accepted, published fixes; a verified false positive may have an explicit authorized disposition. Keep threshold crossings pending and coalesce additional changes while that slot is held. A lost acknowledgment or duplicate worker must recover the same run and finding identities, not create a parallel scan or duplicate tasks. Unknown completion retains the hold. Display backlog and reasons; later expose both thresholds in the GUI. CPU threshold detection never bypasses model budgets, qualification, billing limits or cutoff. See [ADR 0034](../adr/0034-post-mvp-quality-debt-and-repo-review.md).
 
 ## Adversarial criteria and bounded prompt
 

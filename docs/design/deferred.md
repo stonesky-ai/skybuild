@@ -1,6 +1,6 @@
 # SkyBuild deferred tasks
 
-Authority: Git-backed planning ledger, revision A33, 2026-10-08. API cutover has not occurred. Stable IDs occur in only one ledger. Deferral means deliberate postponement, not implementation failure. See [architecture](architecture.md) and [mastertodo](mastertodo.md).
+Authority: Git-backed planning ledger, revision A34, 2026-10-08. API cutover has not occurred. Stable IDs occur in only one ledger. Deferral means deliberate postponement, not implementation failure. See [architecture](architecture.md) and [mastertodo](mastertodo.md).
 
 ## SKYBUILD-MULTIPROJECT — Concurrent autonomous operation across products
 
@@ -103,9 +103,29 @@ Authority: Git-backed planning ledger, revision A33, 2026-10-08. API cutover has
 
 ## SKYBUILD-QUALITY-GATES — Configurable complexity and compactness review gates
 
-- Status: deferred. Priority: normal after MVP. Area: review quality.
-- Brief: add the retained CPU-first complexity/size profile, metric deltas, GUI thresholds/severity, scoped baselines/exceptions and versioned refactoring prompts. Default proposal: McCabe complexity 10, function-size warning above 50 statements; qualify/pin the tools before enforcement.
+- Status: deferred. Priority: early after MVP. Area: review quality.
+- Brief: add pinned Ruff checks, including McCabe `C901`, to the code-review path; measure the existing repository and retain the CPU-first complexity/size profile, metric deltas, GUI thresholds/severity, scoped baselines/exceptions and versioned refactoring prompts. Default proposal: McCabe complexity 10, function-size warning above 50 statements; qualify/pin the tools before enforcement.
 - Reason: the owner explicitly wants the running self-building parallel-worker MVP first. Independent review and existing required checks remain in MVP; this richer feature does not block it.
 - Revisit: SKYBUILD-SELF-BUILD-MVP is running; select this as a feature SkyBuild can build for itself.
-- Acceptance: actionable findings and test requests, legacy-debt handling, meaningful size/complexity measurements, immutable dispositions and policy-change invalidation; no self-weakened gates, metric gaming or unbounded refactor loops. Preserve required behavior and tests.
-- Architecture: section 13 and [review policy](review_policy.md). Plan: area 5a follow-on. ADR: [0033](../adr/0033-independent-review-and-compactness.md).
+- Acceptance: actionable findings and test requests, complete existing-repo inventory, meaningful size/complexity measurements, immutable dispositions and policy-change invalidation; no self-weakened gates, metric gaming or unbounded refactor loops. Preserve required behavior and tests. Hand actual debt findings to SKYBUILD-QUALITY-DEBT-CLEANUP; a baseline is not permanent debt acceptance.
+- Architecture: section 13 and [review policy](review_policy.md). Plan: early post-MVP follow-on. ADRs: [0033](../adr/0033-independent-review-and-compactness.md), [0034](../adr/0034-post-mvp-quality-debt-and-repo-review.md).
+
+## SKYBUILD-QUALITY-DEBT-CLEANUP — Clear initial Ruff and McCabe debt
+
+- Status: deferred. Priority: early after MVP. Area: review quality.
+- Dependencies: running SKYBUILD-SELF-BUILD-MVP and the initial SKYBUILD-QUALITY-GATES repository scan.
+- Brief: turn every actual Ruff/McCabe finding in the initial repository baseline into bounded cleanup work; refactor without deleting required behavior or useful tests. Track source, rule, severity, owner, correction and accepted publication for each finding.
+- Reason: the owner wants this among the first post-MVP tasks, while keeping the MVP itself unblocked by a broad cleanup.
+- Revisit: the quality scan has produced its pinned, complete finding inventory.
+- Acceptance: every actual debt finding has a published fix with applicable tests and independent review; verified false positives or non-debt exceptions have narrow authorized dispositions. No inherited debt remains hidden behind the baseline.
+- Architecture: section 13 and [review policy](review_policy.md). Plan: early post-MVP follow-on. ADR: [0034](../adr/0034-post-mvp-quality-debt-and-repo-review.md).
+
+## SKYBUILD-REPO-REVIEW-CADENCE — Serial whole-repository review
+
+- Status: deferred. Priority: early after MVP. Area: review quality.
+- Dependencies: running SKYBUILD-SELF-BUILD-MVP, SKYBUILD-QUALITY-GATES and initial SKYBUILD-QUALITY-DEBT-CLEANUP.
+- Brief: schedule a background whole-repository code review when either 1,000 accepted commits or 5,000 changed source-code lines accrue since the last completed review, whichever happens first. Persist counters, review identity, exact source baseline, findings and backlog. Expose both thresholds in the GUI in a later settings slice.
+- Reason: the owner wants periodic broad review without overlapping review runs or repeatedly rediscovering unmerged fixes.
+- Revisit: initial quality debt is cleared and the controlled review path can run background tasks within its budgets.
+- Acceptance: at most one whole-repository review is active. The next review waits until all actionable findings from the prior review have accepted published fixes. Accidental duplicate starts and findings coalesce under the same durable identity; a lost acknowledgment or unknown run does not release the hold. Crossing either threshold while held leaves a visible pending review, not a second launch. CPU threshold detection never grants model-spend authority.
+- Architecture: section 13 and [review policy](review_policy.md). Plan: early post-MVP follow-on. ADR: [0034](../adr/0034-post-mvp-quality-debt-and-repo-review.md).
