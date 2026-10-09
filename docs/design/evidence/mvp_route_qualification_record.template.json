@@ -1,0 +1,167 @@
+{
+  "schema": "skybuild-mvp-route-qualification-v1",
+  "record_state": "preparation-only",
+  "decision": "not-qualified",
+  "qualification_id": null,
+  "created_at_utc": null,
+  "scope": {
+    "task_classes": [],
+    "excluded_classes": [],
+    "acceptance_criteria_digest": null
+  },
+  "route": {
+    "provider_profile_id": null,
+    "exact_model_id": null,
+    "runtime_build_fingerprint": null,
+    "template_sha256": null,
+    "adapter_revision": null,
+    "runner_revision": null,
+    "request_settings_digest": null,
+    "source_scope_digest": null,
+    "context_construction_digest": null,
+    "validation_path_digest": null
+  },
+  "controls": {
+    "authorization_reference": null,
+    "authorization_scope_digest": null,
+    "billing_mode_evidence_digest": null,
+    "per_case_budget": null,
+    "aggregate_budget": null,
+    "context_limit": null,
+    "output_limit": null,
+    "wall_deadline_seconds": null,
+    "correction_limit_per_author_case": 1,
+    "automatic_fallback": false,
+    "unknown_outcome_stop_verified": false,
+    "budget_reservation_evidence_digest": null,
+    "cutoff_evidence_digest": null
+  },
+  "cases": [
+    {
+      "case_id": null,
+      "case_role": "author-and-review",
+      "task_class": null,
+      "task_definition_digest": null,
+      "base_commit": null,
+      "author": {
+        "session_id": null,
+        "input_artifact_sha256": null,
+        "response_artifact_sha256": null,
+        "head_commit": null,
+        "diff_sha256": null,
+        "attempt_count": null,
+        "returned_usage": null,
+        "latency_ms": null,
+        "check_evidence_digest": null,
+        "independent_acceptance": null,
+        "attempts": [
+          {
+            "attempt_id": null,
+            "request_artifact_sha256": null,
+            "response_artifact_sha256": null,
+            "outcome": null,
+            "returned_usage": null,
+            "reserved_exposure": null,
+            "uncertain_exposure": null,
+            "latency_ms": null,
+            "head_commit": null,
+            "diff_sha256": null,
+            "check_evidence_digest": null
+          }
+        ]
+      },
+      "review": {
+        "session_id": null,
+        "reviewed_head_commit": null,
+        "reviewed_diff_sha256": null,
+        "task_and_check_inputs_digest": null,
+        "response_artifact_sha256": null,
+        "expected_findings_digest": null,
+        "detected_findings": [],
+        "missed_blocking_findings": [],
+        "false_positives": [],
+        "independent_evaluation": null,
+        "attempts": [
+          {
+            "attempt_id": null,
+            "request_artifact_sha256": null,
+            "response_artifact_sha256": null,
+            "outcome": null,
+            "returned_usage": null,
+            "reserved_exposure": null,
+            "uncertain_exposure": null,
+            "latency_ms": null,
+            "head_commit": null,
+            "diff_sha256": null,
+            "check_evidence_digest": null
+          }
+        ]
+      },
+      "fixture": null
+    },
+    {
+      "case_id": null,
+      "case_role": "review-only",
+      "task_class": null,
+      "task_definition_digest": null,
+      "base_commit": null,
+      "fixture": {
+        "source_revision": null,
+        "head_commit": null,
+        "diff_sha256": null,
+        "input_artifact_sha256": null
+      },
+      "author": null,
+      "review": {
+        "session_id": null,
+        "reviewed_head_commit": null,
+        "reviewed_diff_sha256": null,
+        "task_and_check_inputs_digest": null,
+        "response_artifact_sha256": null,
+        "expected_findings_digest": null,
+        "detected_findings": [],
+        "missed_blocking_findings": [],
+        "false_positives": [],
+        "independent_evaluation": null,
+        "attempts": [
+          {
+            "attempt_id": null,
+            "request_artifact_sha256": null,
+            "response_artifact_sha256": null,
+            "outcome": null,
+            "returned_usage": null,
+            "reserved_exposure": null,
+            "uncertain_exposure": null,
+            "latency_ms": null,
+            "head_commit": null,
+            "diff_sha256": null,
+            "check_evidence_digest": null
+          }
+        ]
+      }
+    }
+  ],
+  "failure_and_limitations": [],
+  "evidence_artifacts": [],
+  "independent_evaluator": {
+    "identity": null,
+    "session_id": null,
+    "result": null,
+    "evidence_digest": null
+  },
+  "record_sha256": null,
+  "supersedes_record_sha256": null,
+  "task_binding": {
+    "project_id": "skybuild",
+    "task_id": "SKYBUILD-MVP-ROUTE-QUALIFICATION",
+    "task_revision": null,
+    "task_contract_digest": null
+  },
+  "usage_accounting": {
+    "native_units": null,
+    "consumed": null,
+    "reserved": null,
+    "uncertain": null,
+    "evidence_digest": null
+  }
+}

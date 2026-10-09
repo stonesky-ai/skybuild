@@ -215,15 +215,17 @@ def test_preflight_custom_ca_keeps_tailnet_identity_and_scopes(certificates, tmp
             return httpx.Response(200, json={"status": "ready"})
         if request.url.path == "/api/v1/me":
             return httpx.Response(200, json={"principal_id": "worker", "is_admin": False,
-                "grants": {"project": ["tasks:read", "cord:read", "cord:send", "cord:handle"]}})
-        assert request.url.path in {"/api/v1/projects/project/cord/inbox",
-                                    "/api/v1/projects/project/tasks"}
+                "grants": {"project": ["cord:read", "cord:send", "cord:handle", "tasks:read"]}})
+        if request.url.path == "/api/v1/projects/project/tasks":
+            return httpx.Response(200, json=[])
+        assert request.url.path == "/api/v1/projects/project/cord/inbox"
         return httpx.Response(200, json=[])
     report = probe_private_api("https://controller.ts.net:8443", "project", token, "worker",
                                ca_file=certificates / "ca.pem", transport=httpx.MockTransport(handle),
                                resolve=lambda _: ["100.100.100.100"])
     assert report["ready"] is True
     assert report["principal_id"] == "worker"
+    assert report["task_list_access"] is True
     assert report["host"] == "controller.ts.net"
 
 

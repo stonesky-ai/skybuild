@@ -22,12 +22,13 @@ def relay_assignment(pinned, request, monkeypatch):
     repo, envelope = pinned
     path = envelope["brief_path"]
     brief = json.loads((repo / path).read_text())
-    brief.update(worker=request.param, dispatcher="pilot_dispatcher")
+    brief.update(task_id="SKYBUILD-TASK-CUTOVER", worker=request.param, dispatcher="pilot_dispatcher")
     (repo / path).write_text(json.dumps(brief))
     _git(repo, "add", path)
     _git(repo, "commit", "-qm", "Bind pilot identities")
     base = _git(repo, "rev-parse", "HEAD")
-    monkeypatch.setattr(manual_dispatch, "_published_head", lambda _repo, _base_ref: base)
+    monkeypatch.setattr(manual_dispatch, "_published_head",
+                        lambda _repo, base_ref: base if base_ref == "refs/heads/dev-003" else None)
     return repo, path, brief
 
 
