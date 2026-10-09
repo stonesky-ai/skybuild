@@ -100,7 +100,7 @@ def test_atomic_import_replay_api_and_restart(plan, fresh_store):
         assert denied.status_code == 409
         assert denied.json()["error"]["code"] == "authority"
     restarted = Store(store.dsn, store.expected_database)
-    assert restarted.readiness()["schema_version"] == 8
+    assert restarted.readiness()["schema_version"] == 9
     assert apply(restarted, plan)["result"] == "unchanged"
     with store._connection() as connection:
         assert connection.execute("SELECT authority FROM ledger_imports").fetchone()["authority"] == "markdown"

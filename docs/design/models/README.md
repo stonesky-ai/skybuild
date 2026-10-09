@@ -1,5 +1,16 @@
 # Admission design model
 
+## Launch-free observation receipt model
+
+[ObservationJournal.tla](ObservationJournal.tla) and [ObservationJournal.cfg](ObservationJournal.cfg) check pinned identity, increasing source sequence, replay and crash/reconnect. The [implementation brief](../implementation/observation-journal.md) records the bounded results, deliberate identity mutation and transaction assumptions. This model grants no execution or completion authority and does not prove durable offline host spooling.
+
+Reproduce from the repository root:
+
+~~~sh
+rtk proxy sany docs/design/models/ObservationJournal.tla
+rtk proxy tlc -workers 2 -metadir /tmp/skybuild-observation-check docs/design/models/ObservationJournal.tla
+~~~
+
 ## Store-only CPU reservation slice
 
 `CPUReservation.tla` and `CPUReservation.cfg` model the unredeemable Store slice,
