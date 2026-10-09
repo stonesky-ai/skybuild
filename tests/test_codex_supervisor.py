@@ -98,6 +98,19 @@ def test_low_memory_stops_only_recorded_child(tmp_path: Path, monkeypatch):
     assert stopped == [100]
 
 
+def test_stop_file_stops_orphaned_owned_child(tmp_path: Path, monkeypatch):
+    _, state_file, _ = prepared(tmp_path)
+    state = supervisor.load_json(state_file)
+    state.update(phase="running", runs=1, pid=100, start_ticks=7)
+    supervisor.atomic_json(state_file, state)
+    (state_file.parent / "STOP").touch()
+    stopped = []
+    monkeypatch.setattr(supervisor, "same_child", lambda value: True)
+    monkeypatch.setattr(supervisor, "stop_owned_child", lambda value: stopped.append(value["pid"]))
+    assert supervisor.tick(state_file, Path("/no/codex")) == "stopped"
+    assert stopped == [100]
+
+
 def test_fake_codex_runs_once_and_records_completion(tmp_path: Path, monkeypatch):
     _, state_file, _ = prepared(tmp_path)
     fake = tmp_path / "fake_codex"

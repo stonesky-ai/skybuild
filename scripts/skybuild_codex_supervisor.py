@@ -204,10 +204,14 @@ def prepare(args: argparse.Namespace, state_file: Path) -> str:
     return "prepared"
 
 
-def inspect_previous(state: dict) -> str | None:
+def inspect_previous(state: dict, stop_file: Path) -> str | None:
     if state["phase"] != "running":
         return None
     if same_child(state):
+        if stop_file.exists():
+            stop_owned_child(state)
+            state["phase"] = "stopped"
+            return "stopped"
         if bounded_timeout(state):
             stop_owned_child(state)
             state["phase"] = "expired"
@@ -346,7 +350,7 @@ def tick(state_file: Path, codex: Path) -> str:
         state["reason"] = "supervisor died during a launch; process start is uncertain"
         atomic_json(state_file, state)
         return "parked"
-    result = inspect_previous(state)
+    result = inspect_previous(state, state_file.parent / "STOP")
     if result:
         atomic_json(state_file, state)
         return result
