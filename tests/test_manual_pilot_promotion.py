@@ -30,6 +30,8 @@ def promotion(tmp_path, monkeypatch):
     (state / 'tls').mkdir(mode=0o700)
     (state / 'tls/ca.crt').write_bytes(b'retained fixture CA')
     current = {f'migrations/{i:03}_migration.sql': hashlib.sha256(str(i).encode()).hexdigest() for i in range(1, 11)}
+    current.update({f'static/workbench.{suffix}': hashlib.sha256(suffix.encode()).hexdigest()
+                    for suffix in ('css', 'html', 'js')})
     candidate = dict(current, **{'migrations/011_cpu_fake_dispatch.sql': 'f' * 64})
     api_id, db_id, image = '1' * 64, '2' * 64, 'sha256:' + '3' * 64
     ip, hostname = '100.100.1.2', 'controller.tail.ts.net'
@@ -119,6 +121,7 @@ def test_promotion_checks_are_read_only_and_refuse_binary_rollback(promotion):
     'applied-digest', 'already-migrated', 'cluster', 'runtime-env', 'admin-env',
     'tls-user', 'public-port', 'writable-key', 'privileged', 'memory-limit',
     'old-readiness', 'role-excess', 'serve-route', 'changed-ca',
+    'changed-static', 'missing-static', 'unexpected-package-file',
 ])
 def test_promotion_refuses_changed_boundary(promotion, boundary):
     arguments, data = promotion
@@ -142,6 +145,9 @@ def test_promotion_refuses_changed_boundary(promotion, boundary):
     elif boundary == 'role-excess': data['findings'].append('excess skybuild.principals UPDATE')
     elif boundary == 'serve-route': data['serve'] = {'TCP': {'443': {}}}
     elif boundary == 'changed-ca': (arguments['state_dir'] / 'tls/ca.crt').write_bytes(b'replacement CA')
+    elif boundary == 'changed-static': data['installed']['static/workbench.js'] = 'changed'
+    elif boundary == 'missing-static': del data['installed']['static/workbench.html']
+    elif boundary == 'unexpected-package-file': data['installed']['unexpected.txt'] = 'changed'
     with pytest.raises(ValueError):
         controller.promotion_preflight(**arguments)
 
@@ -178,7 +184,91 @@ def test_source_manifest_matches_exact_git_blob_bytes():
     result = controller._command('git', '-C', str(root), 'show', revision + ':src/skybuild/store.py')
     assert result.returncode == 0
     assert manifest['store.py'] == hashlib.sha256(result.stdout.encode()).hexdigest()
+    assert {f'static/workbench.{suffix}' for suffix in ('css', 'html', 'js')} <= manifest.keys()
     assert len([name for name in manifest if name.startswith('migrations/')]) == 10
+
+
+def test_installed_probe_includes_assets_and_unexpected_files(promotion, tmp_path):
+    import subprocess
+    import sys
+    arguments, data = promotion
+    controller.promotion_preflight(**arguments)
+    probe = next(args[-1] for args in data['calls'] if args[:3] == ('docker', 'exec', 'skybuild-pilot-api'))
+    package = tmp_path / 'probe/skybuild'
+    (package / 'static').mkdir(parents=True)
+    (package / '__init__.py').write_text('')
+    asset = package / 'static/workbench.js'
+    asset.write_text('original')
+    def inspect():
+        return json.loads(subprocess.check_output([sys.executable, '-c', probe],
+                          env={**os.environ, 'PYTHONPATH': str(package.parent)}, text=True))
+    first = inspect()
+    assert first['static/workbench.js'] == hashlib.sha256(b'original').hexdigest()
+    assert not any('__pycache__' in name for name in first)
+    asset.write_text('changed')
+    assert inspect()['static/workbench.js'] != first['static/workbench.js']
+    asset.unlink()
+    (package / 'unexpected.txt').write_text('foreign')
+    (package / '__pycache__/unexpected.txt').write_text('foreign cache-directory file')
+    final = inspect()
+    assert 'static/workbench.js' not in final and 'unexpected.txt' in final
+    assert '__pycache__/unexpected.txt' in final
+
+
+@pytest.mark.parametrize('boundary', ['foreign-owner', 'collision', 'success'])
+def test_runbook_replacement_never_mutates_a_foreign_container(promotion, monkeypatch, boundary):
+    arguments, data = promotion
+    root = Path(__file__).resolve().parents[1]
+    report = dict(api_container=arguments['api_container'], api_image=arguments['api_image'],
+                  database_container=arguments['db_container'])
+    report_path = arguments['state_dir'] / 'promotion-report'
+    provisioner._write_new(report_path, json.dumps(report), 0o600)
+    for name, value in {'SKYBUILD_PILOT_STATE': str(arguments['state_dir']),
+                        'SKYBUILD_PROMOTION_REPORT': str(report_path),
+                        'SKYBUILD_PROMOTION_IMAGE_ID': 'sha256:' + '5' * 64,
+                        'SKYBUILD_PILOT_TAILNET_IP': arguments['tailnet_ip']}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.chdir(root)
+    api = data['api']
+    api['State'] = {'Running': False}
+    api['NetworkSettings']['Networks'] = {'existing': {'NetworkID': '6' * 64}}
+    api['Config']['Labels'] = {'com.docker.compose.project': 'skybuild-pilot',
+                              'com.docker.compose.service': 'api',
+                              'com.docker.compose.project.working_dir': str(root / 'ops/manual-pilot'),
+                              'com.docker.compose.project.config_files': 'retained-files'}
+    calls = []
+    def command(*args):
+        calls.append(args)
+        if args[:2] == ('docker', 'inspect'):
+            if args[2] == report['api_container']: return json.dumps([api])
+            if args[2] == 'skybuild-pilot-api':
+                return json.dumps([{**api, 'Id': '9' * 64} if boundary == 'foreign-owner' else api])
+            if args[2] == report['database_container']:
+                return json.dumps([{'Id': report['database_container'], 'State': {'Running': True},
+                                    'NetworkSettings': {'Networks': api['NetworkSettings']['Networks']}}])
+            if args[2] == '7' * 64:
+                return json.dumps([{'Id': '7' * 64, 'Image': 'sha256:' + '5' * 64}])
+        if args[:2] == ('docker', 'rm'): return args[2]
+        if args[:2] == ('docker', 'create'):
+            if boundary == 'collision': raise RuntimeError('name already owned')
+            return '7' * 64
+        if args[:2] == ('docker', 'start'): return args[2]
+        raise AssertionError(args)
+    monkeypatch.setattr(tls, 'command', command)
+    document = (root / 'docs/design/implementation/manual_pilot_promotion.md').read_text()
+    block = document.split("<<'PY'\n")[3].split('\nPY\n', 1)[0]
+    if boundary == 'success': exec(compile(block, '<operator-runbook>', 'exec'), {})
+    else:
+        with pytest.raises(SystemExit): exec(compile(block, '<operator-runbook>', 'exec'), {})
+    mutations = [args for args in calls if args[1] in ('rm', 'create', 'start')]
+    if boundary == 'foreign-owner': assert not mutations
+    else:
+        assert mutations[0] == ('docker', 'rm', report['api_container'])
+        assert mutations[1][:4] == ('docker', 'create', '--pull', 'never')
+        if boundary == 'success': assert mutations[2] == ('docker', 'start', '7' * 64)
+        else: assert not any(args[1] == 'start' for args in mutations)
+    assert 'docker stop --time 30 "$CURRENT_API_CONTAINER"' in document
+    assert 'docker compose ' not in document
 
 
 def test_binding_order_does_not_change_owned_addresses(promotion):

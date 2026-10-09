@@ -43,7 +43,7 @@ import manual_pilot_tls as tls
 image = os.environ['SKYBUILD_PROMOTION_IMAGE_ID']
 assert re.fullmatch(r'sha256:[0-9a-f]{64}', image)
 probe = ("import hashlib,json,pathlib,skybuild; p=pathlib.Path(skybuild.__file__).parent; "
-         "files=sorted(f for f in p.rglob('*') if f.is_file() and f.suffix in ('.py','.sql')); "
+         "files=sorted(f for f in p.rglob('*') if f.is_file() and not (f.parent.name=='__pycache__' and f.suffix=='.pyc')); "
          "assert len(files)<=200 and all(f.stat().st_size<=1048576 for f in files); "
          "print(json.dumps({str(f.relative_to(p)):hashlib.sha256(f.read_bytes()).hexdigest() for f in files}))")
 actual = json.loads(tls.command('docker', 'run', '--rm', '--network', 'none', '--read-only',
@@ -56,14 +56,14 @@ PY
 
 The verification container has no network, credentials, mounts, writable root, capabilities, service listener or model invocation. Use an existing private mode-0700 evidence directory outside Git and `umask 077` for new files. Save a custom-format dump of only `skybuild_pilot` to a new file through the dedicated container's ordinary PostgreSQL channel: `docker exec --user postgres skybuild-pilot-pg nice -n 10 pg_dump --format=custom --dbname=skybuild_pilot > "$PRIVATE_DUMP"`. Check exit status and a bounded dump manifest. No password belongs in arguments. The dump has not undergone a restore drill and is not an automatic rollback guarantee; never overwrite it.
 
-Create a private Compose image overlay containing only the API's verified `sha256:` image ID and `pull_policy: never`. Keep the same base and TLS files. Inspect rendered allowlisted configuration without printing resolved environment secrets; only the image may change. Recheck the image ID before use. Rerun the full preflight immediately before the stop and save its successful JSON in a new mode-0600 `$SKYBUILD_PROMOTION_REPORT` file. Set `$SKYBUILD_PROMOTION_OVERLAY` to the reviewed private overlay path. Neither file contains secrets. Parent-directory ownership and private modes remain operator prerequisites.
+Keep the same base and TLS configuration and recheck the pinned image ID before use. Rerun the full preflight immediately before the stop and save its successful JSON in a new mode-0600 `$SKYBUILD_PROMOTION_REPORT` file. It contains no secrets. Parent-directory ownership and private modes remain operator prerequisites. The later replacement uses an exclusive-name Docker creation primitive, not Compose reconciliation, so a foreign replacement is never adopted or removed.
 
 ## Stop only the API and migrate atomically
 
 After authority, stop only `api`; leave PostgreSQL and storage running. Retain the stopped API identity/config and old image. Never rerun initial provisioning, replace credentials, import task authority, run `down`, or remove volumes/state.
 
 ```sh
-nice -n 10 docker compose -f ops/manual-pilot/compose.yaml -f ops/manual-pilot/compose.tls.yaml stop --timeout 30 api
+nice -n 10 docker stop --time 30 "$CURRENT_API_CONTAINER"
 ```
 
 This explicit operator transaction checks the stopped container, cluster/database, exact 010 prefix, clean reviewed source and absence of runtime-role sessions. DDL, version digest, runtime grants and full candidate audit commit together. Do not substitute separate `migrate` and `provision-runtime-role` CLI calls; those commit independently.
@@ -131,10 +131,59 @@ A lost commit acknowledgment remains unconfirmed. Inspect exact digests/grants b
 
 ## Start the pinned candidate and requalify
 
-Only after confirmed 011 commit and full candidate role audit, recreate only the API using the reviewed immutable image overlay. Do not rebuild, pull, restart PostgreSQL or replace credentials here.
+Only after confirmed 011 commit and full candidate role audit, replace only the retained stopped API. Recheck the retained API and database IDs and the existing network; remove only the immutable stopped ID. Creation must fail on any name collision, and startup targets only its returned full ID. Do not rebuild, pull, reconcile a Compose service name, restart PostgreSQL or replace credentials here. Coordinate exclusive maintenance with other operators; identity checks cannot prevent another authorized operator from changing the runtime independently.
 
 ```sh
-nice -n 10 docker compose -f ops/manual-pilot/compose.yaml -f ops/manual-pilot/compose.tls.yaml -f "$SKYBUILD_PROMOTION_OVERLAY" up -d --no-deps --no-build --pull never api
+nice -n 10 ./.venv/bin/python - <<'PY'
+import json, os, pathlib, re, sys
+sys.path.insert(0, str(pathlib.Path.cwd() / 'scripts'))
+import manual_pilot_tls as tls
+try:
+    state = pathlib.Path(os.environ['SKYBUILD_PILOT_STATE'])
+    report_path = pathlib.Path(os.environ['SKYBUILD_PROMOTION_REPORT'])
+    tls.private_file(report_path)
+    report = json.loads(report_path.read_text())
+    image = os.environ['SKYBUILD_PROMOTION_IMAGE_ID']
+    assert re.fullmatch(r'sha256:[0-9a-f]{64}', image)
+    old = json.loads(tls.command('docker', 'inspect', report['api_container']))[0]
+    named = json.loads(tls.command('docker', 'inspect', 'skybuild-pilot-api'))[0]
+    db = json.loads(tls.command('docker', 'inspect', report['database_container']))[0]
+    assert old['Id'] == named['Id'] == report['api_container']
+    assert old['Image'] == report['api_image'] and not old['State']['Running']
+    assert os.getuid() != 0 and old['Config']['User'] == str(os.getuid())
+    assert db['Id'] == report['database_container'] and db['State']['Running']
+    networks = old['NetworkSettings']['Networks']
+    assert len(networks) == 1
+    network_name, network = next(iter(networks.items()))
+    assert db['NetworkSettings']['Networks'][network_name]['NetworkID'] == network['NetworkID']
+    assert re.fullmatch(r'[0-9a-f]{64}', network['NetworkID'])
+    labels = old['Config']['Labels']
+    assert labels['com.docker.compose.project'] == 'skybuild-pilot'
+    assert labels['com.docker.compose.service'] == 'api'
+    assert labels['com.docker.compose.project.working_dir'] == str(pathlib.Path.cwd() / 'ops/manual-pilot')
+    args = ['docker', 'create', '--pull', 'never', '--name', 'skybuild-pilot-api',
+            '--network', network['NetworkID'], '--network-alias', 'api',
+            '--user', str(os.getuid()), '--memory', '512m', '--pids-limit', '128',
+            '--restart', 'unless-stopped', '--env-file', str(state / 'runtime.env'),
+            '--publish', '127.0.0.1:8000:8000',
+            '--publish', os.environ['SKYBUILD_PILOT_TAILNET_IP'] + ':8443:8000']
+    for name in ('server.crt', 'server.key'):
+        args += ['--mount', f'type=bind,src={state / "tls" / name},dst=/run/skybuild-tls/{name},readonly']
+    for key in ('com.docker.compose.project', 'com.docker.compose.service',
+                'com.docker.compose.project.working_dir', 'com.docker.compose.project.config_files'):
+        args += ['--label', key + '=' + labels[key]]
+    args += [image, *old['Config']['Cmd']]
+    tls.command('docker', 'rm', report['api_container'])
+    created = tls.command(*args)
+    assert re.fullmatch(r'[0-9a-f]{64}', created)
+    candidate = json.loads(tls.command('docker', 'inspect', created))[0]
+    assert candidate['Id'] == created and candidate['Image'] == image
+    tls.command('docker', 'start', created)
+    print(json.dumps({'candidate_container': created, 'candidate_image': image}))
+except Exception:
+    print(json.dumps({'ok': False, 'replacement_outcome': 'unconfirmed; inspect retained identities; do not reconcile names'}))
+    raise SystemExit(2)
+PY
 curl --fail --silent --max-time 10 --cacert "$SKYBUILD_PILOT_STATE/tls/ca.crt" --resolve "$CONTROLLER_HOST:8000:127.0.0.1" "https://$CONTROLLER_HOST:8000/health/ready"
 ```
 

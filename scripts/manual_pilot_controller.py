@@ -116,7 +116,7 @@ def _source_manifest(checkout: Path, revision: str) -> dict[str, str]:
     from manual_pilot_tls import command
     paths = command("git", "-C", str(checkout), "ls-tree", "-r", "--name-only", revision,
                     "--", "src/skybuild").splitlines()
-    paths = [path for path in paths if Path(path).suffix in {".py", ".sql"}]
+    # Every tracked package file is shipped evidence, including browser assets.
     if not paths or len(paths) > 200:
         raise ValueError("Source manifest exceeds bounded package scope")
     manifest = {}
@@ -218,7 +218,7 @@ def promotion_preflight(checkout: Path, expected_sha: str, published_ref: str, *
     # Read installed package bytes, not /app/src or a mutable image tag. Output
     # contains code digests only and is bounded to 200 reviewed package files.
     probe = ("import hashlib,json,pathlib,skybuild; p=pathlib.Path(skybuild.__file__).parent; "
-             "files=sorted(f for f in p.rglob('*') if f.is_file() and f.suffix in ('.py','.sql')); "
+             "files=sorted(f for f in p.rglob('*') if f.is_file() and not (f.parent.name=='__pycache__' and f.suffix=='.pyc')); "
              "assert len(files)<=200 and all(f.stat().st_size<=1048576 for f in files); "
              "print(json.dumps({str(f.relative_to(p)):hashlib.sha256(f.read_bytes()).hexdigest() for f in files}))")
     installed = json.loads(tls.command("docker", "exec", "skybuild-pilot-api", "python", "-c", probe))
