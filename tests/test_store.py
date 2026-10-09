@@ -45,6 +45,108 @@ def create(store, principal, project, task_id='T1', **fields):
     return store.create_task(principal, project, {'task_id': task_id, 'title': 'Test task', 'description': 'Full brief', **fields}, 'create-' + task_id)
 
 
+def test_manual_workflow_actions_are_journaled_and_idempotent(store, actors):
+    project, identities = actors
+    task = create(store, identities['owner'], project, 'workflow')
+    milestone = create(store, identities['owner'], project, 'milestone')
+    request = {'reason': 'Wait for milestone', 'milestone_task_id': milestone['task_id'],
+               'next_action': 'Reassess after milestone completion'}
+    deferred = store.task_action(identities['owner'], project, 'workflow', 'defer', request, 1, 'defer-key')
+    assert deferred['status'] == 'deferred'
+    assert deferred['phase'] == 'deferred'
+    assert deferred['metadata']['_skybuild_workflow']['deferral']['milestone_task_id'] == 'milestone'
+    assert store.task_action(identities['owner'], project, 'workflow', 'defer', request, 1, 'defer-key') == deferred
+    changed_deferral = store.task_action(identities['owner'], project, 'workflow', 'defer',
+                                         {'reason': 'Wait longer', 'milestone_task_id': milestone['task_id']}, 2, 'defer-again')
+    assert changed_deferral['metadata']['_skybuild_workflow']['interrupted_phase'] == task['phase']
+    error('idempotency_conflict', lambda: store.task_action(identities['owner'], project, 'workflow', 'defer',
+                                                           {'reason': 'Different', 'milestone_task_id': 'milestone'}, 1, 'defer-key'))
+    error('stale_revision', lambda: store.task_action(identities['owner'], project, 'workflow', 'resume',
+                                                     {'reason': 'Now ready'}, 1, 'stale'))
+    resumed = store.task_action(identities['owner'], project, 'workflow', 'resume', {'reason': 'Milestone complete'}, 3, 'resume-key')
+    assert (resumed['status'], resumed['phase']) == ('blocked', 'reassess')
+    assert resumed['metadata']['_skybuild_workflow']['generation'] == 3
+    assert 'deferral' not in resumed['metadata']['_skybuild_workflow']
+    rework = store.task_action(identities['owner'], project, 'workflow', 'rework',
+                               {'reason': 'Acceptance changed', 'next_action': 'Revise tests'}, 4, 'rework-key')
+    assert (rework['status'], rework['phase'], rework['blocker']) == ('blocked', 'needs-rework', 'Acceptance changed')
+    reassess = store.task_action(identities['owner'], project, 'workflow', 'reassess', {'reason': 'New evidence'}, 5, 'reassess-key')
+    assert (reassess['status'], reassess['phase']) == ('blocked', 'reassess')
+    history = store.task_history(identities['owner'], project, 'workflow')
+    assert [event['operation'] for event in history] == ['created', 'defer', 'defer', 'resume', 'rework', 'reassess']
+    assert [event['reason'] for event in history[1:]] == ['Wait for milestone', 'Wait longer', 'Milestone complete', 'Acceptance changed', 'New evidence']
+    assert all(event['actor'] == identities['owner'].principal_id for event in history)
+
+
+def test_workflow_invalid_trigger_rolls_back(store, actors):
+    project, identities = actors
+    task = create(store, identities['owner'], project, 'workflow-invalid')
+    error('not_found', lambda: store.task_action(identities['owner'], project, task['task_id'], 'defer',
+                                                 {'reason': 'Wait', 'milestone_task_id': 'missing'}, 1, 'missing'))
+    error('validation', lambda: store.task_action(identities['owner'], project, task['task_id'], 'defer',
+                                                  {'reason': 'Wait', 'until': '2026-10-09T12:00:00'}, 1, 'naive'))
+    error('workflow_conflict', lambda: store.task_action(identities['owner'], project, task['task_id'], 'defer',
+                                                         {'reason': 'Wait', 'until': '2020-01-01T12:00:00+00:00'}, 1, 'past'))
+    assert store.get_task(identities['owner'], project, task['task_id'])['revision'] == 1
+    assert len(store.task_history(identities['owner'], project, task['task_id'])) == 1
+
+
+def test_separate_deferral_cycles_capture_current_interrupted_phase(store, actors):
+    project, people = actors
+    owner = people['owner']
+    create(store, owner, project, 'cycles')
+    first = store.task_action(owner, project, 'cycles', 'defer',
+                              {'reason': 'First wait', 'until': '2030-01-01T00:00:00+00:00'}, 1, 'first')
+    assert first['metadata']['_skybuild_workflow']['interrupted_phase'] == 'triage'
+    store.task_action(owner, project, 'cycles', 'resume', {'reason': 'Resume'}, 2, 'resume')
+    store.task_action(owner, project, 'cycles', 'rework', {'reason': 'New requirements'}, 3, 'rework')
+    second = store.task_action(owner, project, 'cycles', 'defer',
+                               {'reason': 'Second wait', 'until': '2030-02-01T00:00:00+00:00'}, 4, 'second')
+    assert second['metadata']['_skybuild_workflow']['interrupted_phase'] == 'needs-rework'
+
+
+def test_due_deferral_catch_up_and_reserved_state(store, actors):
+    from datetime import datetime, timezone
+
+    project, people = actors
+    owner = people['owner']
+    task = create(store, owner, project, 'due')
+    error('validation', lambda: store.update_task(owner, project, 'due', {'status': 'done'}, 1, 'forge-done'))
+    error('validation', lambda: store.update_task(owner, project, 'due', {'phase': 'ready-for-bundle'}, 1, 'forge-phase'))
+    error('validation', lambda: store.update_task(owner, project, 'due', {'metadata': {'_skybuild_workflow': {'generation': 0}}}, 1, 'forge-generation'))
+    store.task_action(owner, project, 'due', 'defer',
+                      {'reason': 'Wait until date', 'until': '2030-01-01T00:00:00+00:00'}, 1, 'defer')
+    assert store.reconcile_due_deferrals(owner, project, 'scan-before', now=datetime(2029, 1, 1, tzinfo=timezone.utc))['reassessed'] == []
+    scan = store.reconcile_due_deferrals(owner, project, 'scan-after', now=datetime(2030, 1, 2, tzinfo=timezone.utc))
+    assert scan['reassessed'] == ['due']
+    current = store.get_task(owner, project, 'due')
+    assert (current['status'], current['phase'], current['revision']) == ('blocked', 'reassess', 3)
+    assert current['metadata']['_skybuild_workflow']['interrupted_phase'] == task['phase']
+    assert store.reconcile_due_deferrals(owner, project, 'scan-retry', now=datetime(2030, 1, 2, tzinfo=timezone.utc))['reassessed'] == []
+    changed = store.update_task(owner, project, 'due', {'metadata': {'note': 'kept'}}, 3, 'metadata-edit')
+    assert changed['metadata']['_skybuild_workflow']['generation'] == 3
+    assert (changed['status'], changed['phase']) == ('blocked', 'reassess')
+    assert changed['metadata']['note'] == 'kept'
+    assert [event['operation'] for event in store.task_history(owner, project, 'due')] == ['created', 'defer', 'resume', 'updated']
+
+
+def test_due_reconciliation_pages_past_first_hundred(store, actors):
+    from datetime import datetime, timezone
+
+    project, people = actors
+    owner = people['owner']
+    for index in range(100):
+        create(store, owner, project, f'filler-{index:03}')
+    create(store, owner, project, 'due-later', priority=1)
+    store.task_action(owner, project, 'due-later', 'defer',
+                      {'reason': 'Wait until date', 'until': '2030-01-01T00:00:00+00:00'}, 1, 'defer-later')
+    now = datetime(2030, 1, 2, tzinfo=timezone.utc)
+    first = store.reconcile_due_deferrals(owner, project, 'page-one', now=now)
+    assert first == {'scanned': 100, 'reassessed': [], 'next_offset': 100}
+    second = store.reconcile_due_deferrals(owner, project, 'page-two', offset=100, now=now)
+    assert second == {'scanned': 1, 'reassessed': ['due-later'], 'next_offset': None}
+
+
 def error(code, call):
     with pytest.raises(DomainError) as caught:
         call()
@@ -130,11 +232,11 @@ def test_revision_history_restart_and_idempotency(store, actors):
     first = store.create_task(worker, project, body, 'same-key')
     assert store.create_task(worker, project, dict(reversed(list(body.items()))), 'same-key') == first
     error('idempotency_conflict', lambda: store.create_task(worker, project, {**body, 'title': 'Different'}, 'same-key'))
-    changed = store.update_task(worker, project, 'T1', {'status': 'blocked', 'blocker': 'Needs decision'}, 1, 'change')
+    changed = store.task_action(worker, project, 'T1', 'reassess', {'reason': 'Needs decision'}, 1, 'change')
     assert changed['revision'] == 2
-    assert store.update_task(worker, project, 'T1', {'status': 'blocked', 'blocker': 'Needs decision'}, 1, 'change') == changed
+    assert store.task_action(worker, project, 'T1', 'reassess', {'reason': 'Needs decision'}, 1, 'change') == changed
     error('stale_revision', lambda: store.update_task(worker, project, 'T1', {'title': 'Stale'}, 1, 'stale'))
-    error('idempotency_conflict', lambda: store.update_task(worker, project, 'T1', {'title': 'Different'}, 2, 'change'))
+    error('idempotency_conflict', lambda: store.task_action(worker, project, 'T1', 'reassess', {'reason': 'Different'}, 1, 'change'))
     restarted = Store(store.dsn, store.expected_database)
     assert restarted.get_task(worker, project, 'T1') == changed
     history = restarted.task_history(worker, project, 'T1')
@@ -492,4 +594,4 @@ def test_bounded_views_and_no_unfinished_task_without_next_action(store, actors)
         error('validation', lambda: store.list_tasks(people['worker'], project, limit=limit, offset=offset))
         error('validation', lambda: store.inbox(people['worker'], project, limit=limit, offset=offset))
     error('validation', lambda: create(store, people['worker'], project, 'Invalid', next_action=None, blocker=None))
-    assert create(store, people['worker'], project, 'Done', status='done', next_action=None)['status'] == 'done'
+    error('validation', lambda: create(store, people['worker'], project, 'Done', status='done', next_action=None))

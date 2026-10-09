@@ -79,6 +79,14 @@ class TaskCreate(TaskFields):
     description: LongText
 
 
+class TaskAction(Input):
+    reason: OptionalText
+    next_action: OptionalText | None = None
+    responsible: WorkflowText | None = None
+    until: AwareDatetime | None = None
+    milestone_task_id: Identifier | None = None
+
+
 class MessageCreate(Input):
     recipient: Identifier
     subject: ShortText
@@ -253,6 +261,17 @@ def create_app(store: Any) -> FastAPI:
     @app.get(base + "/tasks/{task_id}/history")
     def history(project_id: ProjectPath, task_id: RecordPath, actor: Actor, limit: Limit = 100, offset: Offset = 0) -> list:
         return store.task_history(actor, project_id, task_id, limit=limit, offset=offset)
+
+    @app.post(base + "/tasks/{task_id}/actions/{action}")
+    def task_action(project_id: ProjectPath, task_id: RecordPath, action: RecordPath, body: TaskAction,
+                    actor: Actor, idem: Key, expected: Revision) -> dict:
+        return store.task_action(actor, project_id, task_id, action,
+                                 body.model_dump(mode="json", exclude_unset=True), expected, idem)
+
+    @app.post(base + "/tasks/reconcile-due")
+    def reconcile_due_deferrals(project_id: ProjectPath, actor: Actor, idem: Key,
+                                limit: Limit = 100, offset: Offset = 0) -> dict:
+        return store.reconcile_due_deferrals(actor, project_id, idem, limit=limit, offset=offset)
 
     @app.post(base + "/cord/messages", status_code=201)
     def send_message(project_id: ProjectPath, body: MessageCreate, actor: Actor, idem: Key) -> dict:

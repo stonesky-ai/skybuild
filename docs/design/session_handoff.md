@@ -8,6 +8,8 @@ Against a task-owned disposable PostgreSQL container, import created 28 tasks (5
 
 The owner requested continuing development while away and a five-minute self-reminder loop. A local reminder process runs in this session only; it does not start SkyBuild or change task authority. Next useful work: continue the structural task workflow in isolated code/tests. Before any real authority switch, reconcile normalized imported workflow fields with their full raw sections, revalidate the freeze, record recovery and switch authority explicitly under architecture section 4. Do not confuse this rehearsal with cutover.
 
+The next isolated implementation slice now adds [manual task actions](implementation/manual_workflow_slice.md): rework, reassess, defer and resume, with a CPU-only paged due-deferral reconciler and workbench controls. Direct API edits cannot set computed status/phase/blocker or reserved workflow metadata. The separate `workflow_review` session found and re-reviewed corrected state and pagination defects. The full suite passed 125 tests with one existing upstream warning. This is not the finished structural workflow: split/merge, complete evidence-based transitions, automatic catch-up scheduling and active-effect reconciliation remain open. No live task authority changed.
+
 Saved 2026-10-08 after architecture revision A33 and the subsequent implementation authorization below. Resume from /home/kevin/my_code with sibling skybuild and skykeep checkouts. This is context, not a competing design plan.
 
 ## Committed checkpoint and immediate next task

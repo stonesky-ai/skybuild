@@ -73,6 +73,24 @@ def test_http_task_revision_replay_and_scope(service):
     assert len(history.json()) == 2
 
 
+def test_http_manual_task_action_preserves_reason_and_revision(service):
+    client, _, project, _, _, owner_token, _ = service
+    base = f"/api/v1/projects/{project}/tasks"
+    created = client.post(base, json={"task_id": "action", "title": "Act", "description": "Review"},
+                          headers=headers(owner_token, "action-create"))
+    assert created.status_code == 201
+    action = client.post(base + "/action/actions/rework",
+                         json={"reason": "Check failed", "next_action": "Fix failed check"},
+                         headers=headers(owner_token, "action-rework", 1))
+    assert action.status_code == 200, action.text
+    assert action.json()["phase"] == "needs-rework"
+    assert action.json()["revision"] == 2
+    assert client.post(base + "/action/actions/rework", json={"reason": "Check failed", "next_action": "Fix failed check"},
+                       headers=headers(owner_token, "action-rework", 1)).json() == action.json()
+    assert client.post(base + "/action/actions/defer", json={"reason": "Wait", "until": "2026-10-09T12:00:00"},
+                       headers=headers(owner_token, "invalid-date", 2)).status_code == 422
+
+
 def test_http_cord_handling_and_transactional_reply(service):
     client, _, project, owner, worker, owner_token, worker_token = service
     base = f"/api/v1/projects/{project}/cord"

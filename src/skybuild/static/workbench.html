@@ -31,6 +31,7 @@
       <aside>
         <section class="panel" aria-labelledby="tasks-title">
           <div class="section-heading"><h2 id="tasks-title">Tasks</h2><button id="refresh-tasks" type="button" disabled>Refresh tasks</button></div>
+          <button id="reconcile-due" type="button" disabled>Reassess due deferrals</button>
           <p class="hint">Shows up to 100 tasks. History shows up to 100 events.</p>
           <p id="task-count">Not connected</p>
           <ul id="task-list" class="task-list"></ul>
@@ -55,7 +56,7 @@
           <label for="edit-description">Description</label><textarea id="edit-description" required maxlength="32768" rows="8" disabled></textarea>
           <div class="field-pair">
             <div><label for="edit-status">Status</label><select id="edit-status" disabled><option>proposed</option><option>ready</option><option>in-progress</option><option>blocked</option><option>deferred</option><option>done</option></select></div>
-            <div><label for="edit-phase">Phase</label><input id="edit-phase" required maxlength="200" disabled></div>
+            <div><label for="edit-phase">Phase</label><input id="edit-phase" maxlength="200" disabled></div>
           </div>
           <label for="edit-next">Next action</label><textarea id="edit-next" maxlength="4096" rows="2" disabled></textarea>
           <label for="edit-blocker">Blocker</label><textarea id="edit-blocker" maxlength="4096" rows="2" disabled></textarea>
@@ -63,6 +64,16 @@
           <label for="edit-dependencies">Dependencies, one task ID per line</label><textarea id="edit-dependencies" rows="4" disabled></textarea>
           <p class="hint">Unfinished tasks require a next action or blocker and a responsible component or person.</p>
           <button id="save" type="submit" disabled>Save changes</button>
+        </form>
+        <form id="action-form">
+          <h3>Task action</h3>
+          <label for="action-kind">Action</label><select id="action-kind" disabled><option value="rework">Request rework</option><option value="reassess">Request reassessment</option><option value="defer">Defer</option><option value="resume">Resume deferred task</option></select>
+          <label for="action-reason">Reason</label><textarea id="action-reason" required maxlength="4096" rows="2" disabled></textarea>
+          <label for="action-next">Next action</label><textarea id="action-next" maxlength="4096" rows="2" disabled></textarea>
+          <label for="action-until">Defer until (date and time with timezone)</label><input id="action-until" placeholder="2030-01-01T09:00:00-05:00" disabled>
+          <label for="action-milestone">Or milestone task ID</label><input id="action-milestone" maxlength="200" disabled>
+          <p class="hint">Deferral requires one trigger. Actions record a reason and leave work blocked for reassessment; they do not authorize execution.</p>
+          <button id="submit-action" type="submit" disabled>Record action</button>
         </form>
         <h3>History</h3>
         <ol id="history" class="history"></ol>

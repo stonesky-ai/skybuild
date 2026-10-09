@@ -5,7 +5,8 @@
   const connection = byId("connection-form");
   const create = byId("create-form");
   const edit = byId("edit-form");
-  let token = "", project = "", selected = null, busy = false, stale = false, epoch = 0, controller = null;
+  const action = byId("action-form");
+  let token = "", project = "", selected = null, busy = false, stale = false, epoch = 0, controller = null, reconcileOffset = 0;
 
   class ApiError extends Error {
     constructor(status) { super(`Request failed (${status})`); this.status = status; }
@@ -23,20 +24,23 @@
     byId("connect").disabled = connected || busy;
     byId("logout").disabled = !connected;
     byId("refresh-tasks").disabled = !connected || busy;
+    byId("reconcile-due").disabled = !connected || busy;
     byId("refresh-selected").disabled = !connected || busy || !selected;
     for (const field of create.elements) field.disabled = !connected || busy;
     for (const field of edit.elements) field.disabled = !connected || busy || !selected;
+    for (const id of ["edit-status", "edit-phase", "edit-blocker"]) byId(id).disabled = true;
     byId("save").disabled = !connected || busy || !selected || stale;
+    for (const field of action.elements) field.disabled = !connected || busy || !selected || stale;
     for (const button of byId("task-list").querySelectorAll("button")) button.disabled = busy || !connected;
   }
 
   function disconnect() {
     epoch += 1;
     if (controller) controller.abort();
-    token = ""; project = ""; selected = null; stale = false; busy = false;
+    token = ""; project = ""; selected = null; stale = false; busy = false; reconcileOffset = 0;
     byId("project").value = "";
     byId("token").value = "";
-    create.reset(); edit.reset();
+    create.reset(); edit.reset(); action.reset();
     byId("task-list").replaceChildren(); byId("history").replaceChildren();
     byId("task-count").textContent = "Not connected";
     byId("selection").textContent = "Select a task to view its definition and history.";
@@ -142,6 +146,17 @@
   });
   byId("logout").addEventListener("click", () => { disconnect(); notice("Logged out. Private task data and token cleared."); });
   byId("refresh-tasks").addEventListener("click", () => perform(async () => { await loadTasks(); notice("Task list refreshed."); }));
+  byId("reconcile-due").addEventListener("click", () => perform(async () => {
+    let total = 0, pages = 0;
+    do {
+      const result = await request(`tasks/reconcile-due?limit=100&offset=${reconcileOffset}`, {method: "POST", body: {}});
+      total += result.reassessed.length;
+      reconcileOffset = result.next_offset ?? 0;
+      pages += 1;
+      if (result.next_offset === null) break;
+    } while (pages < 20);
+    await loadTasks(); notice(`${total} due task(s) sent for reassessment.${reconcileOffset ? " Continue scan for more tasks." : ""}`);
+  }, true));
   byId("refresh-selected").addEventListener("click", () => perform(async () => { await selectTask(selected.task_id); notice("Task and history refreshed. Current revision loaded."); }));
   create.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -158,13 +173,28 @@
     perform(async () => {
       const body = {
         title: byId("edit-title").value, description: byId("edit-description").value,
-        status: byId("edit-status").value, phase: byId("edit-phase").value,
-        next_action: byId("edit-next").value, blocker: byId("edit-blocker").value,
+        next_action: byId("edit-next").value,
         responsible: byId("edit-responsible").value,
         dependencies: byId("edit-dependencies").value.split(/\r?\n/).filter((line) => line.trim()),
       };
       await request(`tasks/${encodeURIComponent(selected.task_id)}`, { method: "PATCH", body, revision: selected.revision });
       await loadTasks(); await selectTask(selected.task_id); notice("Task changes saved.");
+    }, true);
+  });
+  action.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!selected || stale) return;
+    perform(async () => {
+      const kind = byId("action-kind").value;
+      const body = {reason: byId("action-reason").value};
+      if (byId("action-next").value) body.next_action = byId("action-next").value;
+      if (kind === "defer") {
+        if (byId("action-until").value) body.until = byId("action-until").value;
+        if (byId("action-milestone").value) body.milestone_task_id = byId("action-milestone").value;
+      }
+      await request(`tasks/${encodeURIComponent(selected.task_id)}/actions/${kind}`,
+                    {method: "POST", body, revision: selected.revision});
+      action.reset(); await loadTasks(); await selectTask(selected.task_id); notice("Task action recorded.");
     }, true);
   });
   controls();

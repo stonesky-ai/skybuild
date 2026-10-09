@@ -285,16 +285,20 @@ class Store:
             connection.execute('INSERT INTO task_dependencies VALUES (%s, %s, %s)', (project_id, task_id, dependency))
 
     @staticmethod
-    def _journal(connection, principal, after, before=None):
-        operation = 'updated' if before else 'created'
+    def _journal(connection, principal, after, before=None, *, operation=None, reason=None):
+        operation = operation or ('updated' if before else 'created')
         connection.execute(
             'INSERT INTO task_journal (event_id, project_id, task_id, actor, operation, revision, reason, before_state, after_state) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)',
             (uuid4(), after['project_id'], after['task_id'], principal.principal_id, operation,
-             after['revision'], 'Task ' + operation, Jsonb(before) if before else None, Jsonb(after)),
+             after['revision'], reason or 'Task ' + operation, Jsonb(before) if before else None, Jsonb(after)),
         )
 
     def create_task(self, principal, project_id, body: dict, idempotency_key: str) -> dict:
         _body(body, TASK_FIELDS | {'task_id'})
+        if body.get('status', 'proposed') != 'proposed' or body.get('phase', 'triage') != 'triage' or body.get('blocker') is not None:
+            _invalid('New tasks start in proposed triage; use guarded actions for workflow changes')
+        if isinstance(body.get('metadata'), dict) and '_skybuild_workflow' in body['metadata']:
+            _invalid('Workflow metadata is managed by task actions')
         task_id = _identifier(body.get('task_id'), 'task_id')
         values = self._task_values({key: value for key, value in body.items() if key != 'task_id'})
         with self._connection() as connection:
@@ -325,9 +329,91 @@ class Store:
 
     def update_task(self, principal, project_id, task_id, body: dict, expected_revision: int, idempotency_key: str) -> dict:
         _body(body, TASK_FIELDS)
+        if set(body) & {'status', 'phase', 'blocker'}:
+            _invalid('Workflow state changes require a guarded task action')
+        if isinstance(body.get('metadata'), dict) and '_skybuild_workflow' in body['metadata']:
+            _invalid('Workflow metadata is managed by task actions')
+        def changes(before, connection):
+            if '_skybuild_workflow' not in before['metadata']:
+                return body
+            updated = dict(body)
+            workflow = json.loads(json.dumps(before['metadata']['_skybuild_workflow']))
+            workflow['generation'] += 1
+            workflow['last_action'] = 'definition_edit'
+            workflow['reason'] = 'Task fields edited'
+            workflow.pop('deferral', None)
+            updated['metadata'] = {**body.get('metadata', before['metadata']), '_skybuild_workflow': workflow}
+            updated.update({'status': 'blocked', 'phase': 'reassess', 'blocker': 'Task definition changed',
+                            'next_action': 'Reassess changed task definition'})
+            return updated
+        return self._change_task(principal, project_id, task_id, expected_revision, idempotency_key,
+                                 'task.update', {'task_id': task_id, 'revision': expected_revision, 'body': body},
+                                 changes)
+
+    def task_action(self, principal, project_id, task_id, action: str, body: dict, expected_revision: int, idempotency_key: str) -> dict:
+        from .workflow import ACTIONS, ACTION_FIELDS, action_change
+
+        if action not in ACTIONS:
+            _invalid('Unsupported task action')
+        _body(body, ACTION_FIELDS)
+        def changes(before, connection):
+            result = action_change(before, action, body)
+            milestone = body.get('milestone_task_id')
+            if milestone is not None:
+                milestone_task = self._task(connection, project_id, milestone)
+                if milestone_task['status'] == 'done':
+                    raise DomainError('workflow_conflict', 'Deferral milestone is already complete', 409)
+            return result
+        return self._change_task(principal, project_id, task_id, expected_revision, idempotency_key,
+                                 'task.action.' + action,
+                                 {'task_id': task_id, 'revision': expected_revision, 'body': body}, changes,
+                                 reason=body.get('reason'))
+
+    def reconcile_due_deferrals(self, principal, project_id, idempotency_key: str, *, limit=100, offset=0, now=None) -> dict:
+        """Perform one bounded CPU-only catch-up page; caller may advance offset."""
+        from .workflow import due_deferral
+
+        self._page(limit, offset)
+        _text(idempotency_key, 'idempotency_key')
+        now = now or datetime.now(timezone.utc)
+        if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+            _invalid('Reconciliation time must include a timezone')
+        with self._connection() as connection:
+            self._authorize(connection, principal, project_id, 'tasks:write')
+        tasks = self.list_tasks(principal, project_id, limit=limit, offset=offset)
+        changed = []
+        for task in tasks:
+            if task['status'] != 'deferred':
+                continue
+            milestone = task['metadata'].get('_skybuild_workflow', {}).get('deferral', {}).get('milestone_task_id')
+            milestone_done = False
+            if milestone:
+                try:
+                    milestone_done = self.get_task(principal, project_id, milestone)['status'] == 'done'
+                except DomainError as error:
+                    if error.code != 'not_found':
+                        raise
+            if not due_deferral(task, now, milestone_done):
+                continue
+            key = hashlib.sha256(f'{idempotency_key}:{task["task_id"]}:{task["revision"]}'.encode()).hexdigest()
+            try:
+                self.task_action(principal, project_id, task['task_id'], 'resume',
+                                 {'reason': 'Deferral trigger reached', 'next_action': 'Reassess current definition and dependencies'},
+                                 task['revision'], key)
+            except DomainError as error:
+                if error.code != 'stale_revision':
+                    raise
+            else:
+                changed.append(task['task_id'])
+        return {'scanned': len(tasks), 'reassessed': changed, 'next_offset': offset + len(tasks) if len(tasks) == limit else None}
+
+    def _change_task(self, principal, project_id, task_id, expected_revision, idempotency_key,
+                     operation, payload, changes, *, reason=None):
         _identifier(task_id, 'task_id')
-        if type(expected_revision) is not int or expected_revision < 1 or not body:
-            _invalid('Updates require changes and a positive expected revision')
+        if type(expected_revision) is not int or expected_revision < 1:
+            _invalid('Updates require a positive expected revision')
+        if operation == 'task.update' and not payload['body']:
+            _invalid('Updates require changes')
         with self._connection() as connection:
             principal = self._authorize(connection, principal, project_id, 'tasks:write')
             def mutation():
@@ -335,6 +421,7 @@ class Store:
                 before = self._task(connection, project_id, task_id, lock=True)
                 if before['revision'] != expected_revision:
                     raise DomainError('stale_revision', 'Task revision has changed', 409)
+                body = changes(before, connection)
                 values = self._task_values(body, before)
                 columns = [key for key in values if key != 'dependencies']
                 parameters = [Jsonb(values[key]) if key == 'metadata' else values[key] for key in columns]
@@ -342,9 +429,11 @@ class Store:
                 connection.execute(sql.SQL('UPDATE tasks SET {}, revision = revision + 1, updated_at = now() WHERE project_id = %s AND task_id = %s').format(assignments), (*parameters, project_id, task_id))
                 self._dependencies(connection, project_id, task_id, values['dependencies'])
                 after = self._task(connection, project_id, task_id)
-                self._journal(connection, principal, after, before)
+                self._journal(connection, principal, after, before,
+                              operation=operation.removeprefix('task.action.') if operation.startswith('task.action.') else None,
+                              reason=reason)
                 return after
-            return self._idempotent(connection, principal, project_id, 'task.update', idempotency_key, {'task_id': task_id, 'revision': expected_revision, 'body': body}, mutation)
+            return self._idempotent(connection, principal, project_id, operation, idempotency_key, payload, mutation)
 
     def task_history(self, principal, project_id, task_id, *, limit=100, offset=0) -> list[dict]:
         self._page(limit, offset)
