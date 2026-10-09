@@ -1,6 +1,7 @@
 """Offline workflow tests: no GitHub writes or live database access."""
 import importlib.util
 import json
+from contextlib import nullcontext
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -76,6 +77,7 @@ def test_candidate_gate_cleanup_and_ref_checks(tmp_path, monkeypatch, change):
                            gate_argv=None if change == "default_gate" else ["fake-gate", "{checkout}"], merge=False)
     monkeypatch.setattr(module, "verify_skybuild", lambda path: path)
     monkeypatch.setattr(module, "verify_skybuild_remote", lambda *_: None)
+    monkeypatch.setattr(module, "reserve_worktree_slots", lambda *_: nullcontext())
     calls = []
     base_reads = 0
     def fake_run(argv, cwd):
@@ -128,14 +130,6 @@ def test_failed_gate_retains_log_without_test_output(monkeypatch, tmp_path):
     with pytest.raises(RuntimeError, match=r"Gate failed.*log=/tmp/skybuild-gate.log") as failure:
         module.run_gate(["gate"], tmp_path)
     assert "secret" not in str(failure.value)
-
-
-def test_integration_reserves_worktree_slot(monkeypatch, tmp_path):
-    module = load("integrate_reviewed_pr")
-    blocks = "\n\n".join(f"worktree /repo-{index}" for index in range(64))
-    monkeypatch.setattr(module, "run", lambda argv, cwd: blocks)
-    with pytest.raises(RuntimeError, match="Worktree limit reached"):
-        module.require_worktree_slot(tmp_path)
 
 
 def test_custom_gate_cannot_publish(monkeypatch, tmp_path):

@@ -13,6 +13,7 @@ import subprocess
 
 from _repo_guard import RepoGuardError, verify_skybuild
 from disposable_pg_gate import available_memory_bytes
+from _worktree_capacity import MAX_WORKTREES, WorktreeCapacityError, reserve_worktree_slots
 
 
 class PreparationError(RuntimeError):
@@ -20,7 +21,6 @@ class PreparationError(RuntimeError):
 
 
 MAX_BUNDLE_TASKS = 20
-MAX_WORKTREES = 64
 PREPARE_WORKTREE_RESERVE = 2
 
 
@@ -199,17 +199,17 @@ def prepare(checkout: Path, manifest: Path, output: Path) -> dict:
             if candidate.exists():
                 raise PreparationError("Interrupted preparation retained; use a new output")
             _reserve()
-            current_worktrees = git(root, "worktree", "list", "--porcelain").splitlines()
-            if sum(line.startswith("worktree ") for line in current_worktrees) > \
-                    MAX_WORKTREES - PREPARE_WORKTREE_RESERVE:
-                raise PreparationError("Worktree count changed; reserve two slots before preparing a bundle")
             refs = [inputs["target"]["ref"], *(m["ref"] for m in inputs["members"])]
             git(root, "fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin", *refs)
             check_refs(root, inputs)
             for item in [inputs["target"], *inputs["members"]]:
                 git(root, "cat-file", "-e", item["sha"] + "^{commit}")
-            git(root, "-c", "core.hooksPath=/dev/null", "worktree", "add", "--detach",
-                str(candidate), inputs["target"]["sha"])
+            try:
+                with reserve_worktree_slots(root, PREPARE_WORKTREE_RESERVE):
+                    git(root, "-c", "core.hooksPath=/dev/null", "worktree", "add", "--detach",
+                        str(candidate), inputs["target"]["sha"])
+            except WorktreeCapacityError as error:
+                raise PreparationError(str(error)) from error
             for member in inputs["members"]:
                 _reserve()
                 _assert_candidate(root, candidate)

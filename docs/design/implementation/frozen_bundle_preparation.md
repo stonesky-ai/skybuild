@@ -55,7 +55,8 @@ two slots under the 64-worktree host limit for the retained prepared candidate
 and the disposable integration candidate. The integration helper refuses to
 start at the worktree limit. Clean only finished worktrees owned by the current
 session after verifying their work is pushed or otherwise preserved; never
-remove dirty or unknown-owner worktrees.
+remove locked, dirty, or unknown-owner worktrees. Preparation and integration
+serialize slot reservations with a shared lock in the common Git directory.
 
 Run from a clean, explicitly owned SkyBuild checkout whose origin fetch/push
 URLs identify `stonesky-ai/skybuild`. Use a new output directory outside every

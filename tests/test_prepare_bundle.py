@@ -11,6 +11,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import prepare_bundle as bundle
+import _worktree_capacity as capacity
 
 
 def git(root, *args):
@@ -188,6 +189,7 @@ def test_preparation_reserves_worktree_slots(repository, monkeypatch):
         return original_git(checkout, *arguments)
 
     monkeypatch.setattr(bundle, "git", over_limit)
+    monkeypatch.setattr(capacity, "_worktree_count", lambda _: 63)
     with pytest.raises(bundle.PreparationError, match="reserve 2 slots"):
         bundle.prepare(root, manifest, output)
     assert not output.exists()

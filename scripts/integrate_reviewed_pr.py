@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 from _repo_guard import RepoGuardError, verify_skybuild, verify_skybuild_remote
+from _worktree_capacity import reserve_worktree_slots
 
 
 def run(argv, cwd):
@@ -38,13 +39,6 @@ def run_gate(argv, cwd):
             detail += "; log=" + log
         raise RuntimeError(detail)
     return evidence
-
-
-def require_worktree_slot(root):
-    listed = run(["git", "worktree", "list", "--porcelain"], root)
-    count = sum(line.startswith("worktree ") for line in listed.splitlines())
-    if count >= 64:
-        raise RuntimeError("Worktree limit reached; clean finished owned worktrees before integration")
 
 
 def integrate(args):
@@ -91,8 +85,7 @@ def integrate(args):
     # Resolve both objects locally; fail if fetch and remote inspection raced.
     for oid in (base, head):
         run(["git", "cat-file", "-e", oid + "^{commit}"], root)
-    require_worktree_slot(root)
-    with tempfile.TemporaryDirectory(prefix="skybuild-pr-candidate-") as directory:
+    with reserve_worktree_slots(root, 1), tempfile.TemporaryDirectory(prefix="skybuild-pr-candidate-") as directory:
         candidate = Path(directory) / "checkout"
         added = False
         try:
