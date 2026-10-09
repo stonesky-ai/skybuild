@@ -16,7 +16,9 @@ DISABLED_FILE = "dunsel.disabled"
 PID_FILE = "dunsel.pid"
 LOCK_FILE = "dunsel.control.lock"
 STARTUP_FILE = "dunsel.startup"
-_STATE_FILES = {LOG_FILE, EXIT_FILE, DISABLED_FILE, PID_FILE, LOCK_FILE, STARTUP_FILE}
+INTENT_FILE = "dunsel.launch-intent"
+PID_PENDING_FILE = "dunsel.pid.pending"
+_STATE_FILES = {LOG_FILE, EXIT_FILE, DISABLED_FILE, PID_FILE, LOCK_FILE, STARTUP_FILE, INTENT_FILE, PID_PENDING_FILE}
 _NOFOLLOW = os.O_NOFOLLOW
 _NONBLOCK = os.O_NONBLOCK
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
@@ -178,7 +180,18 @@ def read_tail(name: str, max_bytes: int) -> tuple[os.stat_result, bytes]:
 def write_process_identity(pid: int) -> None:
     """Pin PID, kernel start time and exact arguments across local checkouts."""
     start, args = _proc_identity(pid)
-    write_text(PID_FILE, json.dumps({"pid": pid, "start": start, "args": args}) + "\n")
+    write_text(PID_PENDING_FILE, json.dumps({"pid": pid, "start": start, "args": args}) + "\n")
+    descriptor = open_file(PID_PENDING_FILE, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    directory = _open_state_dir()
+    try:
+        os.replace(PID_PENDING_FILE, PID_FILE, src_dir_fd=directory, dst_dir_fd=directory)
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def process_identity() -> dict | None:
@@ -191,13 +204,15 @@ def process_identity() -> dict | None:
                 or args[2:] != ["--instance", "dunsel"]
                 or not Path(args[0]).is_absolute() or not Path(args[1]).is_absolute()
                 or Path(args[1]).name != "marshall_dunsel.py"):
-            return None
+            raise ValueError("invalid Dunsel process identity")
         start, current = _proc_identity(pid)
         if current != args or start != record["start"]:
             return None
         return {"pid": pid, "command": " ".join(args), "args": args}
-    except (OSError, ValueError, UnicodeError, KeyError, TypeError, IndexError):
+    except FileNotFoundError:
         return None
+    except (KeyError, TypeError, IndexError):
+        raise ValueError("invalid Dunsel process identity") from None
 
 
 def _proc_identity(pid: int) -> tuple[str, list[str]]:
@@ -231,11 +246,26 @@ def startup_alive() -> bool:
     try:
         record = json.loads(read_text(STARTUP_FILE))
     except FileNotFoundError:
-        return False
-    if type(record.get("pid")) is not int or record["pid"] <= 0:
+        return file_exists(INTENT_FILE)
+    if not isinstance(record, dict) or type(record.get("pid")) is not int or record["pid"] <= 0:
         raise ValueError("invalid Dunsel startup record")
     try:
         start, _ = _proc_identity(record["pid"])
     except FileNotFoundError:
         return False
     return start == record["start"]
+
+
+def record_launch_intent() -> None:
+    """Persist blocking intent before Popen; failed publication cannot permit retry."""
+    write_text(INTENT_FILE, "launch pending; physical process exposure is unknown\n")
+    descriptor = open_file(INTENT_FILE, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    directory = _open_state_dir()
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)

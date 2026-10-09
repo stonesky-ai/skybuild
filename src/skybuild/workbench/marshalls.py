@@ -70,6 +70,7 @@ def start() -> dict:
         if dunsel_state.startup_alive():
             raise MarshallConflict("A previous Dunsel startup is still unresolved.")
         dunsel_state.unlink_file(dunsel_state.STARTUP_FILE)
+        dunsel_state.unlink_file(dunsel_state.INTENT_FILE)
         existing = _worker_processes()
         if existing:
             return {"started": False, "pid": existing[0]["pid"]}
@@ -81,15 +82,21 @@ def start() -> dict:
             dunsel_state.LOG_FILE, os.O_WRONLY | os.O_CREAT | os.O_APPEND
         )
         with os.fdopen(log_descriptor, "a", encoding="utf-8") as output:
-            process = subprocess.Popen(
-                [nohup, sys.executable, str(WORKER), "--instance", "dunsel"],
-                stdin=subprocess.DEVNULL,
-                stdout=output,
-                stderr=subprocess.STDOUT,
-                cwd=str(WORKER.parent.parent),
-                close_fds=True,
-                start_new_session=True,
-            )
+            dunsel_state.record_launch_intent()
+            try:
+                process = subprocess.Popen(
+                    [nohup, sys.executable, str(WORKER), "--instance", "dunsel"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                    cwd=str(WORKER.parent.parent),
+                    close_fds=True,
+                    start_new_session=True,
+                )
+            except OSError:
+                # Popen reaps failed execs before raising OSError.
+                dunsel_state.unlink_file(dunsel_state.INTENT_FILE)
+                raise
         try:
             dunsel_state.record_startup(process.pid)
         except FileNotFoundError:
@@ -101,9 +108,11 @@ def start() -> dict:
             if any(int(row["pid"]) == process.pid for row in _worker_processes()):
                 _write_pid(process.pid)
                 dunsel_state.unlink_file(dunsel_state.STARTUP_FILE)
+                dunsel_state.unlink_file(dunsel_state.INTENT_FILE)
                 return {"started": True, "pid": process.pid}
             if process.poll() is not None:
                 dunsel_state.unlink_file(dunsel_state.STARTUP_FILE)
+                dunsel_state.unlink_file(dunsel_state.INTENT_FILE)
                 dunsel_state.unlink_file(dunsel_state.PID_FILE)
                 raise RuntimeError("Dunsel exited during startup")
             time.sleep(0.02)
@@ -113,6 +122,7 @@ def start() -> dict:
         except subprocess.TimeoutExpired:
             raise RuntimeError("Dunsel startup remains unresolved after termination") from None
         dunsel_state.unlink_file(dunsel_state.STARTUP_FILE)
+        dunsel_state.unlink_file(dunsel_state.INTENT_FILE)
         dunsel_state.unlink_file(dunsel_state.PID_FILE)
         raise RuntimeError("Dunsel did not become visible in the process table")
 

@@ -215,7 +215,7 @@ def test_worker_publication_blocks_other_checkout_start(tmp_path, monkeypatch):
     controller_entered = threading.Event()
 
     def partial_write(name, text, **kwargs):
-        if name == dunsel_state.PID_FILE:
+        if name == dunsel_state.PID_PENDING_FILE:
             original_write(name, "")
             truncated.set()
             assert release.wait(5), "test did not release worker publication"
@@ -281,4 +281,89 @@ def test_visibility_timeout_retains_unstopped_process_exposure(tmp_path, monkeyp
     assert process.terminated
     assert dunsel_state.startup_alive()
     with pytest.raises(marshalls.MarshallConflict, match="startup is still unresolved"):
+        marshalls.start()
+
+
+def test_post_spawn_record_failure_blocks_duplicate_retry(tmp_path, monkeypatch):
+    use_private_state(monkeypatch, tmp_path / "state")
+    monkeypatch.setattr(marshalls, "_worker_processes", lambda: [])
+    monkeypatch.setattr(marshalls.shutil, "which", lambda name: "/usr/bin/nohup")
+    launches = []
+    class Process:
+        pid = 123
+    def spawn(*args, **kwargs):
+        assert dunsel_state.file_exists(dunsel_state.INTENT_FILE)
+        launches.append(Process())
+        return launches[-1]
+    def record_failure(pid):
+        raise OSError("simulated ENOSPC before process record creation")
+    monkeypatch.setattr(marshalls.subprocess, "Popen", spawn)
+    monkeypatch.setattr(dunsel_state, "record_startup", record_failure)
+
+    for _ in range(2):
+        try:
+            marshalls.start()
+        except (OSError, marshalls.MarshallConflict):
+            pass
+    assert len(launches) == 1
+
+
+def test_pre_spawn_intent_failure_never_launches(tmp_path, monkeypatch):
+    use_private_state(monkeypatch, tmp_path / "state")
+    monkeypatch.setattr(marshalls, "_worker_processes", lambda: [])
+    monkeypatch.setattr(marshalls.shutil, "which", lambda name: "/usr/bin/nohup")
+    def fail_intent():
+        raise OSError("simulated intent fsync failure")
+    monkeypatch.setattr(dunsel_state, "record_launch_intent", fail_intent)
+    monkeypatch.setattr(marshalls.subprocess, "Popen", lambda *args, **kwargs: pytest.fail("intent must be durable before spawn"))
+    with pytest.raises(OSError, match="intent fsync failure"):
+        marshalls.start()
+
+
+def test_known_popen_failure_clears_pre_spawn_intent(tmp_path, monkeypatch):
+    use_private_state(monkeypatch, tmp_path / "state")
+    monkeypatch.setattr(marshalls, "_worker_processes", lambda: [])
+    monkeypatch.setattr(marshalls.shutil, "which", lambda name: "/usr/bin/nohup")
+    def fail_spawn(*args, **kwargs):
+        assert dunsel_state.file_exists(dunsel_state.INTENT_FILE)
+        raise FileNotFoundError("simulated missing executable")
+    monkeypatch.setattr(marshalls.subprocess, "Popen", fail_spawn)
+    with pytest.raises(FileNotFoundError, match="missing executable"):
+        marshalls.start()
+    assert not dunsel_state.file_exists(dunsel_state.INTENT_FILE)
+
+
+def test_partial_post_spawn_record_never_clears_intent(tmp_path, monkeypatch):
+    use_private_state(monkeypatch, tmp_path / "state")
+    dunsel_state.record_launch_intent()
+    dunsel_state.write_text(dunsel_state.STARTUP_FILE, "{")
+    monkeypatch.setattr(marshalls.subprocess, "Popen", lambda *args, **kwargs: pytest.fail("partial record must fail closed"))
+    with pytest.raises(ValueError):
+        marshalls.start()
+    assert dunsel_state.file_exists(dunsel_state.INTENT_FILE)
+
+
+def test_failed_pid_publication_preserves_previous_identity(tmp_path, monkeypatch):
+    use_private_state(monkeypatch, tmp_path / "state")
+    args = ["/other/python", "/other/skybuild/marshall_dunsel.py", "--instance", "dunsel"]
+    monkeypatch.setattr(dunsel_state, "_proc_identity", lambda pid: ("42", args))
+    with dunsel_state.locked_control():
+        dunsel_state.write_process_identity(123)
+    original_write = dunsel_state.write_text
+    def partial_failure(name, text, **kwargs):
+        if name == dunsel_state.PID_PENDING_FILE:
+            original_write(name, "{")
+            raise OSError("simulated ENOSPC during worker publication")
+        original_write(name, text, **kwargs)
+    monkeypatch.setattr(dunsel_state, "write_text", partial_failure)
+    with pytest.raises(OSError, match="worker publication"):
+        marshall_dunsel._write_pid()
+    assert marshalls.start() == {"started": False, "pid": 123}
+
+
+def test_partial_pid_record_fails_closed(tmp_path, monkeypatch):
+    use_private_state(monkeypatch, tmp_path / "state")
+    dunsel_state.write_text(dunsel_state.PID_FILE, "{")
+    monkeypatch.setattr(marshalls.subprocess, "Popen", lambda *args, **kwargs: pytest.fail("partial PID must block spawn"))
+    with pytest.raises(ValueError):
         marshalls.start()
