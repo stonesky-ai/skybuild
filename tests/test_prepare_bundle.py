@@ -158,6 +158,41 @@ def test_unreviewed_or_ambiguous_members_refused(repository, change):
     assert not output.exists()
 
 
+def test_more_than_twenty_members_refused(repository):
+    root, manifest, output, values, member, save = repository
+    member("one")
+    values["members"] *= 21
+    save()
+    with pytest.raises(bundle.PreparationError, match=r"1\.\.20 explicit reviewed members"):
+        bundle.prepare(root, manifest, output)
+    assert not output.exists()
+
+
+def test_twenty_members_are_allowed(repository):
+    root, manifest, output, _, member, _ = repository
+    for index in range(20):
+        member(f"task-{index:02d}")
+    result = bundle.prepare(root, manifest, output)
+    assert result["ok"]
+    assert len(result["included"]) == 20
+
+
+def test_preparation_reserves_worktree_slots(repository, monkeypatch):
+    root, manifest, output, _, member, _ = repository
+    member("one")
+    original_git = bundle.git
+
+    def over_limit(checkout, *arguments):
+        if arguments == ("worktree", "list", "--porcelain"):
+            return "\n\n".join(f"worktree /tmp/worktree-{index}" for index in range(63))
+        return original_git(checkout, *arguments)
+
+    monkeypatch.setattr(bundle, "git", over_limit)
+    with pytest.raises(bundle.PreparationError, match="reserve 2 slots"):
+        bundle.prepare(root, manifest, output)
+    assert not output.exists()
+
+
 @pytest.mark.parametrize("dirty", ["source", "candidate", "moved-candidate", "attached-candidate"])
 def test_dirty_or_changed_checkout_refused(repository, dirty):
     root, manifest, output, values, member, _ = repository

@@ -19,6 +19,11 @@ class PreparationError(RuntimeError):
     """The supplied frozen inputs cannot produce a reusable candidate."""
 
 
+MAX_BUNDLE_TASKS = 20
+MAX_WORKTREES = 64
+PREPARE_WORKTREE_RESERVE = 2
+
+
 def _git_environment() -> dict[str, str]:
     # Reject before the shared repository guard, which uses inherited environment.
     # This also covers Git's expandable config/environment injection interfaces.
@@ -56,8 +61,8 @@ def frozen_inputs(root: Path, manifest: Path) -> dict:
     if not isinstance(supplied, dict) or supplied.get("schema") != "skybuild.bundle-input.v1":
         raise PreparationError("Unknown manifest schema")
     members = supplied.get("members")
-    if not isinstance(members, list) or not members or len(members) > 64:
-        raise PreparationError("Supply 1..64 explicit reviewed members")
+    if not isinstance(members, list) or not members or len(members) > MAX_BUNDLE_TASKS:
+        raise PreparationError(f"Supply 1..{MAX_BUNDLE_TASKS} explicit reviewed members")
 
     def revision(ref, sha):
         if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
@@ -138,14 +143,20 @@ def prepare(checkout: Path, manifest: Path, output: Path) -> dict:
         raise PreparationError("Output must not be a symlink")
     output = output.resolve()
     # A candidate must not sit within any existing checkout, or contain one.
-    for line in git(root, "worktree", "list", "--porcelain").splitlines():
-        if line.startswith("worktree "):
-            worktree = Path(line[9:]).resolve()
-            # A successful rerun owns exactly this detached candidate.
-            if worktree == output / "candidate":
-                continue
-            if output.is_relative_to(worktree) or worktree.is_relative_to(output):
-                raise PreparationError("Output must be isolated from existing worktrees")
+    worktree_lines = git(root, "worktree", "list", "--porcelain").splitlines()
+    worktree_paths = [Path(line[9:]).resolve() for line in worktree_lines
+                      if line.startswith("worktree ")]
+    needs_new_candidate = not (output / "report.json").exists()
+    if needs_new_candidate and len(worktree_paths) > MAX_WORKTREES - PREPARE_WORKTREE_RESERVE:
+        raise PreparationError(
+            f"Need at most {MAX_WORKTREES - PREPARE_WORKTREE_RESERVE} existing worktrees "
+            f"to reserve {PREPARE_WORKTREE_RESERVE} slots for bundle preparation and integration")
+    for worktree in worktree_paths:
+        # A successful rerun owns exactly this detached candidate.
+        if worktree == output / "candidate":
+            continue
+        if output.is_relative_to(worktree) or worktree.is_relative_to(output):
+            raise PreparationError("Output must be isolated from existing worktrees")
     if not output.exists():
         output.mkdir(mode=0o700, parents=False)
         _write(output / "inputs.json", {"fingerprint": fingerprint, "inputs": inputs})
@@ -188,6 +199,10 @@ def prepare(checkout: Path, manifest: Path, output: Path) -> dict:
             if candidate.exists():
                 raise PreparationError("Interrupted preparation retained; use a new output")
             _reserve()
+            current_worktrees = git(root, "worktree", "list", "--porcelain").splitlines()
+            if sum(line.startswith("worktree ") for line in current_worktrees) > \
+                    MAX_WORKTREES - PREPARE_WORKTREE_RESERVE:
+                raise PreparationError("Worktree count changed; reserve two slots before preparing a bundle")
             refs = [inputs["target"]["ref"], *(m["ref"] for m in inputs["members"])]
             git(root, "fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin", *refs)
             check_refs(root, inputs)

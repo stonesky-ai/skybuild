@@ -130,6 +130,14 @@ def test_failed_gate_retains_log_without_test_output(monkeypatch, tmp_path):
     assert "secret" not in str(failure.value)
 
 
+def test_integration_reserves_worktree_slot(monkeypatch, tmp_path):
+    module = load("integrate_reviewed_pr")
+    blocks = "\n\n".join(f"worktree /repo-{index}" for index in range(64))
+    monkeypatch.setattr(module, "run", lambda argv, cwd: blocks)
+    with pytest.raises(RuntimeError, match="Worktree limit reached"):
+        module.require_worktree_slot(tmp_path)
+
+
 def test_custom_gate_cannot_publish(monkeypatch, tmp_path):
     module = load("integrate_reviewed_pr")
     monkeypatch.setattr(module, "verify_skybuild", lambda path: path)

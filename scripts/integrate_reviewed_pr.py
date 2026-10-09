@@ -40,6 +40,13 @@ def run_gate(argv, cwd):
     return evidence
 
 
+def require_worktree_slot(root):
+    listed = run(["git", "worktree", "list", "--porcelain"], root)
+    count = sum(line.startswith("worktree ") for line in listed.splitlines())
+    if count >= 64:
+        raise RuntimeError("Worktree limit reached; clean finished owned worktrees before integration")
+
+
 def integrate(args):
     root = verify_skybuild(args.checkout)
     if args.merge and args.gate_argv:
@@ -84,6 +91,7 @@ def integrate(args):
     # Resolve both objects locally; fail if fetch and remote inspection raced.
     for oid in (base, head):
         run(["git", "cat-file", "-e", oid + "^{commit}"], root)
+    require_worktree_slot(root)
     with tempfile.TemporaryDirectory(prefix="skybuild-pr-candidate-") as directory:
         candidate = Path(directory) / "checkout"
         added = False
