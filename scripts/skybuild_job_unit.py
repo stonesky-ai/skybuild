@@ -49,7 +49,7 @@ class JobSpec:
     def validate(self) -> None:
         if not isinstance(self.task_id, str) or not isinstance(self.attempt_id, str) or not IDENTIFIER.fullmatch(self.task_id) or not IDENTIFIER.fullmatch(self.attempt_id):
             raise JobUnitError("task_id and attempt_id need safe stable identifiers")
-        if not self.worktree.is_absolute() or not self.worktree.is_dir() or self.worktree.is_symlink():
+        if not self.worktree.is_absolute() or not self.worktree.is_dir() or self.worktree.is_symlink() or "\n" in str(self.worktree) or "\r" in str(self.worktree):
             raise JobUnitError("worktree must be an existing absolute directory")
         if not self.argv or not Path(self.argv[0]).is_absolute() or not all(isinstance(arg, str) and "\x00" not in arg for arg in self.argv):
             raise JobUnitError("argv needs an absolute executable and valid arguments")
