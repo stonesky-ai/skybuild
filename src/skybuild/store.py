@@ -449,14 +449,7 @@ class Store:
             if action == 'ready':
                 if not before['acceptance_criteria'] or self._has_started_history(connection, project_id, task_id):
                     raise DomainError('workflow_conflict', 'Readiness requires acceptance and no started history', 409)
-                for dependency_id in before['dependencies']:
-                    dependency = self._task(connection, project_id, dependency_id)
-                    readiness = connection.execute(
-                        'SELECT input_generation, assessed_generation FROM task_readiness '
-                        'WHERE project_id = %s AND task_id = %s', (project_id, dependency_id)).fetchone()
-                    if (dependency['status'] != 'done' or not readiness or
-                            readiness['input_generation'] != readiness['assessed_generation']):
-                        raise DomainError('workflow_conflict', f'Dependency {dependency_id} lacks current completion', 409)
+                self._require_current_dependencies(connection, project_id, before)
             result = action_change(before, action, body)
             milestone = body.get('milestone_task_id')
             if milestone is not None:
@@ -469,6 +462,19 @@ class Store:
                                  {'task_id': task_id, 'revision': expected_revision, 'body': body}, changes,
                                  reason=body.get('reason'))
 
+    def _require_current_dependencies(self, connection, project_id, task):
+        """The caller holds the graph lock throughout evaluation and publication."""
+        from .completion import current_completion
+
+        for dependency_id in task['dependencies']:
+            dependency = self._task(connection, project_id, dependency_id)
+            readiness = connection.execute(
+                'SELECT input_generation, assessed_generation FROM task_readiness '
+                'WHERE project_id = %s AND task_id = %s', (project_id, dependency_id)).fetchone()
+            if (not current_completion(dependency) or not readiness or
+                    readiness['input_generation'] != readiness['assessed_generation']):
+                raise DomainError('workflow_conflict', f'Dependency {dependency_id} lacks current completion', 409)
+
     def complete_task(self, principal, project_id, task_id, body: dict, expected_revision: int, idempotency_key: str) -> dict:
         """Record owner-attested code acceptance; never contact or publish to GitHub."""
         from .completion import completion_change
@@ -479,8 +485,7 @@ class Store:
             current = self._principal(connection, principal.principal_id)
             if not current.is_admin:
                 raise DomainError('authorization', 'Only an owner/admin may attest completion', 403)
-            if before['dependencies']:
-                raise DomainError('workflow_conflict', 'Dependency-bearing completion requires durable dependency invalidation', 409)
+            self._require_current_dependencies(connection, project_id, before)
             return completion_change(before, body, current.principal_id)
         return self._change_task(principal, project_id, task_id, expected_revision, idempotency_key,
                                  'task.action.completed',

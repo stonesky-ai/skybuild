@@ -11,13 +11,14 @@ from test_store import actors, create, store
 
 
 def completed_fixture(store, owner, project, task_id, **fields):
-    """Seed a current accepted prerequisite without claiming a public completion API."""
+    """Record explicit test attestations through the public completion guard."""
+    from test_completion import evidence
+
     task = create(store, owner, project, task_id, acceptance_criteria=['accepted result'], **fields)
-    with store._connection() as connection:
-        store._graph_lock(connection, project)
-        return store._replace_task(connection, owner, project, task_id, task,
-                                   {'status': 'done', 'phase': 'done'},
-                                   operation='completed', reason='Test fixture acceptance')
+    body = evidence()
+    body['generation'] = task['metadata'].get('_skybuild_workflow', {}).get('generation', 0)
+    body['acceptance'] = [{'criterion': criterion, 'evidence_ref': 'test/accepted'} for criterion in task['acceptance_criteria']]
+    return store.complete_task(owner, project, task_id, body, task['revision'], 'complete-' + task_id)
 
 
 def ready(store, owner, project, task, key=None):
@@ -176,3 +177,60 @@ def test_structural_response_and_retry_use_final_reverse_order_projections(store
     for key, value in result.items():
         for task in value if isinstance(value, list) else [value]:
             assert task == store.get_task(owner, project, task['task_id'])
+
+
+def attest(store, owner, project, task_id, key):
+    from test_completion import evidence
+
+    task = store.get_task(owner, project, task_id)
+    body = evidence()
+    body['generation'] = task['metadata'].get('_skybuild_workflow', {}).get('generation', 0)
+    body['acceptance'] = [{'criterion': criterion, 'evidence_ref': 'test/accepted'} for criterion in task['acceptance_criteria']]
+    return store.complete_task(owner, project, task_id, body, task['revision'], key)
+
+
+def test_reopened_acceptance_invalidates_completed_transitive_dependents(store, actors):
+    from skybuild.completion import current_completion
+
+    project, people = actors
+    owner = people['owner']
+    completed_fixture(store, owner, project, 'root')
+    completed_fixture(store, owner, project, 'middle', dependencies=['root'])
+    completed_fixture(store, owner, project, 'tail', dependencies=['middle'])
+    root = store.get_task(owner, project, 'root')
+    store.task_action(owner, project, 'root', 'rework', {'reason': 'Acceptance requires correction'},
+                      root['revision'], 'reopen-accepted')
+    for task_id in ('root', 'middle', 'tail'):
+        assert not current_completion(store.get_task(owner, project, task_id))
+        assert any(current_completion(event['after_state']) for event in store.task_history(owner, project, task_id))
+    with pytest.raises(DomainError, match='lacks current completion'):
+        attest(store, owner, project, 'tail', 'tail-too-soon')
+    attest(store, owner, project, 'root', 'root-corrected')
+    with pytest.raises(DomainError, match='lacks current completion'):
+        attest(store, owner, project, 'tail', 'middle-not-current')
+    attest(store, owner, project, 'middle', 'middle-reassessed')
+    tail = attest(store, owner, project, 'tail', 'tail-reassessed')
+    assert current_completion(tail)
+    marker = tail['metadata']['_skybuild_workflow']['readiness']
+    assert marker['input_generation'] == marker['assessed_generation']
+
+
+@pytest.mark.parametrize('missing', ['attestation', 'freshness'])
+def test_ready_and_completion_require_both_attestation_and_freshness(store, actors, missing):
+    project, people = actors
+    owner = people['owner']
+    completed_fixture(store, owner, project, 'prerequisite')
+    task = create(store, owner, project, 'dependent', dependencies=['prerequisite'], acceptance_criteria=['check'])
+    with store._connection() as connection:
+        if missing == 'attestation':
+            connection.execute("UPDATE tasks SET metadata = metadata - '_skybuild_completion' "
+                               "WHERE project_id = %s AND task_id = 'prerequisite'", (project,))
+        else:
+            connection.execute("UPDATE task_readiness SET input_generation = input_generation + 1 "
+                               "WHERE project_id = %s AND task_id = 'prerequisite'", (project,))
+    with pytest.raises(DomainError, match='lacks current completion'):
+        ready(store, owner, project, task)
+    with pytest.raises(DomainError, match='lacks current completion'):
+        attest(store, owner, project, 'dependent', 'complete-with-missing-input')
+    assert store.get_task(owner, project, 'dependent')['revision'] == task['revision']
+    assert len(store.task_history(owner, project, 'dependent')) == 1
