@@ -5,7 +5,7 @@ description: Use for SkyBuild code navigation, edits and validation when CodeGra
 
 # Token-efficient SkyBuild coding
 
-At session start read the available CodeGraph and RTK skills and Serena's `initial_instructions` if Serena tools exist. Verify `codegraph status` names this checkout before a graph query. Initialize a missing checkout-local index as authorized in `AGENTS.md`; never use another checkout's index or another session's MCP server.
+At session start read the available CodeGraph and RTK skills and Serena's `initial_instructions` if Serena tools exist. Activate the exact SkyBuild checkout in Serena before a symbol query or edit; if Serena does not respond, continue with CodeGraph and direct source tools. Verify `codegraph status` names this checkout before a graph query. Initialize a missing checkout-local index as authorized in `AGENTS.md`; never use another checkout's index or another session's MCP server.
 
 For code questions, use one scoped CodeGraph `explore` query first. Treat its line-numbered source as already read. Use Serena for targeted symbol inspection or edits when that is more precise; do not repeat a full source read. Use `rtk` for shell output and `rtk proxy` when exact bytes matter. Use `rg` for literal text, docs, config and graph gaps. Run `codegraph sync` after a large pull or branch switch.
 
