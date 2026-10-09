@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 from _repo_guard import RepoGuardError, verify_skybuild, verify_skybuild_remote
+from _worktree_capacity import reserve_worktree_slots
 
 
 def run(argv, cwd):
@@ -84,7 +85,7 @@ def integrate(args):
     # Resolve both objects locally; fail if fetch and remote inspection raced.
     for oid in (base, head):
         run(["git", "cat-file", "-e", oid + "^{commit}"], root)
-    with tempfile.TemporaryDirectory(prefix="skybuild-pr-candidate-") as directory:
+    with reserve_worktree_slots(root, 1), tempfile.TemporaryDirectory(prefix="skybuild-pr-candidate-") as directory:
         candidate = Path(directory) / "checkout"
         added = False
         try:

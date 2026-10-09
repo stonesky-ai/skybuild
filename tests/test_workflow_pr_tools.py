@@ -1,6 +1,7 @@
 """Offline workflow tests: no GitHub writes or live database access."""
 import importlib.util
 import json
+from contextlib import nullcontext
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -76,6 +77,7 @@ def test_candidate_gate_cleanup_and_ref_checks(tmp_path, monkeypatch, change):
                            gate_argv=None if change == "default_gate" else ["fake-gate", "{checkout}"], merge=False)
     monkeypatch.setattr(module, "verify_skybuild", lambda path: path)
     monkeypatch.setattr(module, "verify_skybuild_remote", lambda *_: None)
+    monkeypatch.setattr(module, "reserve_worktree_slots", lambda *_: nullcontext())
     calls = []
     base_reads = 0
     def fake_run(argv, cwd):

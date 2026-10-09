@@ -46,8 +46,17 @@ and reviewer reference are caller attestations to existing independent review;
 the helper cannot qualify a reviewer or interpret prose findings. Supply the
 accepted project/member gate requirements as `policy_evidence`; its bytes are
 hashed with the inputs, not interpreted or weakened. The existing review and
-one full combined disposable gate remain required. The 64-member and 256 KiB
-input limits bound one invocation, not project batching policy.
+one full combined disposable gate remain required. The helper enforces a hard
+limit of 20 unique task members per bundle. At freeze, include all tasks ready
+for integration up to this cap, in dependency order. Do not make a one-task
+bundle while another ready task can fit. The 256 KiB input limits also bound
+one invocation. Preparation requires at most 62 existing worktrees, reserving
+two slots under the 64-worktree host limit for the retained prepared candidate
+and the disposable integration candidate. The integration helper refuses to
+start at the worktree limit. Clean only finished worktrees owned by the current
+session after verifying their work is pushed or otherwise preserved; never
+remove locked, dirty, or unknown-owner worktrees. Preparation and integration
+serialize slot reservations with a shared lock in the common Git directory.
 
 Run from a clean, explicitly owned SkyBuild checkout whose origin fetch/push
 URLs identify `stonesky-ai/skybuild`. Use a new output directory outside every
