@@ -1,5 +1,6 @@
 """Source drift must remain visible without granting cutover authority."""
 import json
+import re
 from pathlib import Path
 import subprocess
 
@@ -17,6 +18,21 @@ CUTOVER_LINE = "- Area: task authority. Dependencies: SKYBUILD-BOOTSTRAP."
 
 def _dependency_row(report, task_id):
     return next(row for row in report["dependency_reconciliation"] if row["task_id"] == task_id)
+
+
+def _workflow_row(report, task_id="SKYBUILD-TASK-CUTOVER"):
+    return next(row for row in report["workflow_reconciliation"] if row["task_id"] == task_id)
+
+
+def _set_cutover_workflow(ledger, lines):
+    path = ledger / "mastertodo.md"
+    text = path.read_text()
+    start = text.index("## SKYBUILD-TASK-CUTOVER ")
+    end = text.find("\n## ", start)
+    section = text[start:end if end != -1 else len(text)]
+    replacement = re.sub(r"^- Status:.*$", lambda _match: "- Status: proposed\n" + "\n".join(lines),
+                         section, count=1, flags=re.MULTILINE)
+    path.write_text(text.replace(section, replacement, 1))
 
 
 def _replace_cutover_dependency(ledger, replacement):
@@ -188,3 +204,91 @@ def test_dependency_evidence_never_becomes_a_mapping(frozen_checkout, replacemen
     assert row["frozen_comparison"]["explicit_dependencies"] == ["SKYBUILD-BOOTSTRAP"]
     assert report["cutover_ready"] is False and report["authority"] == "markdown"
     assert before == {name: (frozen_checkout / name).read_bytes() for name in NAMES}
+
+
+def test_workflow_defaults_come_from_frozen_importer(frozen_checkout):
+    report = audit_ledgers(frozen_checkout, CONTRACT)
+    assert len(report["workflow_reconciliation"]) == sum(report["current_counts"].values())
+    for row in report["workflow_reconciliation"]:
+        defaults = row["frozen_comparison"]["importer_defaults"]
+        assert defaults["phase"] == "imported"
+        assert defaults["responsible"] == "owner"
+        assert defaults["next_action"] == (None if row["source"] == "alreadydone.md"
+                                           else "Review imported ledger task before execution")
+        assert row["frozen_comparison"]["source_changed"] is False
+    assert report["frozen_import_sha256"] == "1d3400fc5ae31ddfbc9e7e55e3b231b070cf7456e11921728aac6e074cdbcdc0"
+
+
+@pytest.mark.parametrize("lines, values", [
+    (["- Phase: reviewing. Responsible: lead; Next action: resolve findings. Acceptance: unchanged."],
+     {"phase": ["reviewing"], "responsible": ["lead"], "next_action": ["resolve findings"]}),
+    (["  - Phase: reviewing", "- Responsible: lead", "- Next action: Review café. Keep evidence."],
+     {"phase": ["reviewing"], "responsible": ["lead"], "next_action": ["Review café. Keep evidence."]}),
+])
+def test_workflow_embedded_and_standalone_labels_keep_exact_evidence(frozen_checkout, lines, values):
+    _set_cutover_workflow(frozen_checkout, lines)
+    before = {name: (frozen_checkout / name).read_bytes() for name in NAMES}
+    report = audit_ledgers(frozen_checkout, CONTRACT)
+    row = _workflow_row(report)
+    for field, expected in values.items():
+        evidence = row["fields"][field]
+        assert [item["value"] for item in evidence["occurrences"]] == expected
+        assert all(item["line"] in lines for item in evidence["occurrences"])
+        assert evidence["state"] == "unreviewed"
+    assert row["frozen_comparison"]["source_changed"] is True
+    assert row["frozen_comparison"]["importer_defaults"]["phase"] == "imported"
+    assert report["authority"] == "markdown" and report["cutover_ready"] is False
+    assert report["stale_freeze"] is True
+    assert before == {name: (frozen_checkout / name).read_bytes() for name in NAMES}
+
+
+def test_workflow_repeated_empty_and_missing_fields_remain_unresolved(frozen_checkout):
+    lines = ["- Phase: reviewing; Phase: working. Responsible: ; Next action:",
+             "- Responsible: lead"]
+    _set_cutover_workflow(frozen_checkout, lines)
+    row = _workflow_row(audit_ledgers(frozen_checkout, CONTRACT))
+    assert [item["value"] for item in row["fields"]["phase"]["occurrences"]] == ["reviewing", "working"]
+    assert row["fields"]["phase"]["repeated"] is True
+    assert row["fields"]["responsible"]["repeated"] is True
+    assert row["fields"]["responsible"]["empty"] is True
+    assert row["fields"]["next_action"]["empty"] is True
+    assert all(field["state"] == "ambiguous" for field in row["fields"].values())
+    # Remove the added lines to distinguish absent fields from empty fields.
+    path = frozen_checkout / "mastertodo.md"
+    path.write_text(path.read_text().replace("\n" + "\n".join(lines), ""))
+    missing = _workflow_row(audit_ledgers(frozen_checkout, CONTRACT))
+    assert all(field["state"] == "missing" and field["occurrences"] == []
+               for field in missing["fields"].values())
+
+
+def test_added_workflow_has_no_frozen_defaults_and_cli_needs_no_database(frozen_checkout, monkeypatch, capsys):
+    monkeypatch.delenv("SKYBUILD_DSN", raising=False)
+    monkeypatch.delenv("SKYBUILD_EXPECTED_DATABASE", raising=False)
+    path = frozen_checkout / "mastertodo.md"
+    path.write_text(path.read_text() + "\n## SKYBUILD-AUDIT-NEW — New task\n- Status: proposed\n"
+                    "- Phase: perhaps ready or blocked. Responsible: unknown.\n")
+    assert main(["ledger-audit", "--ledger-dir", str(frozen_checkout), "--contract", str(CONTRACT)]) == 2
+    report = json.loads(capsys.readouterr().out)
+    row = _workflow_row(report, "SKYBUILD-AUDIT-NEW")
+    assert row["frozen_comparison"] is None
+    assert row["fields"]["phase"]["occurrences"][0]["value"] == "perhaps ready or blocked"
+    assert row["fields"]["phase"]["state"] == "unreviewed"
+    assert row["fields"]["next_action"]["missing"] is True
+    assert report["cutover_ready"] is False and report["authority"] == "markdown"
+
+
+def test_identical_repeated_labels_do_not_override_frozen_evidence(frozen_checkout):
+    initial = _workflow_row(audit_ledgers(frozen_checkout, CONTRACT))
+    _set_cutover_workflow(frozen_checkout, ["- Phase: imported", "- Phase: imported",
+                                          "Next action: This non-bullet prose is not a field."])
+    path = frozen_checkout / "mastertodo.md"
+    path.write_text(path.read_text().replace("- Status: proposed\n- Phase: imported", "- Status: done\n- Phase: imported", 1))
+    report = audit_ledgers(frozen_checkout, CONTRACT)
+    row = _workflow_row(report)
+    assert row["fields"]["phase"]["state"] == "ambiguous"
+    assert len(row["fields"]["phase"]["occurrences"]) == 2
+    assert row["fields"]["next_action"]["missing"] is True
+    assert row["frozen_comparison"]["fields"] == initial["fields"]
+    assert row["frozen_comparison"]["importer_defaults"] == initial["frozen_comparison"]["importer_defaults"]
+    assert row["frozen_comparison"]["importer_defaults"]["next_action"] == "Review imported ledger task before execution"
+    assert report["stale_freeze"] is True and report["cutover_ready"] is False
