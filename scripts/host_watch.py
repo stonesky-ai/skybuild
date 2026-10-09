@@ -68,10 +68,19 @@ def worktree_status(checkout: Path) -> dict:
                                 capture_output=True, text=True, timeout=5, check=True)
     except (OSError, subprocess.SubprocessError):
         return {"status": "unknown", "error": "worktree_inventory_unavailable"}
-    records = [block.splitlines() for block in listed.stdout.strip().split("\n\n") if block]
-    prunable = sum(any(line.startswith("prunable ") for line in block) for block in records)
+    blocks = [block.splitlines() for block in listed.stdout.strip().split("\n\n") if block]
+    if len(blocks) > 64:
+        return {"status": "unknown", "count": len(blocks), "error": "too_many_worktrees"}
+    records = []
+    for block in blocks:
+        fields = dict(line.partition(" ")[::2] for line in block)
+        path = fields.get("worktree", "")
+        records.append({"path": path, "head": fields.get("HEAD"), "branch": fields.get("branch"),
+                        "prunable_reason": fields.get("prunable"),
+                        "ownership": "checkout" if path == str(checkout.resolve()) else "unknown"})
+    prunable = sum(item["prunable_reason"] is not None for item in records)
     return {"status": "attention" if prunable else "clear", "count": len(records),
-            "prunable_count": prunable}
+            "prunable_count": prunable, "records": records}
 
 
 def sample(reserve_bytes: int, *, disk_paths: list[Path] | None = None,
@@ -128,6 +137,7 @@ def watch(path: Path, reserve_bytes: int, interval: int, duration_minutes: int,
           *, disk_paths: list[Path] | None = None, disk_reserve_bytes: int = 4 * 1024**3,
           checkout: Path | None = None) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
+    stop_path = path.with_name(path.name + ".stop")
     lock = os.open(str(path) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
     try:
         try:
@@ -143,6 +153,8 @@ def watch(path: Path, reserve_bytes: int, interval: int, duration_minutes: int,
         deadline = time.monotonic() + duration_minutes * 60
         try:
             while time.monotonic() < deadline:
+                if stop_path.exists():
+                    break
                 try:
                     state = sample(reserve_bytes, disk_paths=disk_paths,
                                    disk_reserve_bytes=disk_reserve_bytes, checkout=checkout)
@@ -154,6 +166,7 @@ def watch(path: Path, reserve_bytes: int, interval: int, duration_minutes: int,
         finally:
             write_state(path, {"sampled_at": datetime.now(timezone.utc).isoformat(),
                                "pid": os.getpid(), "status": "stopped", "reserve_bytes": reserve_bytes})
+            stop_path.unlink(missing_ok=True)
             signal.signal(signal.SIGTERM, previous)
     finally:
         os.close(lock)
@@ -172,8 +185,10 @@ def main() -> int:
     parser.add_argument("--interval", type=int, default=60, help="Watch interval in seconds")
     parser.add_argument("--duration-minutes", type=int, default=480, help="Maximum watch lifetime")
     args = parser.parse_args()
-    if args.reserve_gib < 0 or args.disk_reserve_gib < 0 or args.interval <= 0 or args.duration_minutes <= 0:
-        parser.error("Reserve, interval and duration must be valid positive bounds")
+    if args.reserve_gib < 0 or args.disk_reserve_gib < 0:
+        parser.error("Reserve must not be negative")
+    if not 60 <= args.interval <= 90 or not 1 <= args.duration_minutes <= 480:
+        parser.error("Watch interval must be 60–90 seconds and lifetime at most eight hours")
     reserve_bytes = args.reserve_gib * 1024**3
     disk_paths = args.disk_path or [args.checkout, Path("/tmp")]
     disk_reserve_bytes = args.disk_reserve_gib * 1024**3

@@ -7,7 +7,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import stat
 import subprocess
+import sys
 from types import SimpleNamespace
+
+import pytest
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts/host_watch.py"
@@ -46,6 +49,17 @@ def test_second_watcher_exits_without_changing_state(tmp_path):
         assert not target.exists()
     finally:
         os.close(lock)
+
+
+def test_stop_request_ends_watcher_without_sampling(tmp_path, monkeypatch):
+    target = tmp_path / "host.json"
+    request = tmp_path / "host.json.stop"
+    request.write_text("stop\n")
+    monkeypatch.setattr(watcher, "sample", lambda *args, **kwargs: pytest.fail("unexpected sample"))
+
+    assert watcher.watch(target, 4 * 1024**3, 60, 1) == 0
+    assert json.loads(target.read_text())["status"] == "stopped"
+    assert not request.exists()
 
 
 def test_low_disk_is_reported_without_cleanup(tmp_path, monkeypatch):
@@ -94,4 +108,20 @@ def test_prunable_worktree_is_reported_read_only(tmp_path, monkeypatch):
 
     state = watcher.worktree_status(tmp_path)
 
-    assert state == {"status": "attention", "count": 2, "prunable_count": 1}
+    assert state["status"] == "attention" and state["prunable_count"] == 1
+    assert state["records"][1] == {
+        "path": "/old", "head": "def", "branch": None,
+        "prunable_reason": "gitdir file points to non-existent location", "ownership": "unknown",
+    }
+
+
+@pytest.mark.parametrize("options", [
+    ["--interval", "1"], ["--interval", "600"], ["--duration-minutes", "481"],
+])
+def test_watch_rejects_excessive_polling_or_lifetime(tmp_path, monkeypatch, options):
+    monkeypatch.setattr(sys, "argv", ["host_watch.py", "--state", str(tmp_path / "state.json"),
+                                      "--watch", *options])
+    with pytest.raises(SystemExit) as stopped:
+        watcher.main()
+    assert stopped.value.code == 2
+    assert not (tmp_path / "state.json").exists()
