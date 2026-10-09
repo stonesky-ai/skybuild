@@ -336,6 +336,370 @@ def write_result(path: Path, payload: str) -> None:
             os.unlink(temporary)
 
 
+# This protocol exercise has no live implementation. A MockTransport is mandatory;
+# neither the authority below nor a journal constitutes permission for real calls.
+HTTP_ORIGIN = "https://llm.brodson.net"
+HTTP_MODEL = "qwen3.5-think"
+HTTP_STATE_BYTES = 524288
+SYNTHETIC_TOKEN = "synthetic-not-a-credential"
+
+
+def live_admission(*_args, **_kwargs):
+    raise SpikeError("live_disabled_pending_reviewed_REST_authority")
+
+
+def sanitized(value):
+    """Remove authentication fields and bearer-shaped strings from evidence."""
+    import re
+    if isinstance(value, dict):
+        return {key: ("[redacted]" if re.search(
+            r"authorization|api.?key|access.?token|secret|password|credential|^token$|token.?file", key, re.I)
+            else sanitized(item)) for key, item in value.items()}
+    if isinstance(value, list):
+        return [sanitized(item) for item in value]
+    if isinstance(value, str):
+        # Chat content may itself be structured JSON; sanitize authentication
+        # fields there as well as in the surrounding endpoint envelope.
+        if value.lstrip().startswith(("{", "[")):
+            try:
+                structured = json.loads(value)
+            except (ValueError, RecursionError):
+                pass
+            else:
+                return canonical(sanitized(structured))
+        return re.sub(r"(?i)\bBearer\s+[^\s\"',;]+", "Bearer [redacted]",
+                      value.replace(SYNTHETIC_TOKEN, "[redacted]"))
+    return value
+
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def _fake_http_child(connection, transport, method, path, body):
+    """Fixed owned child: stream, bound and sanitize before crossing IPC."""
+    import httpx
+    started = time.monotonic()
+    try:
+        with httpx.Client(transport=transport, base_url=HTTP_ORIGIN,
+                          trust_env=False, follow_redirects=False,
+                          timeout=httpx.Timeout(60),
+                          headers={"Authorization": "Bearer " + SYNTHETIC_TOKEN}) as client:
+            with client.stream(method, path, json=body if body is not None else None) as response:
+                if response.status_code != 200:
+                    raise SpikeError("HTTP_status_error")
+                if response.headers.get("content-encoding", "identity") != "identity":
+                    raise SpikeError("compressed_response_refused")
+                raw = bytearray()
+                chunks = ([response.content] if response.is_stream_consumed
+                          else response.iter_raw())
+                for chunk in chunks:
+                    if len(raw) + len(chunk) > LIMITS["response_bytes"]:
+                        raise SpikeError("response_too_large")
+                    raw.extend(chunk)
+                value = json.loads(raw)
+                if not isinstance(value, dict):
+                    raise SpikeError("malformed_response")
+                packet = {"response": sanitized(value),
+                          "latency_ms": round((time.monotonic() - started) * 1000, 3)}
+    except SpikeError as error:
+        packet = {"failure": str(error)}
+    except BaseException:
+        # Never persist exception text, headers, URLs or raw error bodies.
+        packet = {"failure": "transport_or_response_error"}
+    try:
+        connection.send_bytes(canonical(packet).encode("utf-8"))
+    finally:
+        connection.close()
+
+
+def fake_http_request(transport, method, path, body, *, deadline_seconds=60):
+    """Hard parent wall deadline covers dispatch, headers, streaming and parsing."""
+    import httpx
+    import multiprocessing
+    import select
+    if type(transport) is not httpx.MockTransport:
+        raise SpikeError("only_explicit_fake_transport_allowed")
+    if (method, path) not in {("GET", "/v1/models"), ("POST", "/v1/chat/completions")}:
+        raise SpikeError("request_scope_invalid")
+    if type(deadline_seconds) not in (float, int) or not 0 < deadline_seconds <= 60:
+        raise SpikeError("invalid_wall_deadline")
+    context = multiprocessing.get_context("fork")
+    receiving, sending = context.Pipe(duplex=False)
+    child = context.Process(target=_fake_http_child, args=(sending, transport, method, path, body))
+    end = time.monotonic() + deadline_seconds
+    child.start()
+    sending.close()
+    try:
+        # Read the framed pipe nonblockingly so a partially written packet cannot
+        # bypass the wall deadline. The child only sends bounded sanitized data.
+        os.set_blocking(receiving.fileno(), False)
+        data = bytearray()
+        expected = None
+        while time.monotonic() < end:
+            ready, _, _ = select.select([receiving.fileno()], [], [], max(0, end - time.monotonic()))
+            if not ready:
+                break
+            chunk = os.read(receiving.fileno(), 65536)
+            if not chunk:
+                raise SpikeError("transport_child_incomplete")
+            data.extend(chunk)
+            if len(data) >= 4 and expected is None:
+                expected = int.from_bytes(data[:4], "big", signed=True)
+                if not 0 <= expected <= HTTP_STATE_BYTES:
+                    raise SpikeError("transport_packet_too_large")
+            if expected is not None and len(data) >= expected + 4:
+                packet = json.loads(data[4:expected + 4])
+                if time.monotonic() >= end:
+                    raise SpikeError("wall_deadline_ambiguous_exposure")
+                return packet
+        raise SpikeError("wall_deadline_ambiguous_exposure")
+    finally:
+        receiving.close()
+        if child.is_alive():
+            child.kill()  # Only the child created above; no host process cleanup.
+        child.join(timeout=1)
+
+
+class FakeHTTPJournal:
+    """Private synthetic attempt journal. A reservation survives uncertain effects."""
+
+    def __init__(self, root, identity):
+        import fcntl
+        import stat
+        self.root = Path(root)
+        metadata = self.root.lstat()
+        if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid()
+                or stat.S_IMODE(metadata.st_mode) != 0o700):
+            raise SpikeError("journal_root_must_be_owned_private_directory")
+        if self.root.absolute() != self.root.resolve():
+            raise SpikeError("journal_root_not_canonical")
+        self.path = self.root / "attempts.json"
+        lock = self.root / "attempts.lock"
+        created = False
+        try:
+            self.lock = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            created = True
+        except FileExistsError:
+            self.lock = os.open(lock, os.O_RDWR | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(self.lock)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+                raise SpikeError("invalid_journal_lock")
+            fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if created:
+                if self.path.exists():
+                    raise SpikeError("journal_lock_missing")
+                os.fsync(self.lock)
+                self.state = {"identity": identity, "synthetic": True, "entries": []}
+                self.save()
+            else:
+                descriptor = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
+                try:
+                    info = os.fstat(descriptor)
+                    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+                        raise SpikeError("invalid_journal_state")
+                    with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                        raw = stream.read(HTTP_STATE_BYTES + 1)
+                    if len(raw) > HTTP_STATE_BYTES:
+                        raise SpikeError("journal_too_large")
+                    self.state = json.loads(raw)
+                    # Re-establish durability before trusting a replacement that
+                    # may have survived an earlier failed directory sync.
+                    os.fsync(descriptor)
+                    directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+                    try:
+                        os.fsync(directory)
+                    finally:
+                        os.close(directory)
+                finally:
+                    os.close(descriptor)
+                if (self.state.get("identity") != identity or self.state.get("synthetic") is not True
+                        or not isinstance(self.state.get("entries"), list)):
+                    raise SpikeError("journal_identity_changed")
+            self.cursor = 0
+        except BlockingIOError:
+            os.close(self.lock)
+            raise SpikeError("journal_locked") from None
+        except SpikeError:
+            os.close(self.lock)
+            raise
+        except (OSError, ValueError, TypeError, RecursionError):
+            os.close(self.lock)
+            raise SpikeError("journal_missing_or_invalid") from None
+        except BaseException:
+            os.close(self.lock)
+            raise
+
+    def close(self):
+        os.close(self.lock)
+
+    def save(self):
+        payload = canonical(self.state)
+        if len(payload.encode("utf-8")) > HTTP_STATE_BYTES:
+            raise SpikeError("journal_too_large")
+        write_result(self.path, payload)
+
+    def obtain(self, request, transport, *, deadline_seconds):
+        if (not isinstance(request, dict) or set(request) != {"method", "path", "body", "case_id"}
+                or (request["method"], request["path"]) not in {
+                    ("GET", "/v1/models"), ("POST", "/v1/chat/completions")}
+                or (request["method"] == "GET" and (request["body"] is not None or request["case_id"] is not None))
+                or (request["method"] == "POST" and request["case_id"] not in SOURCES)):
+            raise SpikeError("request_scope_invalid")
+        entries = self.state["entries"]
+        if self.cursor < len(entries):
+            entry = entries[self.cursor]
+            if entry.get("request") != request:
+                raise SpikeError("journal_request_identity_changed")
+            if entry.get("status") != "completed":
+                raise SpikeError("consumed_attempt_not_reconciled")
+            self.cursor += 1
+            return entry["packet"]
+        if any(entry.get("status") != "completed" for entry in entries):
+            raise SpikeError("consumed_attempt_not_reconciled")
+        if time.time() >= self.state["identity"]["expires_at"]:
+            raise SpikeError("synthetic_authority_expired")
+        generations = [entry for entry in entries if entry["request"]["method"] == "POST"]
+        discovery = [entry for entry in entries if entry["request"]["method"] == "GET"]
+        if request["method"] == "GET":
+            if discovery or generations:
+                raise SpikeError("discovery_budget_exhausted")
+        elif (len(discovery) != 1 or len(generations) >= LIMITS["requests"]
+              or sum(entry["request"]["case_id"] == request["case_id"] for entry in generations) >= 2
+              or (len(generations) + 1) * (LIMITS["input_tokens"] + LIMITS["output_tokens"]) > LIMITS["returned_tokens"]):
+            raise SpikeError("generation_budget_exhausted")
+        entry = {"request": request, "status": "consumed_uncertain"}
+        entries.append(entry)
+        self.save()  # File and directory fsync BEFORE the simulated external effect.
+        started = time.monotonic()
+        try:
+            packet = fake_http_request(transport, request["method"], request["path"], request["body"],
+                                       deadline_seconds=deadline_seconds)
+        except SpikeError as error:
+            entry["parent_elapsed_wall_ms"] = round((time.monotonic() - started) * 1000, 3)
+            entry["failure"] = str(error)
+            self.save()
+            raise
+        entry["parent_elapsed_wall_ms"] = round((time.monotonic() - started) * 1000, 3)
+        entry["packet"] = packet
+        if "failure" in packet:
+            entry["failure"] = packet["failure"]
+            self.save()
+            raise SpikeError(packet["failure"])
+        entry["status"] = "completed"
+        self.save()
+        self.cursor += 1
+        return packet
+
+
+def _http_candidate(packet):
+    value = packet["response"]
+    if "error" in value or value.get("model") != HTTP_MODEL:
+        raise SpikeError("endpoint_error_or_model_mismatch")
+    choices = value.get("choices")
+    if (not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict)
+            or choices[0].get("finish_reason") != "stop"
+            or not isinstance(choices[0].get("message"), dict)
+            or choices[0]["message"].get("role") != "assistant"):
+        raise SpikeError("partial_or_ambiguous_completion")
+    usage = value.get("usage")
+    if (not isinstance(usage, dict)
+            or not integer(usage.get("prompt_tokens"), 1, LIMITS["input_tokens"])
+            or not integer(usage.get("completion_tokens"), 1, LIMITS["output_tokens"])
+            or not integer(usage.get("total_tokens"), 2, LIMITS["input_tokens"] + LIMITS["output_tokens"])
+            or usage["total_tokens"] != usage["prompt_tokens"] + usage["completion_tokens"]):
+        raise SpikeError("usage_unknown_or_budget_exceeded")
+    content = choices[0]["message"].get("content")
+    if not isinstance(content, str):
+        raise SpikeError("missing_response_content")
+    try:
+        return json.loads(content), content, usage
+    except (ValueError, RecursionError):
+        raise SpikeError("malformed_candidate_JSON") from None
+
+
+def run_fake_http(manifest, recordings, transport, journal_root, *, authority,
+                  count_tokens, deadline_seconds=60):
+    """Exercise future protocol on explicit mocks; this is NOT live admission."""
+    import httpx
+    if type(transport) is not httpx.MockTransport:
+        raise SpikeError("only_explicit_fake_transport_allowed")
+    validate_manifest(manifest, recordings)
+    if (not isinstance(authority, dict) or set(authority) != {"synthetic", "assignment_id", "head", "expires_at"}
+            or authority["synthetic"] is not True or authority["assignment_id"] != "synthetic-http-preparation"
+            or not isinstance(authority["head"], str) or len(authority["head"]) != 40
+            or any(char not in "0123456789abcdef" for char in authority["head"])
+            or type(authority["expires_at"]) not in (int, float) or not 0 < authority["expires_at"] < float("inf")):
+        raise SpikeError("explicit_synthetic_authority_required")
+    if not callable(count_tokens):
+        raise SpikeError("tokenization_unknown")
+    identity = authority | {"manifest_sha256": digest(canonical(manifest)), "origin": HTTP_ORIGIN,
+                            "model": HTTP_MODEL, "limits": LIMITS,
+                            "journal_root": str(Path(journal_root).resolve())}
+    result = {"synthetic": True, "mode": "mock-http", "live_calls": 0, "status": "prepared",
+              "synthetic_tokenization": True, "cases": [], "returned_tokens": 0}
+    journal = FakeHTTPJournal(journal_root, identity)
+    try:
+        discovery = journal.obtain({"method": "GET", "path": "/v1/models", "body": None,
+                                    "case_id": None}, transport, deadline_seconds=deadline_seconds)["response"]
+        if "error" in discovery:
+            raise SpikeError("discovery_endpoint_error")
+        # Synthetic metadata only: real loaded identity/capacity remains unqualified.
+        models = discovery.get("data")
+        if (not isinstance(models, list) or sum(isinstance(item, dict) and item.get("id") == HTTP_MODEL
+                                               for item in models) != 1):
+            raise SpikeError("model_identity_unknown")
+        model = next(item for item in models if isinstance(item, dict) and item.get("id") == HTTP_MODEL)
+        if model.get("status") != "loaded" or model.get("synthetic_capacity_reserved") is not True:
+            raise SpikeError("model_identity_or_capacity_unqualified")
+        for case in manifest["cases"]:
+            messages = [{"role": "user", "content": sanitized(case["prompt"])}]
+            for attempt in range(2):
+                prompt = canonical(messages)
+                if len(prompt.encode("utf-8")) > LIMITS["prompt_bytes"]:
+                    raise SpikeError("prompt_budget_exceeded")
+                try:
+                    tokens = count_tokens(messages)
+                except Exception:
+                    raise SpikeError("tokenization_unknown") from None
+                if not integer(tokens, 1, LIMITS["input_tokens"]):
+                    raise SpikeError("tokenization_unknown_or_input_budget_exceeded")
+                body = {"model": HTTP_MODEL, "messages": messages, "stream": False,
+                        "temperature": 0, "max_tokens": LIMITS["output_tokens"],
+                        "chat_template_kwargs": {"enable_thinking": False}}
+                packet = journal.obtain({"method": "POST", "path": "/v1/chat/completions",
+                                         "case_id": case["id"], "body": body}, transport,
+                                        deadline_seconds=deadline_seconds)
+                candidate, content, usage = _http_candidate(packet)
+                result["returned_tokens"] += usage["total_tokens"]
+                if result["returned_tokens"] > LIMITS["returned_tokens"]:
+                    raise SpikeError("total_token_budget_exceeded")
+                verdict = evaluate(case, candidate)
+                journal.state["entries"][journal.cursor - 1]["validation"] = verdict
+                journal.save()
+                result["cases"].append({"case_id": case["id"], "attempt": attempt + 1, **verdict})
+                if verdict["accepted"]:
+                    break
+                if attempt == 1:
+                    raise SpikeError("second_defective_proposal")
+                messages = messages + [{"role": "assistant", "content": content},
+                    {"role": "user", "content": "Correction required: " + verdict["reason"] +
+                     ". Return only corrected JSON. This is the final attempt."}]
+    except SpikeError as error:
+        result["status"], result["stop_reason"] = "stopped", str(error)
+        journal.state["stop_reason"] = str(error)
+        journal.save()
+    finally:
+        result["consumed_discovery"] = sum(entry["request"]["method"] == "GET" for entry in journal.state["entries"])
+        result["consumed_generation"] = sum(entry["request"]["method"] == "POST" for entry in journal.state["entries"])
+        result["reserved_token_exposure"] = result["consumed_generation"] * (LIMITS["input_tokens"] + LIMITS["output_tokens"])
+        journal.close()
+    return result
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cases", type=Path, default=FIXTURES / "cases.json")
