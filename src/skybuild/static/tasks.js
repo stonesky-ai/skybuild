@@ -63,7 +63,7 @@
       byId("preview-session").hidden = false;
       formConnection.hidden = true;
     }
-    byId("project").disabled = connected || busy;
+    byId("project").disabled = (connected && !previewMode) || busy;
     byId("token").disabled = connected || busy;
     byId("connect").disabled = connected || busy;
     byId("logout").disabled = !connected || busy;
@@ -185,8 +185,10 @@
       rows.append(row);
     });
     const fake = tasks.some(task => task.fake);
-    byId("task-count").textContent = previewMode
-      ? `${tasks.length} fake task${tasks.length === 1 ? "" : "s"} loaded · signed in as user1`
+    byId("task-count").textContent = previewMode && project === "skykeep"
+      ? "SkyKeep repo is listed but not configured in this preview."
+      : previewMode
+        ? `${tasks.length} fake task${tasks.length === 1 ? "" : "s"} loaded · signed in as user1`
       : !token ? "Not connected"
         : `${tasks.length} task${tasks.length === 1 ? "" : "s"} loaded for ${project}${fake ? " · API returned no tasks; showing fake preview records" : ""}`;
     renderTaskPicker();
@@ -216,6 +218,12 @@
 
   async function loadTasks(afterTaskId = null) {
     if (previewMode) {
+      if (project === "skykeep") {
+        cursor = null;
+        tasks = [];
+        renderTasks();
+        return;
+      }
       const response = await fetch("/workbench/dev/tasks-preview.json", {credentials: "omit", cache: "no-store"});
       if (!response.ok) throw new Error("Local preview task list is unavailable.");
       const ledgerTasks = await response.json();
@@ -484,6 +492,19 @@
   }
 
   for (const tab of tabs) tab.addEventListener("click", () => switchTab(tab.dataset.tab));
+  byId("project").addEventListener("change", () => {
+    project = byId("project").value;
+    if (!previewMode) return;
+    selectedTask = null;
+    selectedHistory = [];
+    renderTaskSummary(null);
+    renderHistory();
+    void loadTasks().then(() => {
+      notify(project === "skykeep"
+        ? "SkyKeep repo is listed, but its project setup and task authority are not connected yet."
+        : "SkyBuild repo selected. Local ledger records are fake and read-only.");
+    }).catch(() => notify("Local preview task list is unavailable. No API or database connection was made.", true));
+  });
   if (previewMode) {
     void loadTasks().then(() => selectTask(fakeTask.task_id)).then(() => {
       notify("Local fake session active as user1. mastertodo queue shown as fake, read-only data.");

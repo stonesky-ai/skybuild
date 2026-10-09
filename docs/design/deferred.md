@@ -5,9 +5,9 @@ Authority: Git-backed planning ledger, revision A36, 2026-10-09. API cutover has
 ## SKYBUILD-MULTIPROJECT — Concurrent autonomous operation across products
 
 - Status: deferred. Area: project operation.
-- Brief: enroll additional repositories and test concurrent project claims/worktrees/resources, authorization isolation and budget fairness.
+- Brief: enroll additional repositories and test concurrent project claims/worktrees/resources, authorization isolation and budget fairness. SkyKeep is the first named candidate: define how SkyBuild receives its repository, project task authority, build/test commands and scoped credentials without importing or mutating SkyKeep's live task queue or application database.
 - Reason: first establish the bootstrap, full extraction and controlled single-project operation. Immutable project IDs and basic isolation are required earlier.
-- Revisit: controlled adoption and extraction audit accepted; a second project's adapter and authorized workload are ready.
+- Revisit: controlled adoption and extraction audit accepted; the owner selects SkyKeep as the first additional project and its repository, task authority and authorized workload are ready.
 - Acceptance: cross-project denial/isolation and shared-resource fairness demonstrated without duplicated platform logic.
 - Architecture: sections 2, 8 and 11.
 

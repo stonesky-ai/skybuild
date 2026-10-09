@@ -18,18 +18,20 @@
   </header>
   <main class="tasks-main">
     <section class="panel connection-panel" aria-labelledby="connection-title">
+      <div>
+        <h2 id="connection-title">Connect to a project</h2>
+        <label for="project">Project</label>
+        <select id="project" required>
+          <option value="skybuild">SkyBuild repo</option>
+          <option value="skykeep">SkyKeep repo · not configured</option>
+        </select>
+      </div>
       <div id="preview-session" hidden>
-        <h2 id="preview-title">Signed in for local preview</h2>
+        <h3 id="preview-title">Signed in for local preview</h3>
         <p><strong>FAKE ACCOUNT</strong> · Username: <code>user1</code> · Password: <code>abcd1234</code></p>
         <p class="hint">Fake session and task records only. No database connection or task writes.</p>
       </div>
-      <div>
-        <h2 id="connection-title">Connect to a project</h2>
-        <p class="hint">Bearer token stays in page memory and clears on reload.</p>
-      </div>
       <form id="connection-form" class="connection-form" autocomplete="off">
-        <label for="project">Project ID</label>
-        <input id="project" required maxlength="200" spellcheck="false">
         <label for="token">Bearer token</label>
         <input id="token" type="password" required maxlength="4096" autocomplete="off" spellcheck="false">
         <div class="actions"><button id="connect" type="submit">Connect</button><button id="logout" type="button" disabled>Log out</button></div>
