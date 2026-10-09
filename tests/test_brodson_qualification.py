@@ -442,18 +442,19 @@ def test_cli_validated_metadata_invocation_and_process_lock(operator_files, tmp_
     state_dir.mkdir(mode=0o700)
     transport = FakeTransport(state_dir / "run.json", [models(), props()])
     def factory(*_args):
-        assert not locked, "Lock rejection precedes even transport construction"
         return transport
     monkeypatch.setattr(q, "ROOT", repo)
     monkeypatch.setattr(q, "Transport", factory)
     monkeypatch.setattr(q.time, "time", lambda: 100.0)
-    descriptor = os.open(state_dir / "run.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    descriptor = None
     try:
         if locked:
+            descriptor = os.open(state_dir / "run.lock", os.O_CREAT | os.O_RDWR, 0o600)
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         result = q.main(["--authorization", str(auth_file), "--assignment", str(assignment_file)])
     finally:
-        os.close(descriptor)
+        if descriptor is not None:
+            os.close(descriptor)
     assert result == (2 if locked else 0)
     assert len(transport.calls) == (0 if locked else 2)
 
@@ -494,3 +495,187 @@ def test_http_transport_boundaries_are_offline(tmp_path, monkeypatch, status, en
     monkeypatch.setattr(q.httpx, "AsyncClient", Client)
     with pytest.raises(q.QualificationError, match=reason):
         asyncio.run(q.Transport(env).request("GET", "/models", None, seconds=1, byte_limit=4096))
+
+
+@pytest.mark.parametrize("stage", ["metadata", "generation-intent", "complete"])
+@pytest.mark.parametrize("lost", ["state", "marker"])
+def test_loss_of_either_durable_file_never_resets_budget(setup, stage, lost):
+    path, _, original_auth, manifest, transport, runner = setup
+    auth = metadata_then_auth(setup)
+    if stage == "generation-intent":
+        class Crash(BaseException):
+            pass
+        transport.replies.extend([{"object": "response.input_tokens", "input_tokens": 123}, Crash()])
+        with pytest.raises(Crash):
+            asyncio.run(runner(auth).run(manifest))
+    elif stage == "complete":
+        transport.replies.extend(good_replies())
+        asyncio.run(runner(auth).run(manifest))
+    before = len(transport.calls)
+    (path if lost == "state" else path.with_name("run.lock")).unlink()
+    # Repeating metadata authorization must not recreate the original budget.
+    for _ in range(2):
+        with pytest.raises(q.QualificationError, match="missing_run"):
+            asyncio.run(runner(original_auth).run(manifest))
+    assert len(transport.calls) == before
+
+
+def test_crash_after_marker_before_first_state_is_not_recoverable(setup, monkeypatch):
+    path, _, _, manifest, transport, runner = setup
+    original = q.persist
+    def interrupted(*_args):
+        raise OSError("synthetic first-state failure")
+    monkeypatch.setattr(q, "persist", interrupted)
+    with pytest.raises(OSError):
+        asyncio.run(runner().run(manifest))
+    marker = json.loads(path.with_name("run.lock").read_bytes())
+    assert marker["schema"] == "brodson-run-marker-v1" and not path.exists()
+    monkeypatch.setattr(q, "persist", original)
+    with pytest.raises(q.QualificationError, match="missing_run_state"):
+        asyncio.run(runner().run(manifest))
+    assert not transport.calls
+
+
+@pytest.mark.parametrize("failed_sync", [1, 2])
+def test_marker_file_or_directory_sync_failure_blocks_reinitialization(setup, monkeypatch, failed_sync):
+    path, _, _, manifest, transport, runner = setup
+    original = q.os.fsync
+    count = 0
+    def fail_sync(fd):
+        nonlocal count
+        count += 1
+        if count == failed_sync:
+            raise OSError("synthetic marker durability failure")
+        return original(fd)
+    monkeypatch.setattr(q.os, "fsync", fail_sync)
+    with pytest.raises(OSError):
+        asyncio.run(runner().run(manifest))
+    monkeypatch.setattr(q.os, "fsync", original)
+    assert path.with_name("run.lock").exists() and not path.exists()
+    with pytest.raises(q.QualificationError, match="missing_run_state"):
+        asyncio.run(runner().run(manifest))
+    assert not transport.calls
+
+
+@pytest.mark.parametrize("marker", [b"", b"{", b"{}"])
+def test_incomplete_initial_marker_never_starts_a_run(setup, marker):
+    path, _, _, manifest, transport, runner = setup
+    lock = path.with_name("run.lock")
+    lock.write_bytes(marker)
+    lock.chmod(0o600)
+    with pytest.raises((q.QualificationError, ValueError)):
+        asyncio.run(runner().run(manifest))
+    assert not path.exists() and not transport.calls
+
+
+def test_replaced_valid_marker_cannot_resume_original_state(setup):
+    path, _, _, manifest, transport, runner = setup
+    metadata_then_auth(setup)
+    lock = path.with_name("run.lock")
+    marker = json.loads(lock.read_bytes())
+    marker["marker_id"] = "0" * 32
+    lock.write_bytes(q.encode(marker))
+    with pytest.raises(q.QualificationError, match="run_binding"):
+        asyncio.run(runner().run(manifest))
+    assert len(transport.calls) == 2
+
+
+@pytest.mark.parametrize("deadline", ["2026-10-09T15:20:54Z", "2026-10-10T15:20:53Z"])
+def test_cli_cannot_extend_committed_assignment_cutoff(operator_files, tmp_path, monkeypatch, deadline):
+    repo, assignment, auth = operator_files
+    auth["approved_until"] = deadline
+    auth_path, assignment_path = tmp_path / "auth.json", tmp_path / "assignment.json"
+    for path, value in ((auth_path, auth), (assignment_path, assignment)):
+        path.write_bytes(q.encode(value))
+        path.chmod(0o600)
+    monkeypatch.setattr(q, "ROOT", repo)
+    monkeypatch.setattr(q.time, "time", lambda: 100.0)
+    def forbidden(*_args):
+        pytest.fail("Expired assignment cannot construct a transport or read credentials")
+    monkeypatch.setattr(q, "Transport", forbidden)
+    assert q.main(["--authorization", str(auth_path), "--assignment", str(assignment_path)]) == 2
+    assert not Path(auth["state_dir"]).exists()
+
+
+@pytest.mark.parametrize("deadline", ["2026-10-09T15:20:52Z", "2026-10-09T15:20:53Z"])
+def test_operator_deadline_can_only_shorten_assignment_window(operator_files, deadline):
+    repo, assignment, auth = operator_files
+    assert q.validate_authorization(auth | {"approved_until": deadline}, assignment, repo, now=100) > 100
+    brief = json.loads((repo / q.BRIEF).read_bytes())
+    assert q.ASSIGNMENT_APPROVED_UNTIL in brief["model_limit"]
+
+
+@pytest.mark.parametrize("stage", ["models", "props", "count", "generation"])
+@pytest.mark.parametrize("error", [{"message": "synthetic endpoint failure"}, "synthetic failure", None])
+def test_error_envelopes_cannot_hide_behind_success_fields(setup, stage, error):
+    path, _, auth, manifest, transport, runner = setup
+    expected = {"models": 1, "props": 2, "count": 3, "generation": 4}[stage]
+    if stage in {"models", "props"}:
+        transport.replies[expected - 1]["error"] = error
+    else:
+        auth = metadata_then_auth(setup)
+        replies = good_replies()[:expected - 2]
+        replies[-1]["error"] = error
+        transport.replies.extend(replies)
+    state = asyncio.run(runner(auth).run(manifest))
+    assert state["status"] == "stopped" and state["stop_reason"] == "endpoint_error_or_invalid_envelope"
+    assert len(transport.calls) == expected
+    assert state["attempts"][-1]["status"] == "pending"
+    assert "response" not in state["attempts"][-1]
+    assert "synthetic endpoint failure" not in path.read_text()
+    with pytest.raises(q.QualificationError, match="uncertain_attempt"):
+        asyncio.run(runner(auth).run(manifest))
+    assert len(transport.calls) == expected
+
+
+@pytest.mark.parametrize("stage", ["props", "generation"])
+@pytest.mark.parametrize("encoding", ["literal", "unicode", "nested-unicode", "json-string"])
+def test_decoded_credential_echo_never_reaches_persisted_evidence(setup, tmp_path, monkeypatch, stage, encoding):
+    path, _, auth, manifest, transport, runner = setup
+    # This credential is invented exclusively for this offline fixture.
+    secret = "synthetic-credential-for-offline-test-011"
+    escaped = "".join("\\u%04x" % ord(char) for char in secret)
+    value = {"literal": secret, "unicode": secret, "nested-unicode": escaped,
+             "json-string": json.dumps({"nested": escaped})}[encoding]
+    if stage == "props":
+        replies = [q.encode(models()), q.encode(props() | {"chat_template": value})]
+    else:
+        auth = metadata_then_auth(setup)
+        replies = [q.encode({"object": "response.input_tokens", "input_tokens": 123}),
+                   q.encode(completion(json.dumps({"replacement": value})))]
+    if encoding == "unicode":
+        replies[-1] = replies[-1].replace(secret.encode(), escaped.encode())
+    secret_path, env = tmp_path / "synthetic-secret", tmp_path / "synthetic.env"
+    secret_path.write_text(secret)
+    secret_path.chmod(0o600)
+    env.write_text(f"SKYBUILD_INFERENCE_BASE_URL={q.ORIGIN}\nSKYBUILD_INFERENCE_SECRET_FILE={secret_path}\n")
+    env.chmod(0o600)
+    calls = []
+    class Response:
+        status_code = 200
+        headers = {}
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            pass
+        async def aiter_raw(self, **_kwargs):
+            yield replies.pop(0)
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            pass
+        def stream(self, method, url, **_kwargs):
+            calls.append((method, url))
+            return Response()
+    monkeypatch.setattr(q.httpx, "AsyncClient", Client)
+    state = asyncio.run(runner(auth, q.Transport(env)).run(manifest))
+    assert state["status"] == "stopped" and state["stop_reason"] == "secret_echo_refused"
+    assert len(calls) == 2 and not replies
+    assert "response" not in state["attempts"][-1]
+    assert "response_sha256" not in state["attempts"][-1]
+    saved = path.read_text()
+    assert secret not in saved and escaped not in saved and "synthetic-credential" not in saved
+    assert state["attempts"][-1]["error"] == "secret_echo_refused"

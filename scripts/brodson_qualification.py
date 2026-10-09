@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from contextlib import contextmanager
 from datetime import datetime
 import fcntl
 import hashlib
@@ -12,6 +13,7 @@ import re
 import stat
 import tempfile
 import time
+from uuid import uuid4
 
 import httpx
 
@@ -23,6 +25,7 @@ from skybuild.manual_dispatch import _state_directory
 ROOT = Path(__file__).resolve().parents[1]
 BRIEF = "docs/design/assignments/brodson-qualification-20261009.json"
 ASSIGNMENT = "MWP-20261009-BRODSON-QUALIFICATION-011"
+ASSIGNMENT_APPROVED_UNTIL = "2026-10-09T15:20:53Z"
 MODEL = "qwen3.5-think"
 PROFILE = "owner-confirmed-zero-charge-brodson"
 ORIGIN = "https://llm.brodson.net"
@@ -85,6 +88,58 @@ def persist(path, value):
             os.unlink(temporary)
 
 
+@contextmanager
+def armed_run(path, run_id):
+    """The durable lock marker and state must survive together; never repair loss."""
+    marker = path.parent / "run.lock"
+    directory_info = path.parent.lstat()
+    if (not stat.S_ISDIR(directory_info.st_mode) or directory_info.st_uid != os.geteuid()
+            or directory_info.st_mode & 0o077 or path.parent != path.parent.resolve()):
+        raise QualificationError("unsafe_run_directory")
+    state_exists = path.exists() or path.is_symlink()
+    if not marker.exists() and not marker.is_symlink() and state_exists:
+        raise QualificationError("missing_run_marker_no_recovery")
+    fresh = False
+    try:
+        fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        fresh = True
+    except FileExistsError:
+        fd = os.open(marker, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o600):
+            raise QualificationError("unsafe_run_marker")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if fresh:
+            value = {"schema": "brodson-run-marker-v1", "run_id": run_id, "marker_id": uuid4().hex}
+            with os.fdopen(fd, "wb", closefd=False) as stream:
+                stream.write(encode(value))
+                stream.flush()
+                os.fsync(fd)
+            directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+            if path.exists() or path.is_symlink():
+                raise QualificationError("state_without_original_marker")
+        else:
+            if not 0 < info.st_size <= 4096:
+                raise QualificationError("incomplete_run_marker_no_recovery")
+            value = json.loads(os.read(fd, 4097))
+            if (not isinstance(value, dict) or set(value) != {"schema", "run_id", "marker_id"}
+                    or value["schema"] != "brodson-run-marker-v1" or value["run_id"] != run_id
+                    or not isinstance(value["marker_id"], str)
+                    or not re.fullmatch(r"[0-9a-f]{32}", value["marker_id"])):
+                raise QualificationError("run_marker_binding_mismatch")
+            if not path.exists() and not path.is_symlink():
+                raise QualificationError("missing_run_state_no_recovery")
+        yield value["marker_id"], fresh
+    finally:
+        os.close(fd)
+
+
 def validate_authorization(auth, assignment, checkout, *, now):
     fields = {"schema", "run_id", "phase", "reviewed_head", "review_artifact_sha256",
               "rest_assignment_sha256", "rest_receipt_id", "operator_approval_id", "approved_until",
@@ -101,7 +156,9 @@ def validate_authorization(auth, assignment, checkout, *, now):
             or not SHA.fullmatch(auth["review_artifact_sha256"])):
         raise QualificationError("invalid_operator_bounds")
     deadline = datetime.fromisoformat(auth["approved_until"].replace("Z", "+00:00"))
-    if deadline.tzinfo is None or deadline.utcoffset().total_seconds() != 0 or deadline.timestamp() <= now:
+    maximum = datetime.fromisoformat(ASSIGNMENT_APPROVED_UNTIL.replace("Z", "+00:00")).timestamp()
+    if (deadline.tzinfo is None or deadline.utcoffset().total_seconds() != 0
+            or not now < deadline.timestamp() <= maximum):
         raise QualificationError("approval_expired_or_not_utc")
     if (auth["rest_assignment_sha256"] != digest(encode(assignment))
             or assignment.get("assignment_id") != ASSIGNMENT or assignment.get("brief_path") != BRIEF):
@@ -128,6 +185,47 @@ class Transport:
     """The only secret reader and HTTP implementation; no retries or fallback."""
     def __init__(self, env_file):
         self.env_file = env_file
+
+    @staticmethod
+    def reject_reflection(payload, secret):
+        """Inspect decoded/nested JSON strings inside the credential-owning transport."""
+        text = secret.decode("ascii")
+        if secret in payload:
+            raise QualificationError("secret_echo_refused")
+        def inspect(value, depth=0):
+            if depth > 16:
+                raise QualificationError("response_nesting_exceeded")
+            if isinstance(value, str):
+                decoded = value
+                for _ in range(17):
+                    if text in decoded:
+                        raise QualificationError("secret_echo_refused")
+                    expanded = re.sub(r"\\u([0-9a-fA-F]{4})", lambda match: chr(int(match[1], 16)), decoded)
+                    if expanded == decoded:
+                        break
+                    decoded = expanded
+                else:
+                    raise QualificationError("response_nesting_exceeded")
+                if value.lstrip().startswith(("{", "[", '"')):
+                    try:
+                        nested = json.loads(value)
+                    except ValueError:
+                        pass
+                    else:
+                        inspect(nested, depth + 1)
+            elif isinstance(value, dict):
+                for key, item in value.items():
+                    inspect(key, depth + 1)
+                    inspect(item, depth + 1)
+            elif isinstance(value, list):
+                for item in value:
+                    inspect(item, depth + 1)
+        try:
+            inspect(json.loads(payload))
+        except (ValueError, RecursionError) as error:
+            if isinstance(error, QualificationError):
+                raise
+            raise QualificationError("invalid_json_response") from None
 
     async def request(self, method, path, body, *, seconds, byte_limit):
         # The runner has already fsynced the consumed attempt before this method.
@@ -165,8 +263,7 @@ class Transport:
                             if len(chunks) > byte_limit:
                                 raise QualificationError("response_too_large")
                         payload = bytes(chunks)
-                        if secret in payload:
-                            raise QualificationError("secret_echo_refused")
+                        self.reject_reflection(payload, secret)
                         if response.headers.get("content-encoding", "identity") != "identity":
                             raise QualificationError("compressed_response_refused")
                         if response.status_code != 200:
@@ -237,6 +334,8 @@ class Runner:
         self.state = None
         self.boot_id = boot_id
         self.approval_monotonic_limit = approval_monotonic_limit
+        self.marker_id = None
+        self.fresh_marker = False
 
     def save(self):
         persist(self.path, self.state)
@@ -250,7 +349,8 @@ class Runner:
                                                    "state_dir", "env_file", "zero_charge_profile", "limits")}
         if self.path.exists() or self.path.is_symlink():
             self.state = json.loads(private_read(self.path, 1_048_576))
-            if self.state.get("binding") != binding or self.state.get("boot_id") != self.boot_id:
+            if (self.state.get("binding") != binding or self.state.get("boot_id") != self.boot_id
+                    or self.state.get("marker_id") != self.marker_id):
                 raise QualificationError("run_binding_or_boot_changed")
             if self.deadline > self.state["original_approval_deadline"]:
                 raise QualificationError("approval_cannot_be_extended")
@@ -259,10 +359,13 @@ class Runner:
             if self.state["status"] not in {"metadata_ready", "complete", "stopped"}:
                 raise QualificationError("interrupted_phase_no_restart")
         else:
+            if not self.fresh_marker:
+                raise QualificationError("missing_run_state_no_recovery")
             if self.auth["phase"] != "metadata":
                 raise QualificationError("metadata_phase_required_first")
             mono, wall = self.monotonic(), self.clock()
             self.state = {"schema": "brodson-qualification-run-v1", "binding": binding, "boot_id": self.boot_id,
+                          "marker_id": self.marker_id,
                           "original_approval_deadline": self.deadline,
                           "approval_monotonic_deadline": min(self.approval_monotonic_limit,
                                                              mono + max(0, self.deadline - wall)),
@@ -305,6 +408,8 @@ class Runner:
                 raise QualificationError("response_too_large")
             row["response_sha256"] = digest(payload)
             value = json.loads(payload)
+            if not isinstance(value, dict) or "error" in value:
+                raise QualificationError("endpoint_error_or_invalid_envelope")
             row["response"] = normalize(value) if normalize else value
             row["status"] = "complete"
             self.save()
@@ -318,6 +423,10 @@ class Runner:
             raise QualificationError(row["error"]) from None
 
     async def run(self, manifest):
+        with armed_run(self.path, self.auth["run_id"]) as (self.marker_id, self.fresh_marker):
+            return await self._run(manifest)
+
+    async def _run(self, manifest):
         self.begin()
         if self.state["status"] in {"complete", "stopped"}:
             return self.state
@@ -424,16 +533,11 @@ def main(argv=None):
         manifest = spike.read_json(spike.FIXTURES / "cases.json")
         spike.validate_manifest(manifest, spike.read_json(spike.FIXTURES / "recorded-responses.json"))
         directory = _state_directory(Path(auth["state_dir"]), ROOT)
-        descriptor = os.open(directory / "run.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            runner = Runner(directory / "run.json", auth, Transport(Path(auth["env_file"])), deadline=deadline,
-                            boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
-                            clock=time.time, monotonic=time.monotonic,
-                            approval_monotonic_limit=armed_at + max(0, deadline - wall_at))
-            state = asyncio.run(runner.run(manifest))
-        finally:
-            os.close(descriptor)
+        runner = Runner(directory / "run.json", auth, Transport(Path(auth["env_file"])), deadline=deadline,
+                        boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+                        clock=time.time, monotonic=time.monotonic,
+                        approval_monotonic_limit=armed_at + max(0, deadline - wall_at))
+        state = asyncio.run(runner.run(manifest))
         print(json.dumps({"status": state["status"], "http_attempts": len(state["attempts"]),
                           "reserved_tokens": state["reserved_tokens"], "metadata_sha256": state.get("metadata_sha256")}))
         return 0 if state["status"] in {"metadata_ready", "complete"} else 2
