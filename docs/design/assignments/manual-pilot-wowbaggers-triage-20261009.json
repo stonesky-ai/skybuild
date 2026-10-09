@@ -1,0 +1,22 @@
+{
+  "schema": "manual-work-brief-v1",
+  "assignment_id": "MWP-20261009-WOWBAGGERS-TRIAGE-001",
+  "task_id": "SKYBUILD-TASK-WORKBENCH",
+  "worker": "wowbagger",
+  "dispatcher": "pilot_dispatcher",
+  "branch": "task/workbench-page-triage-001",
+  "owned_paths": [
+    "src/skybuild/static/workbench.html",
+    "src/skybuild/static/workbench.js",
+    "src/skybuild/static/workbench.css",
+    "tests/test_web.py"
+  ],
+  "checks": [
+    "Add current-page task-list controls for status, blocked/deferred state, and responsible owner. Label them clearly as filters of the loaded page of at most 100 tasks; do not imply a repository-wide or API-wide search.",
+    "Keep stable-ID pagination and selected task handling correct when filters hide all rows or the selected row. Show visible versus loaded counts and a clear empty result. Filtering must not call task mutation APIs or change task authority.",
+    "Preserve token-in-memory handling, safe text rendering, keyboard accessibility, small-screen layout, and existing create/edit/action/split/merge behavior.",
+    "Extend tests/test_web.py with focused browser-handler coverage for filter combinations, page changes, empty results, and reset on logout. Run rtk pytest -q tests/test_web.py and report exact result."
+  ],
+  "model_limit": "One interactive Codex worker plus at most one task-local subagent; no paid API. Keep at least 8 GiB host memory available. No service or container start.",
+  "next_action": "After dispatcher verifies private access and sends a pinned manual-work-v1 envelope, implement the current-page triage controls only in owned paths. Commit and push the owned branch; return exact head, checks, risks, and next action through Cord."
+}
