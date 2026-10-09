@@ -135,3 +135,36 @@ def test_completion_requires_current_dependency_evidence(service):
         store.complete_task(owner, project, "T", evidence(), 1, "complete")
     assert error.value.code == "workflow_conflict"
     assert store.get_task(owner, project, "T")["revision"] == 1
+
+
+def test_edit_and_revert_cannot_revive_previous_completion(service):
+    client, store, project, tokens = service
+    owner = store.authenticate(tokens["owner"])
+    initial = store.create_task(owner, project, {"task_id": "T", "title": "Task", "description": "Original",
+                                               "acceptance_criteria": ["Pass meaningful checks"]}, "create")
+    completed = store.complete_task(owner, project, "T", evidence(), initial["revision"], "complete")
+    assert current_completion(completed)
+    changed = store.update_task(owner, project, "T", {"description": "Changed"}, completed["revision"], "edit")
+    reverted = store.update_task(owner, project, "T", {"description": "Original"}, changed["revision"], "revert")
+    assert reverted["status"] == "blocked"
+    assert reverted["metadata"]["_skybuild_workflow"]["generation"] == 2
+    assert not current_completion(reverted)
+    with pytest.raises(DomainError) as error:
+        store.complete_task(owner, project, "T", evidence(), reverted["revision"], "reuse-evidence")
+    assert error.value.code == "stale_evidence"
+    history = store.task_history(owner, project, "T")
+    assert current_completion(history[1]["after_state"])
+
+
+def test_dependency_bearing_completion_refused_even_when_dependency_attested(service):
+    client, store, project, tokens = service
+    owner = store.authenticate(tokens["owner"])
+    store.create_task(owner, project, {"task_id": "D", "title": "Dependency", "description": "Definition",
+                                      "acceptance_criteria": ["Pass meaningful checks"]}, "dependency")
+    store.complete_task(owner, project, "D", evidence(), 1, "complete-dependency")
+    store.create_task(owner, project, {"task_id": "T", "title": "Task", "description": "Definition",
+                                      "acceptance_criteria": ["Pass meaningful checks"], "dependencies": ["D"]}, "task")
+    with pytest.raises(DomainError) as error:
+        store.complete_task(owner, project, "T", evidence(), 1, "complete")
+    assert error.value.code == "workflow_conflict"
+    assert store.get_task(owner, project, "T")["revision"] == 1

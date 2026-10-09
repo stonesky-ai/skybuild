@@ -410,10 +410,8 @@ class Store:
             current = self._principal(connection, principal.principal_id)
             if not current.is_admin:
                 raise DomainError('authorization', 'Only an owner/admin may attest completion', 403)
-            for dependency in before['dependencies']:
-                from .completion import current_completion
-                if not current_completion(self._task(connection, project_id, dependency)):
-                    raise DomainError('workflow_conflict', 'Completion requires current accepted dependencies', 409)
+            if before['dependencies']:
+                raise DomainError('workflow_conflict', 'Dependency-bearing completion requires durable dependency invalidation', 409)
             return completion_change(before, body, current.principal_id)
         return self._change_task(principal, project_id, task_id, expected_revision, idempotency_key,
                                  'task.action.completed',

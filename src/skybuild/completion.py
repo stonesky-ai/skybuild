@@ -85,6 +85,7 @@ def completion_change(task, body, actor):
     evidence = {"schema_version": 1, "kind": "owner_attestation", "actor": actor,
                 "input_revision": task["revision"], "definition": definition(task), **deepcopy(body)}
     metadata = deepcopy(task["metadata"])
+    metadata.setdefault("_skybuild_workflow", {"generation": generation(task)})
     metadata[RESERVED_KEY] = evidence
     return {"status": "done", "phase": "done", "next_action": None, "blocker": None, "metadata": metadata}
 
