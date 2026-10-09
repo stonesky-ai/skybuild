@@ -66,11 +66,23 @@ def test_completed_peak_persists_and_target_rises_one_step(tmp_path):
                         cgroup_root=root, hard_concurrency=10, step_samples=5)
         targets.append(state["target_jobs"])
         write_state(state_path, state)
-    assert targets == [1, 1, 1, 1, 2, 2, 2, 2, 2, 3]
+    assert targets == [1, 1, 1, 1, 2, 2, 2, 2, 2, 2]
+    assert state["max_observed_running"] == 1
     assert state["measured_peak_bytes"] == 2 * GIB
     assert state["measurement_count"] == 1
     assert state["peak_history"][0]["source"] == "systemd-MemoryPeak"
     assert state["measurement_age_seconds"] < 10
+    for name in ("two", "three"):
+        group = _group(root, name, 2 * GIB, 2 * GIB, 4 * GIB)
+        _manifest(registry, f"job-{name}", "running", group)
+    for _ in range(5):
+        state = observe(registry, state_path, available_bytes=24 * GIB,
+                        reserve_bytes=8 * GIB, new_job_limit_bytes=4 * GIB,
+                        cgroup_root=root, hard_concurrency=10, step_samples=5)
+        write_state(state_path, state)
+    assert state["max_observed_running"] == 2
+    assert state["target_jobs"] == 3
+    assert state["max_new_jobs"] == 1
 
 
 def test_unknown_launch_intent_blocks_admission(tmp_path):
