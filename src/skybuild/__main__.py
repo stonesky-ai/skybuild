@@ -75,6 +75,14 @@ def main(argv: list[str] | None = None) -> int:
     execution.add_argument("project_id")
     execution.add_argument("task_id")
     execution.add_argument("--limit", type=int, default=20)
+    explain = commands.add_parser("cpu-explain", help="Inspect CPU eligibility in the configured dedicated database; never reserve or launch",
+                                  description="Authenticate with SKYBUILD_TOKEN against SKYBUILD_DSN and SKYBUILD_EXPECTED_DATABASE. Requires current tasks:claim permission and API authority. The JSON result is a snapshot, not execution authority; denied and replay outcomes are successful inspections.")
+    explain.add_argument("project_id")
+    explain.add_argument("task_id")
+    for field in ("action-id", "attempt-id"):
+        explain.add_argument("--" + field, required=True)
+    for field in ("units", "expected-revision", "readiness-generation", "claim-fence", "generation", "local-generation"):
+        explain.add_argument("--" + field, type=int, required=True)
     for command in ("cpu-control-get", "cpu-control-set", "cpu-local-control-set"):
         control = commands.add_parser(command, help="Inspect or update owner CPU restrictions; never launch work")
         control.add_argument("--ca-file", type=Path, default=argparse.SUPPRESS)
@@ -249,7 +257,13 @@ def main(argv: list[str] | None = None) -> int:
         from .store import Store
 
         store = Store(_environment("SKYBUILD_DSN"), _environment("SKYBUILD_EXPECTED_DATABASE"))
-        if args.command == "migrate":
+        if args.command == "cpu-explain":
+            principal = store.authenticate(_environment("SKYBUILD_TOKEN"))
+            result = store.explain_cpu(principal, args.project_id, args.task_id, args.action_id, args.attempt_id,
+                                       args.units, args.expected_revision, args.readiness_generation,
+                                       args.claim_fence, args.generation, args.local_generation)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        elif args.command == "migrate":
             store.migrate()
             print("Migrations applied")
         elif args.command == "provision":
