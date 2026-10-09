@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from uuid import uuid4
+from pathlib import Path
 
 import psycopg
 import pytest
@@ -9,6 +10,9 @@ import pytest
 from skybuild.contracts import DomainError
 from test_store import actors, seed_api_authority, store
 from test_claims import ready, expire
+import skybuild
+
+assert Path(skybuild.__file__).resolve().parents[2] == Path(__file__).resolve().parents[1]
 
 
 def setup(store, people, project, task_id='cpu-task', capacity=1, actor='worker'):
@@ -152,7 +156,8 @@ def test_stop_racing_reservation_serializes(store, actors):
     failure('control_conflict', lambda: store.reserve_cpu(people['worker'], project, **{**request, 'action_id': uuid4().hex, 'attempt_id': uuid4().hex}))
 
 
-def test_lease_expiring_during_checks_rolls_back(store, actors, monkeypatch):
+@pytest.mark.parametrize('operation', ['reserve_cpu', 'explain_cpu'])
+def test_lease_expiring_during_checks_rolls_back(store, actors, monkeypatch, operation):
     project, people = actors
     request = setup(store, people, project)
     with store._connection() as connection:
@@ -163,7 +168,12 @@ def test_lease_expiring_during_checks_rolls_back(store, actors, monkeypatch):
         # Let actual clock time expire after the early lease check.
         connection.execute('SELECT pg_sleep(1.1)')
     monkeypatch.setattr(store, '_require_current_dependencies', delayed)
-    failure('claim_conflict', lambda: store.reserve_cpu(people['worker'], project, **request))
+    if operation == 'reserve_cpu':
+        failure('claim_conflict', lambda: store.reserve_cpu(people['worker'], project, **request))
+    else:
+        result = store.explain_cpu(people['worker'], project, **request)
+        assert result['eligible'] is False and result['reasons'][0]['code'] == 'claim_conflict'
+        assert result['reasons'][0]['message'] == 'Ownership lease expired before CPU reservation'
     with store._connection() as connection:
         assert not connection.execute('SELECT 1 FROM cpu_reservations WHERE action_id = %s', (request['action_id'],)).fetchone()
         assert connection.execute("SELECT count(*) AS n FROM cpu_journal WHERE project_id = %s AND action = 'reserve'", (project,)).fetchone()['n'] == 0
@@ -247,3 +257,177 @@ def test_attempt_identity_serializes_across_project_pools(store, actors):
         results = list(pool.map(reserve, [(project, first), (other_project, second)]))
     assert sum(isinstance(result, dict) for result in results) == 1
     assert next(result for result in results if isinstance(result, DomainError)).code == 'idempotency_conflict'
+
+
+def cpu_record_counts(store, project):
+    with store._connection() as connection:
+        result = {table: connection.execute(f'SELECT count(*) AS n FROM {table} WHERE project_id = %s',
+                                         (project,)).fetchone()['n']
+                for table in ('cpu_reservations', 'cpu_journal', 'idempotency', 'task_journal', 'claim_journal', 'task_effects')}
+        result['mutable_records'] = {
+            table: connection.execute(f'SELECT to_jsonb(t) AS row FROM {table} t WHERE project_id = %s ORDER BY to_jsonb(t)::text',
+                                      (project,)).fetchall()
+            for table in ('cpu_pools', 'cpu_reservations', 'tasks', 'task_readiness', 'task_claims', 'task_effects')}
+        return result
+
+
+def test_explanation_is_unredeemable_read_only_and_preserves_digest(store, actors):
+    import hashlib
+    from skybuild.store import _json
+    project, people = actors
+    request = setup(store, people, project)
+    before = cpu_record_counts(store, project)
+    result = store.explain_cpu(people['worker'], project, **request)
+    assert result['eligible'] is True and result['outcome'] == 'eligible'
+    assert result['physical_dispatch_authorized'] is False and result['snapshot_only'] is True
+    assert result['reasons'] == [] and result['reservation_state'] is None
+    assert result['held_units'] == 0 and result['pool']['capacity'] == 1
+    assert cpu_record_counts(store, project) == before
+    reserved = store.reserve_cpu(people['worker'], project, **request)
+    original_payload = dict(project_id=project, task_id=request['task_id'], actor=people['worker'].principal_id,
+                            action_id=request['action_id'], attempt_id=request['attempt_id'], units=request['units'],
+                            task_revision=request['expected_revision'], readiness_generation=request['readiness_generation'],
+                            claim_fence=request['claim_fence'], generation=request['generation'], local_generation=request['local_generation'])
+    assert reserved['intent_hash'] == hashlib.sha256(_json(original_payload).encode()).hexdigest()
+
+
+@pytest.mark.parametrize('boundary,code', [
+    ('central-disabled', 'control_conflict'), ('local-disabled', 'control_conflict'),
+    ('central-generation', 'control_conflict'), ('local-generation', 'control_conflict'),
+    ('revision', 'stale_revision'), ('fence', 'claim_conflict'), ('holder', 'claim_conflict'),
+    ('expired', 'claim_conflict'), ('readiness-generation', 'workflow_conflict'),
+    ('readiness-assessment', 'workflow_conflict'), ('dependency', 'workflow_conflict'),
+    ('unknown-effect', 'effect_conflict'), ('held-task', 'capacity_conflict'),
+    ('held-pool', 'capacity_conflict'), ('attempt-identity', 'idempotency_conflict'),
+    ('action-identity', 'idempotency_conflict'),
+])
+def test_explanation_and_reservation_share_denials(store, actors, boundary, code):
+    project, people = actors
+    request = setup(store, people, project, capacity=2 if boundary == 'attempt-identity' else 1, actor='owner')
+    actor = people['owner']
+    if boundary == 'central-disabled': store.configure_cpu_pool(actor, project, 1, False, 1, 'disable', reason='Test stop')
+    elif boundary == 'local-disabled': store.set_cpu_local_control(actor, project, False, 2, 'disable', reason='Test stop')
+    elif boundary == 'central-generation': request['generation'] = 99
+    elif boundary == 'local-generation': request['local_generation'] = 99
+    elif boundary == 'revision': request['expected_revision'] = 1
+    elif boundary == 'fence': request['claim_fence'] = 99
+    elif boundary == 'holder': actor = people['peer']
+    elif boundary == 'expired': expire(store, project, request['task_id'])
+    elif boundary == 'readiness-generation': request['readiness_generation'] = 99
+    elif boundary == 'readiness-assessment':
+        with store._connection() as connection:
+            connection.execute('UPDATE task_readiness SET assessed_generation = 0 WHERE project_id = %s AND task_id = %s', (project, request['task_id']))
+    elif boundary == 'dependency':
+        # Seed an inconsistent cached-ready record to exercise the defensive
+        # current-dependency predicate, independently of readiness invalidation.
+        dependency = ready(store, people, project, 'unfinished-dependency')
+        with store._connection() as connection:
+            connection.execute('INSERT INTO task_dependencies VALUES (%s, %s, %s)', (project, request['task_id'], dependency['task_id']))
+    elif boundary == 'unknown-effect':
+        body = dict(operation_id=uuid4().hex, attempt_id=request['attempt_id'], authority_epoch=1,
+                    authority_generation=1, input_digest='a' * 64, policy_digest='b' * 64,
+                    allocation_refs=[request['action_id']])
+        effect = store.create_effect_intent(actor, project, request['task_id'], body, 2, 'effect', claim_fence=1)
+        store.observe_effect(actor, project, effect['operation_id'], 'unknown', 'Lost reply', 'unknown', claim_fence=1)
+    elif boundary in {'held-task', 'action-identity'}:
+        store.reserve_cpu(actor, project, **request)
+        if boundary == 'held-task': request.update(action_id=uuid4().hex, attempt_id=uuid4().hex)
+        else: request['units'] = 2
+    elif boundary in {'held-pool', 'attempt-identity'}:
+        other = setup(store, people, project, 'other-held', actor='owner')
+        store.reserve_cpu(actor, project, **other)
+        if boundary == 'attempt-identity': request['attempt_id'] = other['attempt_id']
+    before = cpu_record_counts(store, project)
+    explanation = store.explain_cpu(actor, project, **request)
+    assert explanation['eligible'] is False and explanation['outcome'] == 'denied'
+    assert len(explanation['reasons']) == 1 and explanation['reasons'][0]['code'] == code
+    assert explanation['physical_dispatch_authorized'] is False
+    assert cpu_record_counts(store, project) == before
+    with pytest.raises(DomainError) as caught:
+        store.reserve_cpu(actor, project, **request)
+    assert explanation['reasons'][0] == dict(code=caught.value.code, message=caught.value.message,
+                                           status_code=caught.value.status_code)
+    assert cpu_record_counts(store, project) == before
+
+
+def test_absent_controls_are_denied_without_inventing_capacity(store, actors):
+    project, people = actors
+    request = dict(task_id='missing', action_id=uuid4().hex, attempt_id=uuid4().hex, units=1,
+                   expected_revision=1, readiness_generation=1, claim_fence=1, generation=1, local_generation=1)
+    result = store.explain_cpu(people['worker'], project, **request)
+    assert result['pool'] is None and result['held_units'] is None
+    assert result['reasons'][0]['code'] == 'control_conflict'
+    failure('control_conflict', lambda: store.reserve_cpu(people['worker'], project, **request))
+
+
+def test_replay_reports_held_or_cancelled_never_fresh_eligibility(store, actors):
+    project, people = actors
+    request = setup(store, people, project)
+    store.reserve_cpu(people['worker'], project, **request)
+    for expected_state in ('reserved', 'cancelled'):
+        if expected_state == 'cancelled':
+            store.cancel_cpu_reservation(people['owner'], project, request['action_id'], reason='No dispatch')
+            expire(store, project, request['task_id'])
+            store.configure_cpu_pool(people['owner'], project, 1, False, 1, 'pause', reason='Pause')
+        before = cpu_record_counts(store, project)
+        result = store.explain_cpu(people['worker'], project, **request)
+        assert result['outcome'] == 'replay' and result['eligible'] is False
+        assert result['reservation_state'] == expected_state and result['physical_dispatch_authorized'] is False
+        assert result['pool'] is None and result['held_units'] is None
+        assert store.reserve_cpu(people['worker'], project, **request)['state'] == expected_state
+        assert cpu_record_counts(store, project) == before
+
+
+def test_explanation_current_auth_and_markdown_authority_precede_replay(store, actors):
+    project, people = actors
+    request = setup(store, people, project)
+    store.reserve_cpu(people['worker'], project, **request)
+    failure('authorization', lambda: store.explain_cpu(people['outsider'], project, **request))
+    with store._connection() as connection:
+        connection.execute("DELETE FROM principal_grants WHERE principal_id = %s AND operation = 'tasks:claim'", (people['worker'].principal_id,))
+    failure('authorization', lambda: store.explain_cpu(people['worker'], project, **request))
+    with store._connection() as connection:
+        authority = connection.execute(
+            "INSERT INTO ledger_imports (project_id, commit_id, content_sha256, import_sha256, task_count, status_counts, authority) "
+            "VALUES (%s, 'commit', %s, %s, 1, '{}'::jsonb, 'markdown') "
+            "ON CONFLICT (project_id) DO UPDATE SET authority = EXCLUDED.authority RETURNING authority",
+            (project, 'c' * 64, 'd' * 64),
+        ).fetchone()['authority']
+        assert authority == 'markdown'
+    failure('authority', lambda: store.explain_cpu(people['owner'], project, **request))
+    failure('authority', lambda: store.reserve_cpu(people['owner'], project, **request))
+
+
+@pytest.mark.parametrize('change', ['control', 'lease'])
+def test_explanation_does_not_authorize_later_changed_state(store, actors, change):
+    project, people = actors
+    request = setup(store, people, project)
+    assert store.explain_cpu(people['worker'], project, **request)['eligible'] is True
+    if change == 'control':
+        store.set_cpu_local_control(people['owner'], project, False, 2, 'stop-after-read', reason='Stop')
+    else: expire(store, project, request['task_id'])
+    failure('control_conflict' if change == 'control' else 'claim_conflict',
+            lambda: store.reserve_cpu(people['worker'], project, **request))
+
+
+def test_explanation_snapshot_survives_concurrent_control_change(store, actors, monkeypatch):
+    project, people = actors
+    request = setup(store, people, project)
+    original = store._require_current_dependencies
+    def stop_after_pool_read(connection, scope, task):
+        original(connection, scope, task)
+        store.set_cpu_local_control(people['owner'], project, False, 2, 'concurrent-stop', reason='Stop')
+    monkeypatch.setattr(store, '_require_current_dependencies', stop_after_pool_read)
+    result = store.explain_cpu(people['worker'], project, **request)
+    assert result['eligible'] is True and result['pool']['local_enabled'] is True
+    assert store_cpu_pool(store, project)['local_enabled'] is False
+    failure('control_conflict', lambda: store.reserve_cpu(people['worker'], project, **request))
+
+
+def test_explanation_database_failure_remains_unavailable(store, actors, monkeypatch):
+    project, people = actors
+    request = setup(store, people, project)
+    def unavailable(*args, **kwargs):
+        raise psycopg.OperationalError('Injected database failure')
+    monkeypatch.setattr(store, '_cpu_eligibility', unavailable)
+    failure('unavailable', lambda: store.explain_cpu(people['worker'], project, **request))
