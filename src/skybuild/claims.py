@@ -7,6 +7,16 @@ from .contracts import DomainError
 
 
 class Claims:
+    @staticmethod
+    def _require_claim_fence(connection, principal, project_id, task_id, fence):
+        claim = connection.execute('SELECT *, lease_until > clock_timestamp() AS live FROM task_claims '
+                                   'WHERE project_id = %s AND task_id = %s', (project_id, task_id)).fetchone()
+        if claim is None and fence is None:
+            return
+        if (not claim or type(fence) is not int or not claim['held'] or not claim['live'] or
+                claim['holder'] != principal.principal_id or claim['fence'] != fence):
+            raise DomainError('claim_conflict', 'Effect requires current ownership holder, lease and fence', 409)
+
     def claim_task(self, principal, project_id, task_id, expected_revision, idempotency_key, *, lease_seconds=60):
         return self._claim_transition(principal, project_id, task_id, 'claim', expected_revision,
                                       idempotency_key, lease_seconds=lease_seconds)
@@ -76,8 +86,12 @@ class Claims:
                         connection.execute('UPDATE task_claims SET held = false WHERE project_id = %s AND task_id = %s',
                                            (project_id, task_id))
                     else:
-                        connection.execute("UPDATE task_claims SET lease_until = clock_timestamp() + %s * interval '1 second' "
-                                           'WHERE project_id = %s AND task_id = %s', (lease_seconds, project_id, task_id))
+                        renewed = connection.execute("UPDATE task_claims SET lease_until = clock_timestamp() + %s * interval '1 second' "
+                                                     'WHERE project_id = %s AND task_id = %s AND held '
+                                                     'AND holder = %s AND fence = %s AND lease_until > clock_timestamp()',
+                                                     (lease_seconds, project_id, task_id, principal.principal_id, fence))
+                        if renewed.rowcount != 1:
+                            raise DomainError('claim_conflict', 'Ownership lease expired before renewal', 409)
                 after = _public(connection.execute('SELECT * FROM task_claims WHERE project_id = %s AND task_id = %s',
                                                    (project_id, task_id)).fetchone())
                 if before:

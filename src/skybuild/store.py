@@ -806,7 +806,7 @@ class Store(Claims):
             'AND exposure_held LIMIT 1', (project_id, task_id)).fetchone():
             raise DomainError('effect_conflict', 'Task has unresolved effect exposure', 409)
 
-    def create_effect_intent(self, principal, project_id, task_id, body, expected_revision, idempotency_key):
+    def create_effect_intent(self, principal, project_id, task_id, body, expected_revision, idempotency_key, *, claim_fence=None):
         """Persist intent only. Caller-supplied references never grant launch authority."""
         fields = {'operation_id', 'attempt_id', 'authority_epoch', 'authority_generation',
                   'input_digest', 'policy_digest', 'allocation_refs'}
@@ -830,6 +830,8 @@ class Store(Claims):
         if type(expected_revision) is not int or not 1 <= expected_revision < 2**63:
             _invalid('Effect intent requires a positive expected revision')
         payload = {'task_id': task_id, 'revision': expected_revision, 'body': body}
+        if claim_fence is not None:
+            payload['claim_fence'] = claim_fence
         digest = hashlib.sha256(_json({'project_id': project_id, **payload}).encode()).hexdigest()
         with self._connection() as connection:
             principal = self._authorize_effect_writer(connection, principal, project_id)
@@ -845,6 +847,7 @@ class Store(Claims):
                         raise DomainError('idempotency_conflict', 'Operation ID has different intent', 409)
                     return _public(prior)
                 task = self._task(connection, project_id, task_id, lock=True)
+                self._require_claim_fence(connection, principal, project_id, task_id, claim_fence)
                 if task['revision'] != expected_revision:
                     raise DomainError('stale_revision', 'Task revision has changed', 409)
                 if task['status'] in {'superseded', 'done', 'deferred'}:
@@ -862,7 +865,7 @@ class Store(Claims):
                 return after
             return self._idempotent(connection, principal, project_id, 'effect.intent', idempotency_key, payload, mutation)
 
-    def observe_effect(self, principal, project_id, operation_id, state, reason, idempotency_key):
+    def observe_effect(self, principal, project_id, operation_id, state, reason, idempotency_key, *, claim_fence=None):
         """Hold uncertainty durably or cancel an intent never exposed to external I/O.
 
         Unknown is deliberately irreversible here. No adapter proof format is qualified.
@@ -873,6 +876,8 @@ class Store(Claims):
             _invalid('Only unknown exposure or never-dispatched cancellation is supported')
         reason = _text(reason, 'reason', 4096)
         payload = {'operation_id': operation_id, 'state': state, 'reason': reason}
+        if claim_fence is not None:
+            payload['claim_fence'] = claim_fence
         with self._connection() as connection:
             principal = self._authorize_effect_writer(connection, principal, project_id)
             def mutation():
@@ -881,6 +886,7 @@ class Store(Claims):
                                             (operation_id, project_id)).fetchone()
                 if not before:
                     raise DomainError('not_found', 'Effect operation not found', 404)
+                self._require_claim_fence(connection, principal, project_id, before['task_id'], claim_fence)
                 if before['state'] == state:
                     return _public(before)
                 if before['state'] != 'intent':
