@@ -387,7 +387,8 @@ def test_explanation_current_auth_and_markdown_authority_precede_replay(store, a
         connection.execute("DELETE FROM principal_grants WHERE principal_id = %s AND operation = 'tasks:claim'", (people['worker'].principal_id,))
     failure('authorization', lambda: store.explain_cpu(people['worker'], project, **request))
     with store._connection() as connection:
-        connection.execute("INSERT INTO ledger_imports (project_id, commit_id, content_sha256, import_sha256, task_count, status_counts, authority) VALUES (%s, 'commit', %s, %s, 1, '{}'::jsonb, 'markdown')", (project, 'c' * 64, 'd' * 64))
+        connection.execute("UPDATE ledger_imports SET authority = 'markdown' WHERE project_id = %s",
+                           (project,))
     failure('authority', lambda: store.explain_cpu(people['owner'], project, **request))
     failure('authority', lambda: store.reserve_cpu(people['owner'], project, **request))
 
