@@ -155,7 +155,8 @@ def install_workbench(app: FastAPI, *, dev_reload: bool = False) -> None:
                     "blocker": "", "responsible": "fake-preview", "assignee": None,
                     "dependencies": [], "acceptance_criteria": [], "architecture_refs": [],
                     "revision": 1, "created_at": "mastertodo.md", "updated_at": "mastertodo.md",
-                    "metadata": {"fake": True, "source": "docs/design/mastertodo.md"}, "fake": True,
+                    "metadata": {"fake": True, "source": "docs/design/mastertodo.md",
+                                 "waiting_on": "TBD", "will_enable": "TBD"}, "fake": True,
                 })
             return JSONResponse(tasks, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 

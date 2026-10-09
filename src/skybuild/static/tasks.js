@@ -20,7 +20,7 @@
     blocker: "", responsible: "fake-preview", assignee: "demo-box", dependencies: ["FAKE-SKYBUILD-BOOTSTRAP"],
     acceptance_criteria: ["Task list shows complete task fields", "Task journal expands commit and review evidence"],
     architecture_refs: ["FAKE-ARCH-REF"], revision: 3, created_at: "2026-10-01T14:10:00Z", updated_at: fakeTimestamp,
-    metadata: {fake: true}, fake: true,
+    metadata: {fake: true, waiting_on: ["FAKE-SKYBUILD-BOOTSTRAP"], will_enable: "TBD"}, fake: true,
   };
   const fakeHistory = [
     {event_id: "FAKE-EVENT-001", task_id: fakeTask.task_id, actor: "fake-owner", operation: "created", revision: 1,
@@ -40,7 +40,12 @@
     {key: "task", label: "Task", value: task => `${task.title || "—"} · ${task.task_id || "—"}`},
     {key: "status", label: "Current status", value: task => task.status},
     {key: "next", label: "Next status", value: task => task.status === "deferred" ? "blocked on resume" : task.status === "done" ? "none (complete)" : "Not recorded by API"},
-    {key: "phase", label: "Phase", value: task => task.phase},
+    {key: "waiting", label: "Waiting on", value: task => taskRelation(task, "waiting_on"),
+      filterValue: task => relationToken(taskRelation(task, "waiting_on")),
+      filterLabel: task => relationLabel(taskRelation(task, "waiting_on"))},
+    {key: "enables", label: "Will Enable", value: task => taskRelation(task, "will_enable"),
+      filterValue: task => relationToken(taskRelation(task, "will_enable")),
+      filterLabel: task => relationLabel(taskRelation(task, "will_enable"))},
     {key: "priority", label: "Priority", value: task => task.priority},
     {key: "action", label: "Next action / blocker", value: task => task.blocker || task.next_action},
     {key: "responsible", label: "Responsible", value: task => task.responsible},
@@ -50,6 +55,35 @@
   let sortColumns = [];
   const taskFilters = new Map();
   const taskCollator = new Intl.Collator(undefined, {numeric: true, sensitivity: "base"});
+
+  function taskRelation(task, name) {
+    const metadata = task.metadata && typeof task.metadata === "object" && !Array.isArray(task.metadata) ? task.metadata : {};
+    if (Object.prototype.hasOwnProperty.call(task, name)) return task[name] ?? "TBD";
+    if (Object.prototype.hasOwnProperty.call(metadata, name)) return metadata[name] ?? "TBD";
+    // `dependencies` is the task record's declared prerequisite list. Will-enable stays explicitly recorded;
+    // never infer it by scanning other tasks because that would hide missing or stale task data.
+    if (name === "waiting_on" && Array.isArray(task.dependencies)) return task.dependencies;
+    return "TBD";
+  }
+
+  function relationItems(value) {
+    if (Array.isArray(value)) return value.map(item => typeof item === "object" && item ? item.task_id || item.id || "TBD" : String(item));
+    if (value === null || value === undefined || value === "" || String(value).toUpperCase() === "TBD") return null;
+    return [String(value)];
+  }
+
+  function relationToken(value) {
+    const items = relationItems(value);
+    return items === null ? "@tbd" : JSON.stringify([...items].sort(taskCollator.compare));
+  }
+
+  function relationLabel(value) {
+    const items = relationItems(value);
+    if (items === null) return "TBD";
+    if (!items.length) return "None";
+    const count = `${items.length} task${items.length === 1 ? "" : "s"}`;
+    return `${count}: ${items.slice(0, 2).join(", ")}${items.length > 2 ? ", …" : ""}`;
+  }
 
   function notify(message, error = false) {
     byId("notice").textContent = message;
@@ -198,17 +232,20 @@
       all.value = "";
       all.textContent = "All";
       select.append(all);
-      const values = [...new Set(tasks.map(task => {
-        const value = column.value(task);
-        return value === null || value === undefined || value === "" ? "—" : String(value);
-      }))].sort(taskCollator.compare);
+      const options = new Map();
+      for (const task of tasks) {
+        const raw = column.filterValue ? column.filterValue(task) : column.value(task);
+        const value = raw === null || raw === undefined || raw === "" ? "—" : String(raw);
+        const label = column.filterLabel ? column.filterLabel(task) : value;
+        if (!options.has(value)) options.set(value, label);
+      }
       const selected = taskFilters.get(column.key) || "";
-      if (selected && !values.includes(selected)) values.push(selected);
-      for (const value of values) {
+      if (selected && !options.has(selected)) options.set(selected, selected === "@tbd" ? "TBD" : selected);
+      for (const [value, label] of [...options.entries()].sort((a, b) => taskCollator.compare(a[1], b[1]))) {
         const option = document.createElement("option");
         option.value = value;
-        option.textContent = value.length > 44 ? value.slice(0, 43) + "…" : value;
-        option.title = value;
+        option.textContent = label.length > 44 ? label.slice(0, 43) + "…" : label;
+        option.title = label;
         select.append(option);
       }
       select.value = selected;
@@ -239,13 +276,16 @@
     const visible = tasks.filter(task => taskColumns.every(column => {
       if (!taskFilters.has(column.key)) return true;
       const value = column.value(task);
-      return (value === null || value === undefined || value === "" ? "—" : String(value)) === taskFilters.get(column.key);
+      const raw = column.filterValue ? column.filterValue(task) : value;
+      return (raw === null || raw === undefined || raw === "" ? "—" : String(raw)) === taskFilters.get(column.key);
     }));
     const columns = new Map(taskColumns.map(column => [column.key, column]));
     visible.sort((left, right) => {
       for (const item of sortColumns) {
         const column = columns.get(item.key);
-        const a = column.value(left), b = column.value(right);
+        const aRaw = column.value(left), bRaw = column.value(right);
+        const a = Array.isArray(aRaw) ? [...aRaw].join(", ") : aRaw;
+        const b = Array.isArray(bRaw) ? [...bRaw].join(", ") : bRaw;
         const aMissing = a === null || a === undefined || a === "";
         const bMissing = b === null || b === undefined || b === "";
         if (aMissing !== bMissing) return aMissing ? 1 : -1;
@@ -289,7 +329,8 @@
       pill.textContent = escapeText(task.status);
       status.replaceChildren(pill);
       addCell(row, task.status === "deferred" ? "blocked on resume" : task.status === "done" ? "none (complete)" : "Not recorded by API");
-      addCell(row, task.phase);
+      appendTaskRelationCell(row, taskRelation(task, "waiting_on"));
+      appendTaskRelationCell(row, taskRelation(task, "will_enable"));
       addCell(row, task.priority);
       addCell(row, task.blocker || task.next_action);
       addCell(row, task.responsible);
@@ -314,6 +355,31 @@
         : `${tasks.length} task${tasks.length === 1 ? "" : "s"} loaded for ${project}${fake ? " · API returned no tasks; showing fake preview records" : ""}${filteredCount}`;
     renderTaskPicker();
     controls();
+  }
+
+  function appendTaskRelationCell(row, value) {
+    const cell = document.createElement("td");
+    const items = relationItems(value);
+    if (items === null) {
+      cell.textContent = "TBD";
+    } else if (!items.length) {
+      cell.textContent = "None";
+    } else {
+      const details = document.createElement("details");
+      const summary = document.createElement("summary");
+      summary.textContent = `${items.length} task${items.length === 1 ? "" : "s"}`;
+      const list = document.createElement("ul");
+      for (const id of items) {
+        const line = document.createElement("li");
+        const known = tasks.find(task => task.task_id === id);
+        line.textContent = known ? `${id} · ${known.title}` : id;
+        list.append(line);
+      }
+      details.append(summary, list);
+      cell.append(details);
+    }
+    row.append(cell);
+    return cell;
   }
 
   function renderTaskPicker() {
@@ -390,6 +456,7 @@
       ["Next status", task.status === "deferred" ? "blocked on resume" : "Not declared by API"],
       ["Next action", task.next_action], ["Phase", task.phase], ["Priority", task.priority],
       ["Blocker", task.blocker], ["Responsible", task.responsible], ["Assignee", task.assignee],
+      ["Waiting on", taskRelation(task, "waiting_on")], ["Will enable", taskRelation(task, "will_enable")],
       ["Dependencies", task.dependencies], ["Acceptance criteria", task.acceptance_criteria],
       ["Architecture references", task.architecture_refs], ["Revision", task.revision],
       ["Created", task.created_at], ["Updated", task.updated_at],
