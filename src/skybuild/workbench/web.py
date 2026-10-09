@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import hashlib
 import re
+import subprocess
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
-from . import fleet_inventory, navigation
+from . import fleet_inventory, marshalls, navigation
 from ..ledger import build_manifest
 from .source import page
 
@@ -26,7 +27,8 @@ HEADERS = {
 def _revision() -> str:
     digest = hashlib.sha256()
     paths = [ROOT / "web.py", ROOT / "workbench" / "web.py", ROOT / "workbench" / "navigation.py",
-             ROOT / "workbench" / "fleet_inventory.py"]
+             ROOT / "workbench" / "fleet_inventory.py", ROOT / "workbench" / "marshalls.py",
+             ROOT / "marshall_dunsel.py"]
     paths.extend(path for path in STATIC.iterdir() if path.is_file())
     paths.extend(path for path in (ROOT / "workbench" / "source").rglob("*") if path.is_file() and "__pycache__" not in path.parts)
     for path in sorted(set(paths)):
@@ -62,6 +64,8 @@ def install_workbench(app: FastAPI, *, dev_reload: bool = False) -> None:
         ("/workbench/assets/milestones.css", "milestones.css", "text/css"),
         ("/workbench/assets/milestone-roadmap.png", "milestone-roadmap.png", "image/png"),
         ("/workbench/assets/project-dependency-design.md", "project-dependency-design.md", "text/markdown; charset=utf-8"),
+        ("/workbench/assets/marshalls.css", "marshalls.css", "text/css"),
+        ("/workbench/assets/marshalls.js", "marshalls.js", "text/javascript"),
     ):
         app.add_api_route(route, _asset_handler(filename, media_type), methods=["GET"], include_in_schema=False)
 
@@ -86,6 +90,18 @@ def install_workbench(app: FastAPI, *, dev_reload: bool = False) -> None:
         return HTMLResponse(body, headers={
             **HEADERS,
             "Content-Security-Policy": "default-src 'self'; img-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'",
+        })
+
+    @app.get("/workbench/marshalls", include_in_schema=False)
+    def marshalls_page() -> HTMLResponse:
+        body = (STATIC / "marshalls.html").read_text(encoding="utf-8")
+        body = body.replace("<!--WORKBENCH_NAV-->", navigation.sidebar("marshalls"))
+        body = body.replace("<!--MARSHALLS_CONTROLS-->", "true" if dev_reload else "false")
+        if dev_reload:
+            body = body.replace("</body>", _dev_script(_revision()) + "</body>")
+        return HTMLResponse(body, headers={
+            **HEADERS,
+            "Content-Security-Policy": "default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'",
         })
 
     @app.get("/workbench/views/{view_name}", include_in_schema=False)
@@ -127,6 +143,44 @@ def install_workbench(app: FastAPI, *, dev_reload: bool = False) -> None:
         )
 
     if dev_reload:
+        def local_marshall_request(request: Request, *, mutation: bool = False) -> None:
+            try:
+                marshalls.require_local_request(request, mutation=mutation)
+            except PermissionError as error:
+                raise HTTPException(403, detail=str(error)) from None
+
+        @app.get("/workbench/api/marshalls/dunsel", include_in_schema=False)
+        def dunsel_status(request: Request) -> JSONResponse:
+            local_marshall_request(request)
+            return JSONResponse(marshalls.snapshot(), headers={"Cache-Control": "no-store"})
+
+        @app.post("/workbench/api/marshalls/dunsel/{action}", include_in_schema=False)
+        def dunsel_control(action: str, request: Request) -> JSONResponse:
+            local_marshall_request(request, mutation=True)
+            if action not in {"enable", "disable", "start", "graceful", "kill"}:
+                raise HTTPException(404)
+            try:
+                if action == "enable":
+                    marshalls.set_enabled(True)
+                    result = {"enabled": True, "message": "Dunsel enabled. It can now be started."}
+                elif action == "disable":
+                    marshalls.set_enabled(False)
+                    result = {"enabled": False, "message": "Dunsel disabled. A running process was left unchanged."}
+                elif action == "start":
+                    outcome = marshalls.start()
+                    result = {**outcome, "message": "Dunsel started." if outcome["started"] else "Dunsel is already running."}
+                elif action == "graceful":
+                    outcome = marshalls.graceful_stop()
+                    result = {**outcome, "message": "Graceful stop requested." if outcome["requested"] else "Dunsel is not running."}
+                else:
+                    outcome = marshalls.kill()
+                    result = {**outcome, "message": "Dunsel killed." if outcome["killed"] else "Dunsel is not running."}
+            except marshalls.MarshallConflict as error:
+                raise HTTPException(409, detail=str(error)) from None
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                raise HTTPException(503, detail=f"Dunsel control failed ({type(error).__name__}).") from None
+            return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
         @app.get("/workbench/api/fleet", include_in_schema=False)
         def fleet_snapshot() -> JSONResponse:
             return JSONResponse(fleet_inventory.snapshot(), headers={"Cache-Control": "no-store"})

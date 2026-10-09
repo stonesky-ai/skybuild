@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en" data-marshalls-controls="<!--MARSHALLS_CONTROLS-->">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Marshalls · SkyBuild</title>
+  <link rel="stylesheet" href="/workbench/assets/workbench-shell.css">
+  <link rel="stylesheet" href="/workbench/assets/marshalls.css">
+  <script src="/workbench/assets/marshalls.js" defer></script>
+</head>
+<body>
+  <!--WORKBENCH_NAV-->
+  <header>
+    <p class="eyebrow">SkyBuild · Local operations</p>
+    <h1>Marshalls</h1>
+    <p>Fixed, CPU-only local processes with visible status and direct controls.</p>
+  </header>
+  <main class="marshall-main">
+    <p id="preview-boundary" class="marshall-note" hidden>Process controls are available only in the local Workbench preview on this machine.</p>
+    <section class="marshall-card" aria-labelledby="dunsel-title">
+      <div class="marshall-heading">
+        <div>
+          <p class="eyebrow">First marshall</p>
+          <h2 id="dunsel-title">Dunsel</h2>
+          <p class="marshall-description">Samples available memory and disk space every ten seconds. Graceful stop checks its request at each sample.</p>
+        </div>
+        <span id="dunsel-state" class="state-pill" data-state="unknown">Checking</span>
+      </div>
+
+      <div class="marshall-actions" aria-label="Dunsel controls">
+        <button id="dunsel-enable" type="button">Enable</button>
+        <button id="dunsel-disable" type="button" class="secondary">Disable</button>
+        <span class="action-separator" aria-hidden="true"></span>
+        <button id="dunsel-start" type="button" class="primary">Start</button>
+        <button id="dunsel-graceful" type="button" class="secondary">Graceful stop</button>
+        <button id="dunsel-kill" type="button" class="danger">Kill</button>
+        <button id="dunsel-refresh" type="button" class="secondary">Refresh status</button>
+      </div>
+      <p id="dunsel-notice" class="marshall-notice" role="status" aria-live="polite">Loading status…</p>
+
+      <dl class="marshall-facts">
+        <div><dt>Enabled</dt><dd id="dunsel-enabled">Unknown</dd></div>
+        <div><dt>Process</dt><dd id="dunsel-pid">Unknown</dd></div>
+        <div><dt>Last seen</dt><dd id="dunsel-last-seen">No log file</dd></div>
+        <div><dt>Page updated</dt><dd id="dunsel-observed">Unknown</dd></div>
+      </dl>
+
+      <div class="marshall-detail-grid">
+        <section aria-labelledby="dunsel-processes-title">
+          <h3 id="dunsel-processes-title">Process and descendants</h3>
+          <pre id="dunsel-processes">No process information yet.</pre>
+        </section>
+        <section aria-labelledby="dunsel-top-title">
+          <h3 id="dunsel-top-title">`top` process row</h3>
+          <pre id="dunsel-top">No process row yet.</pre>
+        </section>
+        <section class="log-panel" aria-labelledby="dunsel-log-title">
+          <h3 id="dunsel-log-title">Latest `/tmp/marshall_dunsel.log` line</h3>
+          <pre id="dunsel-log">No log line yet.</pre>
+        </section>
+      </div>
+      <p class="marshall-footnote">Disable blocks future starts; it does not stop a running process. Use Graceful stop or Kill to stop Dunsel.</p>
+    </section>
+  </main>
+</body>
+</html>
