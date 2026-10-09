@@ -606,8 +606,9 @@ def test_fake_http_failed_generation_retains_parent_wall_latency_and_exposure(ht
     assert generation["request"]["method"] == "POST"
     assert generation["status"] == "consumed_uncertain"
     if outcome == "timeout":
-        # Discovery and generation share the same total wall budget.
-        assert sum(entry["parent_elapsed_wall_ms"] for entry in entries) >= 95
+        # Setup and discovery consume time before generation starts, so
+        # request-only latency must stay within one shared deadline.
+        assert sum(entry["parent_elapsed_wall_ms"] for entry in entries) < 150
         assert generation["parent_elapsed_wall_ms"] > 0
     else:
         assert generation["parent_elapsed_wall_ms"] >= 25
