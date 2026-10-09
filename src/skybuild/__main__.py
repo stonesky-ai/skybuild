@@ -70,6 +70,8 @@ def main(argv: list[str] | None = None) -> int:
     inbox.add_argument("project_id")
     inbox.add_argument("--limit", type=int, default=100)
     inbox.add_argument("--offset", type=int, default=0)
+    inbox.add_argument("--wait-seconds", type=int, choices=range(26), default=0,
+                       help="Wait once for a pending inbox page, up to 25 seconds; never execute messages")
     for command in ("cord-send", "cord-reply"):
         message = commands.add_parser(command, help="Send a Cord JSON message from a UTF-8 file or standard input")
         message.add_argument("project_id")
@@ -138,7 +140,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command.startswith("cord-"):
             with Client(_environment("SKYBUILD_API_URL"), _environment("SKYBUILD_TOKEN")) as client:
                 if args.command == "cord-inbox":
-                    result = client.inbox(args.project_id, limit=args.limit, offset=args.offset)
+                    result = client.inbox(args.project_id, limit=args.limit, offset=args.offset,
+                                          **({"wait_seconds": args.wait_seconds} if args.wait_seconds else {}))
                 elif args.command == "cord-send":
                     result = client.send_message(args.project_id, _cord_payload(args),
                                                  idempotency_key=args.idempotency_key)
