@@ -83,6 +83,26 @@ class RunArtifact:
         finally:
             os.close(descriptor)
 
+    def invalidate_success(self, attempted):
+        """Best-effort invalidation; a failed filesystem cannot prove durability."""
+        try:
+            descriptor = os.open(self.path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(descriptor, "r+b") as stream:
+                if stream.read(16385) != attempted:
+                    return  # Never invalidate another writer's evidence.
+                failed = dict(self.record, status="reporting_unconfirmed", ok=False,
+                              exit_code=1, error="ArtifactError", durability="unknown")
+                payload = (json.dumps(failed, sort_keys=True, allow_nan=False) + "\n").encode()
+                # Truncate first: an interrupted/failed rewrite leaves incomplete
+                # evidence rather than the previous success-shaped record.
+                stream.seek(0)
+                stream.truncate(0)
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except (OSError, RuntimeError, ValueError):
+            pass  # The original reporting failure must still fail the invocation.
+
     def update(self, phase, **values):
         descriptor = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
         with os.fdopen(descriptor, "rb") as stream:
@@ -98,7 +118,12 @@ class RunArtifact:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, self.path)
-            self.sync_directory()
+            try:
+                self.sync_directory()
+            except (OSError, RuntimeError, ValueError):
+                if self.record.get("ok") is True:
+                    self.invalidate_success(payload)
+                raise
             self.previous = payload
         finally:
             if os.path.exists(temporary):

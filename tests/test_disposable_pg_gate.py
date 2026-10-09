@@ -179,6 +179,69 @@ def test_initial_fsync_failure_reserves_incomplete_evidence(fake_gate, monkeypat
     assert path.exists() and json.loads(path.read_text())["status"] == "running"
 
 
+@pytest.mark.parametrize("repeated_fsync_failure", [False, True])
+def test_terminal_directory_fsync_failure_invalidates_visible_success(fake_gate, monkeypatch, repeated_fsync_failure):
+    run, path, calls, *_ = fake_gate
+    sync_directory = gate.RunArtifact.sync_directory
+    reached = []
+    def fail_terminal(self):
+        if self.record["phase"] == "terminal":
+            # The real update has already replaced the artifact with success.
+            assert json.loads(path.read_text())["ok"] is True
+            reached.append(True)
+            if repeated_fsync_failure:
+                monkeypatch.setattr(gate.os, "fsync", lambda _: (_ for _ in ()).throw(OSError("disk failure")))
+            raise OSError("directory fsync failure")
+        return sync_directory(self)
+    monkeypatch.setattr(gate.RunArtifact, "sync_directory", fail_terminal)
+    result, code = run()
+    record = json.loads(path.read_text())
+    assert reached == [True] and calls[-1][:2] == ["docker", "rm"]
+    assert code == 1 and not result["ok"] and result["artifact_error"] and result["cleaned_up"]
+    assert record["status"] == "reporting_unconfirmed" and record["ok"] is False
+    assert record["exit_code"] == 1 and record["durability"] == "unknown"
+    assert record["gate_outcome"] == "passed" and record["cleanup"] == "confirmed"
+    assert record["head"] == HEAD and record["tree"] == TREE and record["run_id"] == "bounded-run"
+    original = path.read_bytes()
+    assert run()[1] == 1 and path.read_bytes() == original  # Output stays reserved.
+
+
+def test_terminal_invalidation_preserves_conflicting_evidence(fake_gate, monkeypatch):
+    run, path, *_ = fake_gate
+    sync_directory = gate.RunArtifact.sync_directory
+    foreign = b'{"run_id":"foreign"}\n'
+    def fail_terminal(self):
+        if self.record["phase"] == "terminal":
+            path.write_bytes(foreign)
+            raise OSError("directory fsync failure")
+        return sync_directory(self)
+    monkeypatch.setattr(gate.RunArtifact, "sync_directory", fail_terminal)
+    result, code = run()
+    assert code == 1 and not result["ok"] and result["artifact_error"]
+    assert path.read_bytes() == foreign
+
+
+def test_unwritable_terminal_invalidation_retains_explicit_cli_failure(fake_gate, monkeypatch):
+    run, path, *_ = fake_gate
+    sync_directory = gate.RunArtifact.sync_directory
+    open_file = gate.os.open
+    def refuse_writes(path, flags, *args, **kwargs):
+        if flags & gate.os.O_RDWR:
+            raise OSError("filesystem became read-only")
+        return open_file(path, flags, *args, **kwargs)
+    def fail_terminal(self):
+        if self.record["phase"] == "terminal":
+            monkeypatch.setattr(gate.os, "open", refuse_writes)
+            raise OSError("directory fsync failure")
+        return sync_directory(self)
+    monkeypatch.setattr(gate.RunArtifact, "sync_directory", fail_terminal)
+    result, code = run()
+    assert code == 1 and not result["ok"] and result["artifact_error"]
+    # No program can guarantee a correction when the filesystem refuses writes.
+    # Terminal-looking bytes alone must not override this failed invocation.
+    assert json.loads(path.read_text())["ok"] is True
+
+
 def test_changed_record_is_not_overwritten(fake_gate, monkeypatch):
     run, path, calls, *_ = fake_gate
     update = gate.RunArtifact.update

@@ -45,9 +45,23 @@ terminal acceptance. These snapshots do not lock the checkout against a hostile
 concurrent writer; the frozen-candidate ownership contract still applies.
 
 If reporting fails, stdout cannot report success. A progress failure may still
-permit a durable terminal error after owned cleanup; an unpersistable terminal
-leaves the last stage incomplete. Initial fsync failure may leave an incomplete
-reserved output. Neither an incomplete artifact nor a local timeout proves the
+permit a durable terminal error after owned cleanup. A terminal directory-fsync
+failure can occur after success-shaped bytes become visible. The writer then
+verifies those exact attempted bytes and invalidates only its own record in
+place, truncating before writing `reporting_unconfirmed`, `ok: false`, and
+`durability: unknown`. This preserves the reserved output and leaves incomplete
+evidence if rewriting is interrupted. Even if invalidation fsync fails, the
+visible bytes are no longer success-shaped; persistence through a crash remains
+unknown. Conflicting evidence is never invalidated.
+
+Invalidation is best effort: if the filesystem refuses even opening or
+truncating the owned file, attempted-success bytes may remain visible. No
+durability or acceptance claim follows from them. Readers must reconcile the
+matching invocation's successful CLI result as well as its terminal artifact;
+a failed, missing or unknown CLI result requires operator reconciliation,
+never acceptance from terminal-looking JSON alone. Initial fsync failure may
+leave an incomplete reserved output. Neither an incomplete artifact nor a local
+timeout proves the
 process stopped or cleanup completed, and neither permits restarting the run.
 Preserve the artifact and log for operator reconciliation. Ordinary stdout
 remains the existing gate result, with optional run/artifact references and a
@@ -76,3 +90,17 @@ were verified. An initial fake-runner assertion tried to parse intentionally
 foreign artifact content during cleanup; restricting that assertion to the
 relevant simulated execution stages corrected the test harness. No production
 effect was involved. Independent exact-head review remains pending.
+
+Independent review of `df43cb032a48a133976a1690ddd6c85cd81fdc32` reproduced
+terminal directory-fsync failure after replacement: the CLI failed while the
+visible artifact still reported success. The correction invalidates the owned
+visible success and adds offline regressions for that boundary, repeated fsync
+failure, conflicting evidence and a filesystem refusing invalidation. The
+original failed-head review remains preserved; the correction requires separate
+exact-head review before integration.
+
+Correction validation: **29 focused tests passed**, no skips. The two new
+terminal-fsync cases both failed against the exact original `df43cb0` module
+loaded in an isolated offline process, demonstrating that they reach the
+reported defect rather than an earlier refusal. No Docker or live operation was
+used. Package import origin and `git diff --check` were verified again.
