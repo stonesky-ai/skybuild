@@ -1,0 +1,27 @@
+{
+  "schema": "manual-work-brief-v1",
+  "assignment_id": "MWP-20261009-BRODSON-QUALIFICATION-011",
+  "task_id": "SKYBUILD-SHARED-INFERENCE",
+  "worker": "wonko",
+  "dispatcher": "pilot_dispatcher",
+  "branch": "task/brodson-live-qualification",
+  "owned_paths": [
+    "scripts/brodson_qualification.py",
+    "tests/test_brodson_qualification.py",
+    "docs/research/brodson-spike/qualification.md",
+    "docs/design/assignments/brodson-qualification-20261009.json",
+    "docs/design/models/brodson_qualification"
+  ],
+  "checks": [
+    "This is a distinct controller-local qualification phase based on 42c3256d1dd05af2c1c457d214231cce9f69c066. Assignment010 and its --live prohibition remain unchanged. No endpoint request is authorized by implementation or receipt alone.",
+    "Require independent exact-head review, published committed REST brief, verified receipt and separate private parent operator authorization before metadata. The first invocation makes at most GET /models and GET /props?model=qwen3.5-think&autoload=false, then stops before any count or generation.",
+    "One run permits 14 HTTP attempts: 2 metadata GETs, 6 count POSTs and 6 serial generations. No retries, redirects, proxies, route probes, fallback, reload, infrastructure changes or worker/model launch. Preserve consumed and uncertain attempts across restart.",
+    "Continuation requires separate authorization for the same run/head, exact metadata digest/build, independently reviewed deterministic template hash and unchanged serving profile. Require loaded target, unique --sleep-idle-seconds -1 and is_sleeping=false. Same-boot metadata expires after 30 minutes.",
+    "Send identical bodies to chat input_tokens and generation routes with autoload=false. Require 1..2048 input tokens; reserve count+512 before generation against 15360 aggregate. Require exact returned prompt count, complete bounded usage and model/build identity; stop on ambiguity or mismatch.",
+    "Use only existing controller ignored .env references for the zero-charge profile; only the HTTP client reads its private token. No credential transfer to Wonko/REST/artifacts or paid fallback. Metadata/count limits: 64KiB/4KiB and 10s wall; generation: 16KiB and 60s wall.",
+    "Use the three committed CPU fixtures with one proposal and at most one semantic correction per case. Preserve exact requests, sanitized responses, usage, hashes, wall latencies and failures. Returned content stays bounded data for the existing AST/assertion validators; it is never executed.",
+    "Run focused offline tests and the TLA+ crash/reservation model plus broken-restart challenge. Push owned paths only. Parent owns independent review, bundle integration, controller execution and later phase authorization. No task PR, direct development merge or live calls during preparation."
+  ],
+  "model_limit": "Existing approved sessions only; no paid/new profile. Controller HTTP gated separately. Preserve 8 GiB reserve. Owner cutoff 2026-10-09T15:20:53Z; receipt and restart cannot renew it.",
+  "next_action": "Wonko receives and verifies this immutable REST brief as the worker handoff, then reports receipt and reviews the bounded artifacts without reading or receiving friend credentials. The parent controller independently records exact-head review and explicit metadata-only authorization before any endpoint request. After metadata, stop for a separate parent decision; count/generation require the same durable run and a new exact-metadata/template/profile-bound authorization. Unqualified or stale evidence blocks continuation. All HTTP and token access stay on the controller."
+}
