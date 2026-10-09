@@ -24,7 +24,7 @@ HEADERS = {
 def _revision() -> str:
     digest = hashlib.sha256()
     paths = [ROOT / "web.py", ROOT / "workbench" / "web.py", ROOT / "workbench" / "navigation.py"]
-    paths.extend(path for path in STATIC.glob("workbench*") if path.is_file())
+    paths.extend(path for path in STATIC.iterdir() if path.is_file())
     paths.extend(path for path in (ROOT / "workbench" / "source").rglob("*") if path.is_file() and "__pycache__" not in path.parts)
     for path in sorted(set(paths)):
         digest.update(str(path.relative_to(ROOT)).encode())
@@ -54,8 +54,21 @@ def install_workbench(app: FastAPI, *, dev_reload: bool = False) -> None:
         ("/workbench/assets/workbench.js", "workbench.js", "text/javascript"),
         ("/workbench/assets/workbench.css", "workbench.css", "text/css"),
         ("/workbench/assets/workbench-shell.css", "workbench-shell.css", "text/css"),
+        ("/workbench/assets/tasks.js", "tasks.js", "text/javascript"),
+        ("/workbench/assets/tasks.css", "tasks.css", "text/css"),
     ):
         app.add_api_route(route, _asset_handler(filename, media_type), methods=["GET"], include_in_schema=False)
+
+    @app.get("/workbench/tasks", include_in_schema=False)
+    def tasks_page() -> HTMLResponse:
+        body = (STATIC / "tasks.html").read_text(encoding="utf-8")
+        body = body.replace("<!--WORKBENCH_NAV-->", navigation.sidebar("tasks"))
+        if dev_reload:
+            body = body.replace("</body>", _dev_script(_revision()) + "</body>")
+        return HTMLResponse(body, headers={
+            **HEADERS,
+            "Content-Security-Policy": "default-src 'self'; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'",
+        })
 
     @app.get("/workbench/views/{view_name}", include_in_schema=False)
     @app.get("/workbench/views", include_in_schema=False)
