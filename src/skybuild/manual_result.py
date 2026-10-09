@@ -1,5 +1,7 @@
 """Collect one pinned manual worker result; receipt is not review or acceptance."""
 import argparse
+from contextlib import contextmanager
+from functools import wraps
 from datetime import datetime
 import hashlib
 import json
@@ -7,6 +9,8 @@ import os
 import stat
 from pathlib import Path
 import re
+import signal
+import threading
 import subprocess
 import sys
 import time
@@ -23,6 +27,55 @@ class ResultError(ValueError):
     pass
 
 
+def _deadline_alarm(signum, frame):
+    raise ResultError("Collection deadline expired; preserve local evidence")
+
+
+@contextmanager
+def _elapsed_guard(seconds):
+    """Linux main-thread elapsed guard, including calls making slow progress."""
+    if threading.current_thread() is not threading.main_thread():
+        raise ResultError("Collection requires the main thread for its elapsed guard")
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    if previous_timer[0] and previous_handler is not _deadline_alarm:
+        raise ResultError("Collection cannot replace an existing elapsed alarm")
+    if seconds <= 0:
+        raise ResultError("Collection deadline expired")
+    started = time.monotonic()
+    bounded = min(seconds, previous_timer[0]) if previous_timer[0] else seconds
+    signal.signal(signal.SIGALRM, _deadline_alarm)
+    signal.setitimer(signal.ITIMER_REAL, bounded)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        # Nested collector calls retain the outer deadline; they never reset it.
+        remaining = previous_timer[0] - (time.monotonic() - started)
+        if previous_timer[0] and remaining > 0:
+            signal.setitimer(signal.ITIMER_REAL, remaining, previous_timer[1])
+
+
+def _bounded_collection(function):
+    @wraps(function)
+    def guarded(*args, **kwargs):
+        duration = kwargs.get('duration', 120)
+        if type(duration) is not int or not 1 <= duration <= 120:
+            raise ResultError("Collection bounds are invalid")
+        try:
+            cutoff = datetime.fromisoformat(kwargs['approval_until'].replace('Z', '+00:00'))
+            if cutoff.tzinfo is None:
+                raise ValueError
+            budget = min(duration, cutoff.timestamp() - kwargs.get('clock', time.time)())
+        except (KeyError, AttributeError, ValueError, OverflowError):
+            raise ResultError("An offset-aware approval cutoff is required") from None
+        with _elapsed_guard(budget):
+            return function(*args, **kwargs)
+    return guarded
+
+
+@_bounded_collection
 def receive_result(client, project, checkout, *, assignment, assignment_id, task_id,
                    worker, dispatcher, base_sha, message_id, destination,
                    approval_until, duration=120, max_pages=3,
@@ -195,24 +248,29 @@ def main(argv=None):
         cutoff = datetime.fromisoformat(args.approval_until.replace('Z', '+00:00'))
         if cutoff.tzinfo is None or cutoff.timestamp() <= time.time():
             raise ResultError('Collection deadline expired')
-        endpoint = _private_endpoint(args.url, _resolved_addresses)
-        assignment = _read_assignment(args.assignment)
-        duration = int(args.duration - (time.monotonic() - started))
-        if duration < 1 or cutoff.timestamp() <= time.time():
-            raise ResultError('Collection deadline expired')
-        with Client(endpoint, _token_from_file(args.token_file), retries=0, timeout=5,
-                    trust_env=False, ca_file=args.ca_file) as client:
-            output = receive_result(client, args.project, args.checkout, assignment=assignment,
-                assignment_id=args.assignment_id, task_id=args.task_id, worker=args.worker,
-                dispatcher=args.dispatcher, base_sha=args.base_sha, message_id=args.message_id,
-                destination=args.destination, approval_until=args.approval_until,
-                duration=duration, max_pages=args.max_pages)
-        print(json.dumps(output, sort_keys=True))
-        return 0
+        with _elapsed_guard(min(args.duration, cutoff.timestamp() - time.time())):
+            return _run_cli(args, cutoff, started)
     except (ResultError, AssignmentError, ManualCordError, ClientError, OSError, ValueError,
             TypeError, UnicodeError, subprocess.SubprocessError):
         print(json.dumps({'ok': False, 'reason': 'Result collection failed; preserve local evidence'}), file=sys.stderr)
         return 2
+
+
+def _run_cli(args, cutoff, started):
+    endpoint = _private_endpoint(args.url, _resolved_addresses)
+    assignment = _read_assignment(args.assignment)
+    duration = int(args.duration - (time.monotonic() - started))
+    if duration < 1 or cutoff.timestamp() <= time.time():
+        raise ResultError('Collection deadline expired')
+    with Client(endpoint, _token_from_file(args.token_file), retries=0, timeout=5,
+                trust_env=False, ca_file=args.ca_file) as client:
+        output = receive_result(client, args.project, args.checkout, assignment=assignment,
+            assignment_id=args.assignment_id, task_id=args.task_id, worker=args.worker,
+            dispatcher=args.dispatcher, base_sha=args.base_sha, message_id=args.message_id,
+            destination=args.destination, approval_until=args.approval_until,
+            duration=duration, max_pages=args.max_pages)
+    print(json.dumps(output, sort_keys=True))
+    return 0
 
 
 if __name__ == '__main__':
