@@ -679,3 +679,149 @@ def test_decoded_credential_echo_never_reaches_persisted_evidence(setup, tmp_pat
     saved = path.read_text()
     assert secret not in saved and escaped not in saved and "synthetic-credential" not in saved
     assert state["attempts"][-1]["error"] == "secret_echo_refused"
+
+
+@pytest.fixture
+def wake_operator_files(operator_files):
+    repo, _, auth = operator_files
+    brief = json.loads((q.ROOT / q.WAKE_BRIEF).read_bytes())
+    path = repo / q.WAKE_BRIEF
+    path.write_bytes(q.encode(brief))
+    subprocess.check_call(["git", "add", "."], cwd=repo)
+    subprocess.check_call(["git", "commit", "--quiet", "-m", "Separate wake permission brief"], cwd=repo)
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo).decode().strip()
+    assignment = {key: value for key, value in brief.items() if key not in {"schema", "next_action"}}
+    assignment.update(schema="manual-work-v1", base_sha=head, brief_path=q.WAKE_BRIEF,
+                      brief_sha256=q.digest(path.read_bytes()))
+    auth.update(schema="brodson-operator-authorization-v2", reviewed_head=head,
+                rest_assignment_sha256=q.digest(q.encode(assignment)), allow_automatic_wake_reload=False)
+    return repo, assignment, auth
+
+
+@pytest.mark.parametrize("permission", [False, True])
+def test_v2_requires_new_pinned_brief_and_explicit_boolean(wake_operator_files, permission):
+    repo, assignment, auth = wake_operator_files
+    auth["allow_automatic_wake_reload"] = permission
+    assert q.validate_authorization(auth, assignment, repo, now=100) > 100
+    assert q.automatic_wake_allowed(auth) is permission
+
+
+@pytest.mark.parametrize("permission", [None, 0, 1, "true", "false", [], {}])
+def test_v2_rejects_ambiguous_wake_permission(wake_operator_files, permission):
+    repo, assignment, auth = wake_operator_files
+    auth["allow_automatic_wake_reload"] = permission
+    with pytest.raises(q.QualificationError, match="explicit_boolean"):
+        q.validate_authorization(auth, assignment, repo, now=100)
+
+
+def test_v2_missing_permission_fails_closed(wake_operator_files):
+    repo, assignment, auth = wake_operator_files
+    del auth["allow_automatic_wake_reload"]
+    with pytest.raises(q.QualificationError, match="explicit_boolean"):
+        q.validate_authorization(auth, assignment, repo, now=100)
+
+
+def test_old_brief_never_authorizes_wake(operator_files):
+    repo, assignment, auth = operator_files
+    with pytest.raises(q.QualificationError, match="explicit_operator"):
+        q.validate_authorization(auth | {"allow_automatic_wake_reload": True}, assignment, repo, now=100)
+    with pytest.raises(q.QualificationError, match="wrong_rest_assignment"):
+        q.validate_authorization(auth | {"schema": "brodson-operator-authorization-v2",
+                                        "allow_automatic_wake_reload": True}, assignment, repo, now=100)
+
+
+def test_new_brief_does_not_reinterpret_v1_authorization(wake_operator_files):
+    repo, assignment, auth = wake_operator_files
+    auth["schema"] = "brodson-operator-authorization-v1"
+    del auth["allow_automatic_wake_reload"]
+    with pytest.raises(q.QualificationError, match="wrong_rest_assignment"):
+        q.validate_authorization(auth, assignment, repo, now=100)
+
+
+@pytest.mark.parametrize("status,sleeping", [("loaded", False), ("sleeping", True)])
+def test_explicit_wake_permission_admits_existing_child_without_sleep_disable_flag(setup, status, sleeping):
+    path, _, auth, manifest, transport, runner = setup
+    auth.update(schema="brodson-operator-authorization-v2", allow_automatic_wake_reload=True)
+    transport.replies = [models(args=[], status=status), props() | {"is_sleeping": sleeping}]
+    continuation = metadata_then_auth(setup)
+    saved = json.loads(path.read_bytes())
+    assert saved["binding"]["allow_automatic_wake_reload"] is True
+    assert len(transport.calls) == 2  # Opt-in still cannot turn metadata into inference.
+    transport.replies.extend(good_replies())
+    state = asyncio.run(runner(continuation).run(manifest))
+    assert state["status"] == "complete" and len(transport.calls) == 8
+    assert state["reserved_tokens"] == 1905
+    for method, route, *_ in transport.calls:
+        assert route in q.ROUTES and q.ROUTES[route] == method
+        if route != "/models":
+            assert "autoload=false" in route
+
+
+@pytest.mark.parametrize("status", ["unloaded", "loading", "stopped", "error", "failed", "downloading", None])
+def test_opt_in_never_admits_missing_or_nonready_child(setup, status):
+    _, _, auth, manifest, transport, runner = setup
+    auth.update(schema="brodson-operator-authorization-v2", allow_automatic_wake_reload=True)
+    transport.replies[0] = models(args=[], status=status)
+    state = asyncio.run(runner().run(manifest))
+    assert state["status"] == "stopped" and len(transport.calls) == 1
+
+
+@pytest.mark.parametrize("sleeping", [None, 0, 1, "false", "true"])
+def test_opt_in_still_requires_unambiguous_sleep_snapshot(setup, sleeping):
+    _, _, auth, manifest, transport, runner = setup
+    auth.update(schema="brodson-operator-authorization-v2", allow_automatic_wake_reload=True)
+    transport.replies[1] = props() | {"is_sleeping": sleeping}
+    continuation = metadata_then_auth(setup)
+    state = asyncio.run(runner(continuation).run(manifest))
+    assert state["stop_reason"] == "existing_loaded_or_sleeping_target_required"
+    assert len(transport.calls) == 2
+
+
+@pytest.mark.parametrize("initial,changed", [(False, True), (True, False)])
+def test_wake_permission_cannot_change_after_metadata(setup, initial, changed):
+    path, _, auth, manifest, transport, runner = setup
+    auth.update(schema="brodson-operator-authorization-v2", allow_automatic_wake_reload=initial)
+    continuation = metadata_then_auth(setup)
+    before = path.read_bytes()
+    continuation["allow_automatic_wake_reload"] = changed
+    with pytest.raises(q.QualificationError, match="run_binding"):
+        asyncio.run(runner(continuation).run(manifest))
+    assert path.read_bytes() == before and len(transport.calls) == 2
+
+
+@pytest.mark.parametrize("permission", [False, True])
+def test_existing_v1_state_cannot_be_adopted_by_v2(setup, permission):
+    path, _, _, manifest, transport, runner = setup
+    continuation = metadata_then_auth(setup)
+    before = path.read_bytes()
+    assert "authorization_schema" not in json.loads(before)["binding"]
+    continuation.update(schema="brodson-operator-authorization-v2", allow_automatic_wake_reload=permission)
+    with pytest.raises(q.QualificationError, match="run_binding"):
+        asyncio.run(runner(continuation).run(manifest))
+    assert path.read_bytes() == before and len(transport.calls) == 2
+
+
+def test_v2_false_preserves_strict_sleep_guard(setup):
+    _, _, auth, manifest, transport, runner = setup
+    auth.update(schema="brodson-operator-authorization-v2", allow_automatic_wake_reload=False)
+    transport.replies[0] = models(args=[])
+    continuation = metadata_then_auth(setup)
+    state = asyncio.run(runner(continuation).run(manifest))
+    assert state["stop_reason"] == "loaded_target_and_explicit_disabled_sleep_required"
+    assert len(transport.calls) == 2
+
+
+def test_opt_in_keeps_pending_generation_and_permission_after_crash(setup):
+    path, _, auth, manifest, transport, runner = setup
+    auth.update(schema="brodson-operator-authorization-v2", allow_automatic_wake_reload=True)
+    continuation = metadata_then_auth(setup)
+    class Crash(BaseException):
+        pass
+    transport.replies.extend([{"object": "response.input_tokens", "input_tokens": 123}, Crash()])
+    with pytest.raises(Crash):
+        asyncio.run(runner(continuation).run(manifest))
+    saved = json.loads(path.read_bytes())
+    assert saved["reserved_tokens"] == 635 and saved["binding"]["allow_automatic_wake_reload"] is True
+    with pytest.raises(q.QualificationError, match="uncertain_attempt"):
+        asyncio.run(runner(continuation).run(manifest))
+    assert len(transport.calls) == 4

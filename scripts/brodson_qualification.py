@@ -25,6 +25,8 @@ from skybuild.manual_dispatch import _state_directory
 ROOT = Path(__file__).resolve().parents[1]
 BRIEF = "docs/design/assignments/brodson-qualification-20261009.json"
 ASSIGNMENT = "MWP-20261009-BRODSON-QUALIFICATION-011"
+WAKE_BRIEF = "docs/design/assignments/brodson-wake-qualification-20261009.json"
+WAKE_ASSIGNMENT = "MWP-20261009-BRODSON-QUALIFICATION-012"
 ASSIGNMENT_APPROVED_UNTIL = "2026-10-09T15:20:53Z"
 MODEL = "qwen3.5-think"
 PROFILE = "owner-confirmed-zero-charge-brodson"
@@ -146,7 +148,18 @@ def validate_authorization(auth, assignment, checkout, *, now):
               "zero_charge_profile", "state_dir", "env_file", "limits", "metadata_sha256",
               "template_sha256", "deterministic_template_reviewed", "profile_unchanged_since_metadata",
               "approved_build_info"}
-    if not isinstance(auth, dict) or set(auth) != fields or auth["schema"] != "brodson-operator-authorization-v1":
+    if not isinstance(auth, dict):
+        raise QualificationError("explicit_operator_authorization_required")
+    version = auth.get("schema")
+    expected_assignment, brief_path = ASSIGNMENT, BRIEF
+    if version == "brodson-operator-authorization-v2":
+        fields.add("allow_automatic_wake_reload")
+        expected_assignment, brief_path = WAKE_ASSIGNMENT, WAKE_BRIEF
+        if type(auth.get("allow_automatic_wake_reload")) is not bool:
+            raise QualificationError("explicit_boolean_wake_permission_required")
+    elif version != "brodson-operator-authorization-v1":
+        raise QualificationError("explicit_operator_authorization_required")
+    if set(auth) != fields:
         raise QualificationError("explicit_operator_authorization_required")
     if (auth["phase"] not in {"metadata", "spike"} or auth["limits"] != LIMITS
             or auth["zero_charge_profile"] != PROFILE
@@ -161,12 +174,12 @@ def validate_authorization(auth, assignment, checkout, *, now):
             or not now < deadline.timestamp() <= maximum):
         raise QualificationError("approval_expired_or_not_utc")
     if (auth["rest_assignment_sha256"] != digest(encode(assignment))
-            or assignment.get("assignment_id") != ASSIGNMENT or assignment.get("brief_path") != BRIEF):
+            or assignment.get("assignment_id") != expected_assignment or assignment.get("brief_path") != brief_path):
         raise QualificationError("wrong_rest_assignment")
     verify_assignment(assignment, checkout, worker="wonko")
     head = _git(checkout, "rev-parse", "HEAD").decode().strip()
     if (head != auth["reviewed_head"] or _git(checkout, "status", "--porcelain", "--untracked-files=all").strip()
-            or _git(checkout, "show", f"HEAD:{BRIEF}") != _git(checkout, "show", f"{assignment['base_sha']}:{BRIEF}")):
+            or _git(checkout, "show", f"HEAD:{brief_path}") != _git(checkout, "show", f"{assignment['base_sha']}:{brief_path}")):
         raise QualificationError("clean_reviewed_head_and_unchanged_brief_required")
     if auth["phase"] == "spike" and (any(not isinstance(auth[key], str) or not SHA.fullmatch(auth[key])
                                            for key in ("metadata_sha256", "template_sha256"))
@@ -305,9 +318,18 @@ def metadata_props(value):
     return {key: value.get(key) for key in keys}
 
 
+def automatic_wake_allowed(auth):
+    """Only the separately authorized v2 contract can opt into ordinary-request reload."""
+    return (auth.get("schema") == "brodson-operator-authorization-v2"
+            and auth.get("allow_automatic_wake_reload") is True)
+
+
 def qualify_metadata(metadata, auth):
     models, props = metadata["models"], metadata["props"]
-    if models["status"] != "loaded" or not models["explicit_sleep_disabled"] or props["is_sleeping"] is not False:
+    if automatic_wake_allowed(auth):
+        if models["status"] not in {"loaded", "sleeping"} or type(props["is_sleeping"]) is not bool:
+            raise QualificationError("existing_loaded_or_sleeping_target_required")
+    elif models["status"] != "loaded" or not models["explicit_sleep_disabled"] or props["is_sleeping"] is not False:
         raise QualificationError("loaded_target_and_explicit_disabled_sleep_required")
     if props["model_alias"] != MODEL:
         raise QualificationError("props_target_mismatch")
@@ -347,6 +369,10 @@ class Runner:
     def begin(self):
         binding = {key: self.auth[key] for key in ("run_id", "reviewed_head", "rest_assignment_sha256",
                                                    "state_dir", "env_file", "zero_charge_profile", "limits")}
+        if self.auth.get("schema") == "brodson-operator-authorization-v2":
+            # Preserve the exact v1 binding shape; v2 cannot adopt or upgrade old state.
+            binding.update(authorization_schema=self.auth["schema"],
+                           allow_automatic_wake_reload=self.auth["allow_automatic_wake_reload"])
         if self.path.exists() or self.path.is_symlink():
             self.state = json.loads(private_read(self.path, 1_048_576))
             if (self.state.get("binding") != binding or self.state.get("boot_id") != self.boot_id
@@ -439,7 +465,8 @@ class Runner:
         try:
             if phase == "metadata":
                 models = await self.request("metadata", "/models", normalize=metadata_models)
-                if models["status"] != "loaded":
+                allowed_statuses = {"loaded", "sleeping"} if automatic_wake_allowed(self.auth) else {"loaded"}
+                if models["status"] not in allowed_statuses:
                     raise QualificationError("target_is_not_loaded")
                 props = await self.request("metadata", "/props?model=" + MODEL + "&autoload=false", normalize=metadata_props)
                 self.state.update(metadata={"models": models, "props": props},
