@@ -32,7 +32,7 @@ The [guarded readiness slice](implementation/ready_workflow_slice.md) adds a man
 
 Latest validation: independent `workflow_review` accepted the readiness guard; the full disposable suite passed 139 tests with the existing upstream warning. Real Chrome rendered the updated disconnected workbench at desktop and mobile widths without visible overflow. The browser QA server was stopped; screenshots were temporary local files. No live task authority changed.
 
-Importer replay now rejects changed receipt counts/authority, multiple receipts and unexpected lineage rows added since migration 004. Independent `import_review` accepted the fix; PostgreSQL transaction locks also fence a writer authorized before import against concurrent receipt creation. Focused importer tests passed 9 cases. No live task authority changed.
+Importer replay now rejects changed receipt counts/authority, multiple receipts and unexpected lineage rows added since migration 004. The importer takes the receipt-table lock before task-table locks to avoid a concurrent-writer deadlock; a paused-writer PostgreSQL test verifies the ordering. No live task authority changed.
 
 Saved 2026-10-08 after architecture revision A33 and the subsequent implementation authorization below. Resume from /home/kevin/my_code with sibling skybuild and skykeep checkouts. This is context, not a competing design plan.
 

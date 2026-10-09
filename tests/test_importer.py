@@ -3,6 +3,9 @@
 import json
 import os
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
+import time
 from uuid import uuid4
 
 import psycopg
@@ -169,3 +172,44 @@ def test_replay_refuses_lineage_not_in_frozen_import(plan, fresh_store):
                            "VALUES (%s, 'skybuild', %s, %s, 'split')", (uuid4(), source, target))
     with pytest.raises(DomainError, match="destination changed"):
         apply(fresh_store, plan)
+
+
+def test_import_waits_for_authorized_writer_then_refuses_its_task(plan, fresh_store, monkeypatch):
+    token = uuid4().hex + uuid4().hex
+    fresh_store.provision_principal("concurrent-writer", token, is_admin=True)
+    writer = fresh_store.authenticate(token)
+    authorized, release = Event(), Event()
+    original = fresh_store._authorize
+
+    def pause_after_authority_read(connection, principal, project_id, operation):
+        result = original(connection, principal, project_id, operation)
+        authorized.set()
+        if not release.wait(4):
+            raise AssertionError("Writer was not released")
+        return result
+
+    monkeypatch.setattr(fresh_store, "_authorize", pause_after_authority_read)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        writer_future = pool.submit(fresh_store.create_task, writer, "skybuild",
+                                    {"task_id": "concurrent", "title": "Concurrent", "description": "Brief"}, "writer-key")
+        assert authorized.wait(2)
+        import_future = pool.submit(apply, fresh_store, plan)
+        try:
+            deadline = time.monotonic() + 3
+            waiting = False
+            while time.monotonic() < deadline:
+                with psycopg.connect(fresh_store.dsn) as connection:
+                    waiting = connection.execute(
+                        "SELECT EXISTS (SELECT 1 FROM pg_locks l JOIN pg_class c ON c.oid = l.relation "
+                        "JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'skybuild' "
+                        "AND c.relname = 'ledger_imports' AND l.mode = 'AccessExclusiveLock' AND NOT l.granted)"
+                    ).fetchone()[0]
+                if waiting:
+                    break
+                time.sleep(0.02)
+            assert waiting, "Importer did not wait on the authority receipt"
+        finally:
+            release.set()
+        assert writer_future.result(timeout=5)["task_id"] == "concurrent"
+        with pytest.raises(DomainError, match="unrelated data"):
+            import_future.result(timeout=5)

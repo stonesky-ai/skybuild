@@ -110,7 +110,10 @@ def import_frozen(store: Store, project_id: str, ledger_dir: Path, contract_path
     store.readiness()
     with store._connection() as connection:
         connection.execute("SELECT pg_advisory_xact_lock(hashtextextended('skybuild:frozen-import', 0))")
-        connection.execute("LOCK TABLE tasks, task_dependencies, task_journal, task_lineage, messages, cord_journal, idempotency, ledger_imports IN ACCESS EXCLUSIVE MODE")
+        # Task writers read the authority receipt before touching task tables.
+        # Take the receipt lock first to preserve that order under concurrency.
+        connection.execute("LOCK TABLE ledger_imports IN ACCESS EXCLUSIVE MODE")
+        connection.execute("LOCK TABLE tasks, task_dependencies, task_journal, task_lineage, messages, cord_journal, idempotency IN ACCESS EXCLUSIVE MODE")
         receipts = connection.execute("SELECT * FROM ledger_imports LIMIT 2").fetchall()
         if len(receipts) > 1:
             _refuse("Destination has multiple import receipts")
