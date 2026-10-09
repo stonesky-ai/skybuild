@@ -169,7 +169,7 @@ class Store(Claims, CPUAdmission, Observations):
                     cursor.executemany('INSERT INTO principal_grants VALUES (%s, %s, %s)', rows)
 
     def _principal(self, connection, principal_id):
-        row = connection.execute('SELECT principal_id, is_admin FROM principals WHERE principal_id = %s FOR SHARE', (principal_id,)).fetchone()
+        row = connection.execute('SELECT principal_id, is_admin FROM lock_principal(%s)', (principal_id,)).fetchone()
         if not row:
             raise DomainError('authentication', 'Invalid credentials', 401)
         grants = {}
@@ -194,7 +194,7 @@ class Store(Claims, CPUAdmission, Observations):
         if not current.is_admin and operation not in current.grants.get(project_id, ()):
             raise DomainError('authorization', 'Project operation not permitted', 403)
         if operation == 'tasks:write' and connection.execute(
-            "SELECT 1 FROM ledger_imports WHERE project_id = %s AND authority = 'markdown' FOR SHARE", (project_id,)
+            "SELECT 1 WHERE lock_ledger_import(%s)", (project_id,)
         ).fetchone():
             raise DomainError('authority', 'Markdown ledger remains task authority', 409)
         return current
@@ -938,7 +938,7 @@ class Store(Claims, CPUAdmission, Observations):
 
     def _recipient(self, connection, project_id, recipient):
         _identifier(recipient, 'recipient')
-        row = connection.execute('SELECT is_admin FROM principals WHERE principal_id = %s FOR SHARE', (recipient,)).fetchone()
+        row = connection.execute('SELECT is_admin FROM lock_principal(%s)', (recipient,)).fetchone()
         grant = connection.execute("SELECT 1 FROM principal_grants WHERE principal_id = %s AND project_id = %s AND operation = 'cord:read'", (recipient, project_id)).fetchone()
         if not row or not (row['is_admin'] or grant):
             _invalid('Recipient must have Cord read access to this project')

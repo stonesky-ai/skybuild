@@ -55,6 +55,7 @@ def run_gate(checkout: Path, timeout: float, image: str, command: list[str]) -> 
             test_env = os.environ.copy()
             # Never inherit a live application DSN into the gate.
             test_env.pop("SKYBUILD_DSN", None)
+            test_env.pop("SKYBUILD_ROLE_ADMIN_DSN", None)
             for variable, database in (("SKYBUILD_TEST_DSN", "skybuild_test"),
                                        ("SKYBUILD_HTTP_TEST_DSN", "skybuild_http_test"),
                                        ("SKYBUILD_IMPORT_TEST_DSN", "skybuild_import_test")):

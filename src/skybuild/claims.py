@@ -108,7 +108,7 @@ class Claims:
 
     @staticmethod
     def _require_api_authority(connection, project_id):
-        if connection.execute("SELECT 1 FROM ledger_imports WHERE project_id = %s AND authority = 'markdown' FOR SHARE",
+        if connection.execute("SELECT 1 WHERE lock_ledger_import(%s)",
                               (project_id,)).fetchone():
             raise DomainError('authority', 'Markdown ledger remains task authority', 409)
 
