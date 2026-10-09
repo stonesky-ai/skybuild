@@ -54,7 +54,7 @@ Authority: Git-backed planning ledger, revision A34, 2026-10-08. API cutover has
 - Reason: advanced optimization after core execution and reliable checkpoint recovery. Preserve portable task/checkpoint identifiers and pinned input/artifact references now; do not build scheduling/transfer automation in the bootstrap.
 - Revisit: reliable CPU task reporting and checkpoint recovery exist, and measured rental-tail costs justify transfer work.
 - Acceptance: compare avoided rental cost against transfer/setup, rework and delay; verify destination capability/access, consistent portable state, source fencing, one destination owner, lost-ack recovery and shutdown only after accepted transfer/no other host work. Owner unavailability overrides remain bounded by approved cost/runtime limits. No model polling or silent GPU/model substitution.
-- Architecture: sections 9 and 15. Plan: deferred follow-on in capability/lifecycle research. ADR: [0020](../adr/0020-deferred-cost-aware-job-transfer.md).
+- Architecture: sections 9 and 15. Plan: deferred follow-on in capability/lifecycle research. ADR: [0020](../adr/hosting-recovery.md#adr-0020).
 
 ## SKYBUILD-BURST-CAPACITY-PLANNING — Schedule transient capacity and cloud batches
 
@@ -63,7 +63,7 @@ Authority: Git-backed planning ledger, revision A34, 2026-10-08. API cutover has
 - Reason: advanced optimization after reliable execution, observation and lifecycle controls. Keep calendars distinct from actual health/resources; preserve the required task/capacity interfaces without making an optimizer a bootstrap prerequisite. Core task bundling is required earlier under SKYBUILD-BUNDLED-INTEGRATION; only capacity/calendar/cloud optimization is deferred.
 - Revisit: measured backlog/deadline needs justify paid batching and the economics spike has qualified suitable backends.
 - Acceptance: verify calendar/offline overrides, uncertain forecasts, dependency/inference-blocked backlog, serialized integration/merge ownership, resource bounds, pinned workload scope and money/runtime caps. New work cannot silently extend a burst. Results survive drain/shutdown; provider stop is confirmed with an independent backstop; model review can wait after CPU results are saved. CPU status and planning do not require model polling.
-- Architecture: sections 9 and 15. Plan: deferred follow-on in capability/lifecycle research. ADR: [0021](../adr/0021-deferred-capacity-calendars-and-bursts.md). Portable tail-task transfer is complementary, not a prerequisite for every burst.
+- Architecture: sections 9 and 15. Plan: deferred follow-on in capability/lifecycle research. ADR: [0021](../adr/hosting-recovery.md#adr-0021). Portable tail-task transfer is complementary, not a prerequisite for every burst.
 
 ## SKYBUILD-COMPUTE-ECONOMICS-SPIKE — Measure box pools, bursts and serverless
 
@@ -72,7 +72,7 @@ Authority: Git-backed planning ledger, revision A34, 2026-10-08. API cutover has
 - Reason: the owner explicitly requested a later spike and test before choosing the advanced architecture. Recording it is not permission to provision, spend or benchmark now.
 - Revisit: advanced compute planning is selected and representative work, experiment scope and caps are agreed.
 - Acceptance: produce reproducible workload/source/settings, measured completion and total cost per accepted workload, including startup/staging, idle/serial work, transfer/storage, retries and verified shutdown/cancellation. Compare estimates with observed charges and mark untested options/uncertainty. Evaluate runtime/resources, Git/artifact access, durable state, cancellation and checkpoint portability; make an evidence-based backend recommendation. No production mutations or paid inference merely to benchmark CPU economics; confirm test resources are stopped.
-- Architecture: section 15. Plan: deferred prerequisite for advanced backend selection; initial laptop hosting, core reporting and full extraction remain independent. ADR: [0021](../adr/0021-deferred-capacity-calendars-and-bursts.md).
+- Architecture: section 15. Plan: deferred prerequisite for advanced backend selection; initial laptop hosting, core reporting and full extraction remain independent. ADR: [0021](../adr/hosting-recovery.md#adr-0021).
 
 ## SKYBUILD-NETWORK-PROVIDERS — Configure an alternative private VPN
 
@@ -81,7 +81,7 @@ Authority: Git-backed planning ledger, revision A34, 2026-10-08. API cutover has
 - Reason: the owner explicitly deferred provider configurability; a generic VPN management layer adds no bootstrap value.
 - Revisit: another deployment needs a different private network and its reachability/identity/lifecycle constraints are known.
 - Acceptance: document and validate the chosen alternative, endpoint/certificate changes, access rules, credential revocation and outage/recovery behavior. A provider change cannot silently expose the service publicly or grant application privileges.
-- Architecture: sections 3 and 5. Plan: later network configuration, independent of initial bootstrap. ADR: [0023](../adr/0023-initial-tailscale-access.md).
+- Architecture: sections 3 and 5. Plan: later network configuration, independent of initial bootstrap. ADR: [0023](../adr/hosting-recovery.md#adr-0023).
 
 ## SKYBUILD-GIT-HOSTS — Later GitLab and Bitbucket support
 
@@ -90,7 +90,7 @@ Authority: Git-backed planning ledger, revision A34, 2026-10-08. API cutover has
 - Reason: all projects initially presume GitHub; generic multi-host support is unnecessary for bootstrap.
 - Revisit: the owner selects a real GitLab/Bitbucket project and authorizes that integration.
 - Acceptance: provider-specific credentials, push/PR/merge state and higher-branch cleanup semantics are qualified without weakening task ownership or misreporting remote preservation. Preserve ordinary Git/client contracts.
-- Architecture: sections 2 and 8. Plan: deferred repository/recovery work. ADR: [0026](../adr/0026-github-remotes-and-git-lifecycle.md).
+- Architecture: sections 2 and 8. Plan: deferred repository/recovery work. ADR: [0026](../adr/integration.md#adr-0026).
 
 ## SKYBUILD-TEAM-APPROVAL-CHAIN — Multi-person team approval workflow
 
@@ -99,7 +99,7 @@ Authority: Git-backed planning ledger, revision A34, 2026-10-08. API cutover has
 - Reason: explicit owner direction is much later. Initial owner/worker access, technical review, task page and automatic integration must not depend on a multi-person approval engine.
 - Revisit: core SkyBuild is useful and stable, and the owner selects a real multi-person collaboration requirement.
 - Acceptance: qualify the chosen chain and delegation/expiry behavior; scope or definition changes invalidate affected approvals, concurrent responses cannot skip required stages, and historical decisions remain append-only. No approval silently raises budgets, renews authority or bypasses required gates.
-- Architecture: section 5 and [task workflow](task_workflow.md). Plan: future team collaboration, outside initial delivery. ADR: [0031](../adr/0031-task-workflow-and-append-only-journal.md).
+- Architecture: section 5 and [task workflow](task_workflow.md). Plan: future team collaboration, outside initial delivery. ADR: [0031](../adr/tasks.md#adr-0031).
 
 ## SKYBUILD-QUALITY-GATES — Configurable complexity and compactness review gates
 
@@ -108,7 +108,7 @@ Authority: Git-backed planning ledger, revision A34, 2026-10-08. API cutover has
 - Reason: the owner explicitly wants the running self-building parallel-worker MVP first. Independent review and existing required checks remain in MVP; this richer feature does not block it.
 - Revisit: SKYBUILD-SELF-BUILD-MVP is running; select this as a feature SkyBuild can build for itself.
 - Acceptance: actionable findings and test requests, complete existing-repo inventory, meaningful size/complexity measurements, immutable dispositions and policy-change invalidation; no self-weakened gates, metric gaming or unbounded refactor loops. Preserve required behavior and tests. Hand actual debt findings to SKYBUILD-QUALITY-DEBT-CLEANUP; a baseline is not permanent debt acceptance.
-- Architecture: section 13 and [review policy](review_policy.md). Plan: early post-MVP follow-on. ADRs: [0033](../adr/0033-independent-review-and-compactness.md), [0034](../adr/0034-post-mvp-quality-debt-and-repo-review.md).
+- Architecture: section 13 and [review policy](review_policy.md). Plan: early post-MVP follow-on. ADRs: [0033](../adr/quality.md#adr-0033), [0034](../adr/quality.md#adr-0034).
 
 ## SKYBUILD-QUALITY-DEBT-CLEANUP — Clear initial Ruff and McCabe debt
 
@@ -118,7 +118,7 @@ Authority: Git-backed planning ledger, revision A34, 2026-10-08. API cutover has
 - Reason: the owner wants this among the first post-MVP tasks, while keeping the MVP itself unblocked by a broad cleanup.
 - Revisit: the quality scan has produced its pinned, complete finding inventory.
 - Acceptance: every actual debt finding has a published fix with applicable tests and independent review; verified false positives or non-debt exceptions have narrow authorized dispositions. No inherited debt remains hidden behind the baseline.
-- Architecture: section 13 and [review policy](review_policy.md). Plan: early post-MVP follow-on. ADR: [0034](../adr/0034-post-mvp-quality-debt-and-repo-review.md).
+- Architecture: section 13 and [review policy](review_policy.md). Plan: early post-MVP follow-on. ADR: [0034](../adr/quality.md#adr-0034).
 
 ## SKYBUILD-REPO-REVIEW-CADENCE — Serial whole-repository review
 
@@ -128,4 +128,4 @@ Authority: Git-backed planning ledger, revision A34, 2026-10-08. API cutover has
 - Reason: the owner wants periodic broad review without overlapping review runs or repeatedly rediscovering unmerged fixes.
 - Revisit: initial quality debt is cleared and the controlled review path can run background tasks within its budgets.
 - Acceptance: at most one whole-repository review is active. The next review waits until all actionable findings from the prior review have accepted published fixes. Accidental duplicate starts and findings coalesce under the same durable identity; a lost acknowledgment or unknown run does not release the hold. Crossing either threshold while held leaves a visible pending review, not a second launch. CPU threshold detection never grants model-spend authority.
-- Architecture: section 13 and [review policy](review_policy.md). Plan: early post-MVP follow-on. ADR: [0034](../adr/0034-post-mvp-quality-debt-and-repo-review.md).
+- Architecture: section 13 and [review policy](review_policy.md). Plan: early post-MVP follow-on. ADR: [0034](../adr/quality.md#adr-0034).

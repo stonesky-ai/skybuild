@@ -4,7 +4,7 @@ Status: unqualified for live automatic publication. PR-014 records a narrow cont
 
 ## Governing inputs and observed repository state
 
-This note derives from [architecture A34, section 2](architecture.md#automatic-bundled-integration), [implementation plan areas 5 and 5a](implementation_plan.md), [ADR 0030](../adr/0030-effect-boundaries-and-accounting.md) and the [publication model](models/Publication.md), at source revision `a454f09bcd5a634445790ad0df7ab8ddebf58ccf`. The model assumes atomic remote base enforcement; its sampled traces do not qualify GitHub or establish liveness.
+This note derives from [architecture A34, section 2](architecture.md#automatic-bundled-integration), [implementation plan areas 5 and 5a](implementation_plan.md), [ADR 0030](../adr/integration.md#adr-0030) and the [publication model](models/Publication.md), at source revision `a454f09bcd5a634445790ad0df7ab8ddebf58ccf`. The model assumes atomic remote base enforcement; its sampled traces do not qualify GitHub or establish liveness.
 
 Read-only REST inspection on 2026-10-08 observed `stonesky-ai/skybuild`: `GET /repos/stonesky-ai/skybuild/branches/main` returned `protected: false`; `GET /repos/stonesky-ai/skybuild/rulesets` returned an empty array; repository permissions for the current credential were `push: true`, `admin: false`, `maintain: false` (also `pull: true`, `triage: true`). These observations are time-bound, not authority guarantees. They do not establish protection for `dev-001`, applicable organization policy, bypass behavior, or plan support. Qualification must inspect the actual configured target again. No rules, credentials, branches or administrative permissions were changed by that inspection. No administrator request is part of this contract.
 

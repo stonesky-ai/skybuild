@@ -107,7 +107,7 @@ User shorthand persists: “Save handoff” updates this context with exact unfi
 
 A33 records the owner's accepted independent review policy and latest MVP clarification. Continue planning only; no runtime implementation, worker launch, commit or push occurred. Preserve unrelated work and `dum.txt`.
 
-Every code task receives review in a separate qualified model session after existing applicable checks. The owner wants adversarial perspectives with actionable line/symbol/contract findings and concrete fixes or test cases, append-only dispositions and independent re-review. Same provider/model is allowed; self-approval is not. See architecture section 13, [review policy](review_policy.md) and [ADR 0033](../adr/0033-independent-review-and-compactness.md).
+Every code task receives review in a separate qualified model session after existing applicable checks. The owner wants adversarial perspectives with actionable line/symbol/contract findings and concrete fixes or test cases, append-only dispositions and independent re-review. Same provider/model is allowed; self-approval is not. See architecture section 13, [review policy](review_policy.md) and [ADR 0033](../adr/quality.md#adr-0033).
 
 The owner explicitly clarified that dedicated complexity/size gates and their GUI must not delay MVP. Keep their design; SKYBUILD-QUALITY-GATES is deferred until the running MVP exists. Proposed Python profile: Ruff McCabe complexity 10 and warning above 50 statements per function, plus growth/duplication review. These are documented tool defaults, not a universal standard. Nothing was installed or enforced.
 
