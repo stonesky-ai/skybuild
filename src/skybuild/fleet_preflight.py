@@ -52,6 +52,7 @@ def _token_from_file(path: Path) -> str:
 
 def probe_private_api(url: str, project_id: str, token_file: Path, expected_principal: str,
                       *, transport: httpx.BaseTransport | None = None,
+                      ca_file: Path | None = None,
                       resolve: Callable[[str], Iterable[str]] = _resolved_addresses) -> dict:
     """Require trusted HTTPS, ready service, exact worker identity and narrow grants."""
     endpoint = httpx.URL(url)
@@ -70,7 +71,7 @@ def probe_private_api(url: str, project_id: str, token_file: Path, expected_prin
         raise PreflightError("Project or principal identifier is invalid")
     token = _token_from_file(token_file)
     try:
-        with Client(url, token, retries=0, timeout=10, transport=transport, trust_env=False) as client:
+        with Client(url, token, retries=0, timeout=10, transport=transport, trust_env=False, ca_file=ca_file) as client:
             ready = client.request("GET", "health/ready")
             if ready != {"status": "ready"}:
                 raise PreflightError("SkyBuild API is not ready")
@@ -100,9 +101,11 @@ def main() -> int:
     parser.add_argument("--project", required=True)
     parser.add_argument("--token-file", type=Path, required=True)
     parser.add_argument("--principal", required=True)
+    parser.add_argument("--ca-file", type=Path)
     args = parser.parse_args()
     try:
-        print(json.dumps(probe_private_api(args.url, args.project, args.token_file, args.principal), sort_keys=True))
+        print(json.dumps(probe_private_api(args.url, args.project, args.token_file, args.principal,
+                                           ca_file=args.ca_file), sort_keys=True))
         return 0
     except (PreflightError, ValueError, httpx.HTTPError):
         print(json.dumps({"ready": False, "reason": "Private API or worker scope check failed"}))

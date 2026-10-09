@@ -33,6 +33,7 @@ def _cord_payload(args: argparse.Namespace) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="skybuild")
+    parser.add_argument("--ca-file", type=Path, help="Trust only this installation CA for HTTPS API requests")
     commands = parser.add_subparsers(dest="command", required=True)
     manifest = commands.add_parser("ledger-manifest", help="Emit a read-only ledger validation manifest without database access")
     manifest.add_argument("paths", nargs="+", type=Path)
@@ -56,10 +57,13 @@ def main(argv: list[str] | None = None) -> int:
     provision.add_argument("--token-stdin", action="store_true")
     serve = commands.add_parser("serve", help="Serve an already migrated database on loopback")
     serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument("--ssl-certfile", type=Path)
+    serve.add_argument("--ssl-keyfile", type=Path)
     serve.add_argument("--host", choices=("127.0.0.1", "0.0.0.0"), default="127.0.0.1",
                        help="Bind inside a private container; keep the published host port on loopback")
     for command in ("tasks", "get", "history"):
         view = commands.add_parser(command, help="Read tasks through the authenticated API")
+        view.add_argument("--ca-file", type=Path, default=argparse.SUPPRESS)
         view.add_argument("project_id")
         if command != "tasks":
             view.add_argument("task_id")
@@ -67,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
             view.add_argument("--limit", type=int, default=100)
             view.add_argument("--offset", type=int, default=0)
     inbox = commands.add_parser("cord-inbox", help="Read pending Cord messages for this credential")
+    inbox.add_argument("--ca-file", type=Path, default=argparse.SUPPRESS)
     inbox.add_argument("project_id")
     inbox.add_argument("--limit", type=int, default=100)
     inbox.add_argument("--offset", type=int, default=0)
@@ -74,6 +79,7 @@ def main(argv: list[str] | None = None) -> int:
                        help="Wait once for a pending inbox page, up to 25 seconds; never execute messages")
     for command in ("cord-send", "cord-reply"):
         message = commands.add_parser(command, help="Send a Cord JSON message from a UTF-8 file or standard input")
+        message.add_argument("--ca-file", type=Path, default=argparse.SUPPRESS)
         message.add_argument("project_id")
         if command == "cord-reply":
             message.add_argument("message_id")
@@ -83,21 +89,26 @@ def main(argv: list[str] | None = None) -> int:
         message.add_argument("--idempotency-key")
     for command in ("cord-receipt", "cord-handle"):
         action = commands.add_parser(command, help="Acknowledge a Cord message transition")
+        action.add_argument("--ca-file", type=Path, default=argparse.SUPPRESS)
         action.add_argument("project_id")
         action.add_argument("message_id")
         action.add_argument("--idempotency-key")
     due = commands.add_parser("reconcile-due", help="Run one bounded CPU-only pass over due deferrals through the API")
+    due.add_argument("--ca-file", type=Path, default=argparse.SUPPRESS)
     due.add_argument("project_id")
     due.add_argument("--page-size", type=int, default=100)
     due.add_argument("--max-pages", type=int, default=20)
     due.add_argument("--after-task-id")
     schedule = commands.add_parser("schedule-due", help="Run a finite CPU-only due-deferral catch-up timer")
+    schedule.add_argument("--ca-file", type=Path, default=argparse.SUPPRESS)
     schedule.add_argument("project_id")
     schedule.add_argument("--interval-seconds", type=int, default=60)
     schedule.add_argument("--max-ticks", type=int, default=60)
     schedule.add_argument("--page-size", type=int, default=100)
     schedule.add_argument("--max-pages", type=int, default=20)
     args = parser.parse_args(argv)
+    if args.command == "serve" and bool(args.ssl_certfile) != bool(args.ssl_keyfile):
+        parser.error("--ssl-certfile and --ssl-keyfile must be supplied together")
     try:
         if args.command == "ledger-manifest":
             from .ledger import build_manifest
@@ -128,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps(plan, ensure_ascii=False, indent=2))
             return 0
         if args.command in {"tasks", "get", "history"}:
-            with Client(_environment("SKYBUILD_API_URL"), _environment("SKYBUILD_TOKEN")) as client:
+            with Client(_environment("SKYBUILD_API_URL"), _environment("SKYBUILD_TOKEN"), ca_file=args.ca_file) as client:
                 if args.command == "get":
                     result = client.get_task(args.project_id, args.task_id)
                 elif args.command == "history":
@@ -138,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
         if args.command.startswith("cord-"):
-            with Client(_environment("SKYBUILD_API_URL"), _environment("SKYBUILD_TOKEN")) as client:
+            with Client(_environment("SKYBUILD_API_URL"), _environment("SKYBUILD_TOKEN"), ca_file=args.ca_file) as client:
                 if args.command == "cord-inbox":
                     result = client.inbox(args.project_id, limit=args.limit, offset=args.offset,
                                           **({"wait_seconds": args.wait_seconds} if args.wait_seconds else {}))
@@ -155,7 +166,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "schedule-due":
             from .scheduler import schedule_due
 
-            with Client(_environment("SKYBUILD_API_URL"), _environment("SKYBUILD_TOKEN")) as client:
+            with Client(_environment("SKYBUILD_API_URL"), _environment("SKYBUILD_TOKEN"), ca_file=args.ca_file) as client:
                 result = schedule_due(client, args.project_id, interval_seconds=args.interval_seconds,
                                       max_ticks=args.max_ticks, page_size=args.page_size, max_pages=args.max_pages,
                                       report=lambda tick: print(json.dumps(tick, ensure_ascii=False), flush=True))
@@ -164,7 +175,7 @@ def main(argv: list[str] | None = None) -> int:
             if not 1 <= args.page_size <= 100 or not 1 <= args.max_pages <= 100:
                 raise ValueError("Reconciliation bounds are invalid")
             cursor, scanned, reassessed = args.after_task_id, 0, []
-            with Client(_environment("SKYBUILD_API_URL"), _environment("SKYBUILD_TOKEN")) as client:
+            with Client(_environment("SKYBUILD_API_URL"), _environment("SKYBUILD_TOKEN"), ca_file=args.ca_file) as client:
                 for _ in range(args.max_pages):
                     try:
                         result = client.reconcile_due_deferrals(args.project_id, limit=args.page_size, after_task_id=cursor)
@@ -227,7 +238,9 @@ def main(argv: list[str] | None = None) -> int:
             from .api import create_app
             import uvicorn
 
-            uvicorn.run(create_app(store), host=args.host, port=args.port)
+            uvicorn.run(create_app(store), host=args.host, port=args.port,
+                        **({"ssl_certfile": str(args.ssl_certfile), "ssl_keyfile": str(args.ssl_keyfile)}
+                           if args.ssl_certfile else {}))
         return 0
     except (ValueError, DomainError, ClientError) as error:
         # Driver failures may contain connection strings; never print arbitrary exceptions.
