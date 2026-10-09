@@ -1,6 +1,11 @@
 """Synchronous client with bounded retries and stable mutation identity."""
 
+import hashlib
+import os
+import ssl
+import stat
 import time
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 from uuid import uuid4
@@ -8,6 +13,29 @@ from uuid import uuid4
 import httpx
 
 from .contracts import valid_identifier
+
+
+def _ca_material(ca_file: Path | str) -> bytes:
+    """Read one bounded regular CA file without following a replacement symlink."""
+    try:
+        descriptor = os.open(ca_file, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 1_048_576:
+                raise ValueError("CA file must be a bounded regular PEM file")
+            material = os.read(descriptor, 1_048_577)
+        finally:
+            os.close(descriptor)
+        if not material or len(material) > 1_048_576:
+            raise ValueError("CA file must be a bounded regular PEM file")
+        return material
+    except OSError:
+        raise ValueError("CA file cannot be read safely") from None
+
+
+def ca_file_sha256(ca_file: Path | str) -> str:
+    """Bind a manual dispatch to the exact installation trust material."""
+    return hashlib.sha256(_ca_material(ca_file)).hexdigest()
 
 
 class ClientError(Exception):
@@ -18,7 +46,8 @@ class ClientError(Exception):
 
 class Client:
     def __init__(self, base_url: str, token: str, *, retries: int = 2, timeout: float = 10,
-                 transport: httpx.BaseTransport | None = None, trust_env: bool = True) -> None:
+                 transport: httpx.BaseTransport | None = None, trust_env: bool = True,
+                 ca_file: Path | str | None = None, expected_ca_sha256: str | None = None) -> None:
         if not isinstance(retries, int) or isinstance(retries, bool) or not 0 <= retries <= 5 or not 0 < timeout <= 120:
             raise ValueError("Retries must be 0–5 and timeout must be 0–120 seconds")
         if not token or "\n" in token or "\r" in token:
@@ -26,9 +55,27 @@ class Client:
         url = httpx.URL(base_url)
         if url.scheme not in {"http", "https"} or not url.host or url.userinfo or url.query or url.fragment:
             raise ValueError("Use an HTTP service URL without credentials, query, or fragment")
+        verify: bool | ssl.SSLContext = True
+        if ca_file is not None:
+            if url.scheme != "https":
+                raise ValueError("An installation CA requires HTTPS")
+            material = _ca_material(ca_file)
+            if expected_ca_sha256 is not None and hashlib.sha256(material).hexdigest() != expected_ca_sha256:
+                raise ValueError("Installation CA differs from durable dispatch intent")
+            verify = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            verify.check_hostname = True
+            verify.verify_mode = ssl.CERT_REQUIRED
+            try:
+                verify.load_verify_locations(cadata=material.decode("ascii"))
+            except (UnicodeError, ssl.SSLError):
+                raise ValueError("CA file must contain valid PEM certificates") from None
+            # Installation trust cannot be redirected by ambient proxy or CA settings.
+            trust_env = False
+        elif expected_ca_sha256 is not None:
+            raise ValueError("A pinned installation CA file is required")
         self.retries = retries
         self.http = httpx.Client(base_url=base_url.rstrip("/") + "/", headers={"Authorization": f"Bearer {token}"}, timeout=timeout,
-                                 transport=transport, follow_redirects=False, trust_env=trust_env)
+                                 transport=transport, follow_redirects=False, trust_env=trust_env, verify=verify)
 
     def close(self) -> None:
         self.http.close()
@@ -99,6 +146,11 @@ class Client:
 
     def get_task(self, project_id: str, task_id: str) -> dict:
         return self.request("GET", self._path(project_id, f"tasks/{self._segment(task_id)}"))
+
+    def execution_status(self, project_id: str, task_id: str, *, limit: int = 20) -> dict:
+        """Read one task's bounded cached evidence; never probe or reconcile."""
+        return self.request("GET", self._path(project_id, f"tasks/{self._segment(task_id)}/execution-status"),
+                            params={"limit": limit})
 
     def update_task(self, project_id: str, task_id: str, body: dict, *, expected_revision: int, idempotency_key: str | None = None) -> dict:
         return self.request("PATCH", self._path(project_id, f"tasks/{self._segment(task_id)}"), body=body, revision=expected_revision, idempotency_key=idempotency_key)

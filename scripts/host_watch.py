@@ -8,11 +8,13 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import subprocess
 import tempfile
 import time
+
 
 
 def disk_status(paths: list[Path], reserve_bytes: int) -> list[dict]:
@@ -62,6 +64,47 @@ def docker_gate_status() -> dict:
         return {"status": "unknown", "error": "docker_inventory_unavailable"}
 
 
+def docker_runtime_status() -> dict:
+    """Observe only the owned pilot project; never retrieve container secrets."""
+    try:
+        listed = subprocess.run(
+            ["docker", "ps", "-a", "--filter", "label=com.docker.compose.project=skybuild-pilot",
+             "--format", "{{.ID}}"], capture_output=True, text=True, timeout=5, check=True,
+        )
+        ids = listed.stdout.splitlines()
+        if not ids:
+            return {"status": "absent", "count": 0}
+        if len(ids) > 32 or any(not re.fullmatch(r"[0-9a-f]{12,64}", identifier) for identifier in ids):
+            return {"status": "unknown", "error": "invalid_runtime_inventory"}
+        inspected = subprocess.run(
+            ["docker", "inspect", "--type", "container", "--format",
+             '{{json .Name}}\t{{json .State.Status}}\t'
+             '{{if .State.Health}}{{json .State.Health.Status}}{{else}}"none"{{end}}\t'
+             '{{json .HostConfig.Memory}}\t{{json (index .Config.Labels "com.docker.compose.project")}}',
+             *ids], capture_output=True, text=True, timeout=5, check=True,
+        )
+        containers = []
+        for identifier, line in zip(ids, inspected.stdout.splitlines(), strict=True):
+            name, state, health, memory, project = (json.loads(value) for value in line.split("\t"))
+            if project != "skybuild-pilot" or not isinstance(name, str):
+                raise ValueError("Runtime ownership changed or name is unavailable")
+            known_state = state in {"created", "running", "paused", "restarting", "removing", "exited", "dead"}
+            known_health = health in {"none", "starting", "healthy", "unhealthy"}
+            known_cap = type(memory) is int and memory > 0
+            status = ("unknown" if not (known_state and known_health and known_cap) else
+                      "healthy" if state == "running" and health in {"none", "healthy"} else "failed")
+            containers.append({"id": identifier,
+                               "name": re.sub(r"[^A-Za-z0-9_.-]", "_", name.removeprefix("/"))[:128],
+                               "state": state if known_state else "unknown",
+                               "health": health if known_health else "unknown",
+                               "memory_limit_bytes": memory if known_cap else None, "status": status})
+        statuses = {container["status"] for container in containers}
+        return {"status": "unknown" if "unknown" in statuses else "attention" if "failed" in statuses else "present",
+                "count": len(containers), "containers": containers}
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        return {"status": "unknown", "error": "runtime_inventory_unavailable"}
+
+
 def worktree_status(checkout: Path) -> dict:
     try:
         listed = subprocess.run(["git", "-C", str(checkout), "worktree", "list", "--porcelain"],
@@ -84,7 +127,9 @@ def worktree_status(checkout: Path) -> dict:
 
 
 def sample(reserve_bytes: int, *, disk_paths: list[Path] | None = None,
-           disk_reserve_bytes: int = 4 * 1024**3, checkout: Path | None = None) -> dict:
+           disk_reserve_bytes: int = 4 * 1024**3, checkout: Path | None = None,
+           jobs_registry: Path | None = None, capacity_state: Path | None = None,
+           new_job_limit_bytes: int = 4 * 1024**3) -> dict:
     values = {}
     for line in Path("/proc/meminfo").read_text(encoding="ascii").splitlines():
         if line.startswith(("MemAvailable:", "SwapFree:")):
@@ -107,13 +152,35 @@ def sample(reserve_bytes: int, *, disk_paths: list[Path] | None = None,
     if disk_paths is not None:
         result["disks"] = disk_status(disk_paths, disk_reserve_bytes)
         result["docker_gate"] = docker_gate_status()
+        result["docker_runtime"] = docker_runtime_status()
     if checkout is not None:
         result["worktrees"] = worktree_status(checkout)
     observed = [item["status"] for item in result.get("disks", [])]
-    observed += [result[key]["status"] for key in ("docker_gate", "worktrees") if key in result]
+    observed += [result[key]["status"] for key in ("docker_gate", "docker_runtime", "worktrees") if key in result]
     if result["status"] != "low":
         result["status"] = ("low" if "low" in observed else "unknown" if "unknown" in observed
                             else "attention" if "attention" in observed else "ok")
+    if jobs_registry is not None and capacity_state is not None:
+        from memory_capacity import observe as observe_memory_capacity
+
+        capacity_state.parent.mkdir(parents=True, exist_ok=True)
+        lock = os.open(str(capacity_state) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                capacity = {"status": "unknown", "reason": "capacity_writer_active",
+                            "sampled_at": result["sampled_at"], "max_new_jobs": 0}
+            else:
+                capacity = observe_memory_capacity(jobs_registry, capacity_state,
+                                                   available_bytes=available, reserve_bytes=reserve_bytes,
+                                                   new_job_limit_bytes=new_job_limit_bytes)
+                write_state(capacity_state, capacity)
+        finally:
+            os.close(lock)
+        result["capacity"] = {key: capacity[key] for key in
+                              ("status", "sampled_at", "safe_total_jobs", "target_jobs", "max_new_jobs")
+                              if key in capacity}
     return result
 
 
@@ -135,7 +202,8 @@ def write_state(path: Path, state: dict) -> None:
 
 def watch(path: Path, reserve_bytes: int, interval: int, duration_minutes: int,
           *, disk_paths: list[Path] | None = None, disk_reserve_bytes: int = 4 * 1024**3,
-          checkout: Path | None = None) -> int:
+          checkout: Path | None = None, jobs_registry: Path | None = None,
+          capacity_state: Path | None = None, new_job_limit_bytes: int = 4 * 1024**3) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
     stop_path = path.with_name(path.name + ".stop")
     lock = os.open(str(path) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
@@ -157,7 +225,9 @@ def watch(path: Path, reserve_bytes: int, interval: int, duration_minutes: int,
                     break
                 try:
                     state = sample(reserve_bytes, disk_paths=disk_paths,
-                                   disk_reserve_bytes=disk_reserve_bytes, checkout=checkout)
+                                   disk_reserve_bytes=disk_reserve_bytes, checkout=checkout,
+                                   jobs_registry=jobs_registry, capacity_state=capacity_state,
+                                   new_job_limit_bytes=new_job_limit_bytes)
                 except (OSError, ValueError):
                     state = {"sampled_at": datetime.now(timezone.utc).isoformat(),
                              "pid": os.getpid(), "status": "unknown", "reserve_bytes": reserve_bytes}
@@ -184,19 +254,32 @@ def main() -> int:
     parser.add_argument("--watch", action="store_true", help="Sample repeatedly without model calls")
     parser.add_argument("--interval", type=int, default=60, help="Watch interval in seconds")
     parser.add_argument("--duration-minutes", type=int, default=480, help="Maximum watch lifetime")
+    parser.add_argument("--jobs-registry", type=Path, help="Launcher-owned cgroup job registry JSON")
+    parser.add_argument("--capacity-state", type=Path, help="Atomic persistent worker guidance JSON")
+    parser.add_argument("--new-job-limit-gib", type=int, default=4,
+                        help="Hard cgroup MemoryMax for each new job; must match launcher")
     args = parser.parse_args()
     if args.reserve_gib < 0 or args.disk_reserve_gib < 0:
         parser.error("Reserve must not be negative")
     if not 60 <= args.interval <= 90 or not 1 <= args.duration_minutes <= 480:
         parser.error("Watch interval must be 60–90 seconds and lifetime at most eight hours")
+    if (args.jobs_registry is None) != (args.capacity_state is None):
+        parser.error("Specify both --jobs-registry and --capacity-state")
+    if args.new_job_limit_gib < 1 or args.new_job_limit_gib > 64:
+        parser.error("New job MemoryMax must be 1–64 GiB")
+    if args.capacity_state is not None and args.capacity_state.resolve() == args.state.resolve():
+        parser.error("Capacity and host state files must differ")
     reserve_bytes = args.reserve_gib * 1024**3
     disk_paths = args.disk_path or [args.checkout, Path("/tmp")]
     disk_reserve_bytes = args.disk_reserve_gib * 1024**3
+    capacity_args = {"jobs_registry": args.jobs_registry, "capacity_state": args.capacity_state,
+                     "new_job_limit_bytes": args.new_job_limit_gib * 1024**3}
     if args.watch:
         return watch(args.state, reserve_bytes, args.interval, args.duration_minutes,
-                     disk_paths=disk_paths, disk_reserve_bytes=disk_reserve_bytes, checkout=args.checkout)
+                     disk_paths=disk_paths, disk_reserve_bytes=disk_reserve_bytes, checkout=args.checkout,
+                     **capacity_args)
     state = sample(reserve_bytes, disk_paths=disk_paths,
-                   disk_reserve_bytes=disk_reserve_bytes, checkout=args.checkout)
+                   disk_reserve_bytes=disk_reserve_bytes, checkout=args.checkout, **capacity_args)
     write_state(args.state, state)
     print(json.dumps(state, sort_keys=True))
     return 0
