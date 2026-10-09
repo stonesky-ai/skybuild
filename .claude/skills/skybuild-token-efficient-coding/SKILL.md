@@ -5,6 +5,8 @@ description: Use for SkyBuild code navigation, edits and validation when CodeGra
 
 # Token-efficient SkyBuild coding
 
+The working contract lives at the start of `docs/design/architecture.md`, under “Working contract for bounded assignments.” There is no separate `docs/design/working_contract.md`. Discover uncertain document or migration filenames with `rg --files` before opening them. Keep required reads in separate checked tool calls, or use `set -e` in a shell batch so a later success cannot hide a failed prerequisite read.
+
 At session start read the available CodeGraph and RTK skills and Serena's `initial_instructions` if Serena tools exist. Activate the exact SkyBuild checkout in Serena before a symbol query or edit; if Serena does not respond, continue with CodeGraph and direct source tools. Verify `codegraph status` names this checkout before a graph query. Initialize a missing checkout-local index as authorized in `AGENTS.md`; never use another checkout's index or another session's MCP server.
 
 For code questions, use one scoped CodeGraph `explore` query first. Treat its line-numbered source as already read. Use Serena for targeted symbol inspection or edits when that is more precise; do not repeat a full source read. Use `rtk` for shell output and `rtk proxy` when exact bytes matter. Use `rg` for literal text, docs, config and graph gaps. Run `codegraph sync` after a large pull or branch switch.

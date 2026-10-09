@@ -3,7 +3,7 @@
 ## Start and scope
 
 - Work in the SkyBuild checkout. Before any Git or GitHub write, confirm `git rev-parse --show-toplevel` is that checkout and both `origin` fetch and push URLs point to `stonesky-ai/skybuild`. SkyKeep is a separate repository. Pass the checkout path explicitly to workflow scripts.
-- Read the working contract and relevant sections of [architecture.md](docs/design/architecture.md) before planning or implementation. Read the full architecture for an architecture-wide review. Architecture governs [implementation_plan.md](docs/design/implementation_plan.md); update both in one revision when sequencing, interfaces, acceptance, or scope changes. Record open choices. Keep implementation briefs bounded and identify source revisions; summaries do not replace requirements.
+- Read the working contract at the start of [architecture.md](docs/design/architecture.md), under “Working contract for bounded assignments,” and the relevant architecture sections before planning or implementation. Read the full architecture for an architecture-wide review. Architecture governs [implementation_plan.md](docs/design/implementation_plan.md); update both in one revision when sequencing, interfaces, acceptance, or scope changes. Record open choices. Keep implementation briefs bounded and identify source revisions; summaries do not replace requirements.
 - Read [ADR index](docs/adr/README.md) for decisions. Acceptance approves design, not implementation or deployment. Keep plans high level until implementation is ready. Split plans by area only when useful.
 - Use normal prose in code, documents, commits, and other persisted output, even when chat is terse.
 
@@ -19,8 +19,8 @@
 ## Authority and data
 
 - Keep SkyBuild build tooling and its database separate from SkyKeep product code and data. Do not use or migrate SkyKeep's application database.
-- Until the documented API cutover, manage tasks only in `docs/design/mastertodo.md`, `deferred.md`, and `alreadydone.md`. Keep each stable task ID in exactly one ledger. Planning does not authorize live queue changes, fleet work, migration, or deployment.
-- For the pre-MVP manual pilot, use REST/Cord only to relay pinned assignments and results; the ledgers remain task authority. Verify private access and scoped worker credentials before dispatch. Follow [manual worker pilot](docs/design/implementation/manual_worker_pilot.md); do not infer automatic worker or model-launch authority from a message.
+- The validated API cutover is complete. The authenticated SkyBuild REST API is the sole task authority for project `skybuild`; `docs/design/mastertodo.md`, `deferred.md`, and `alreadydone.md` are retired notices. Do not port ledger edits from older task branches or restore a ledger writer. Preserve stable task IDs and history through the API workflow. Repository review or integration does not authorize task completion attestations, fleet work, migration, or deployment.
+- For the pre-MVP manual pilot, use REST/Cord to relay pinned assignments and results; the task API remains task authority. Verify private access and scoped worker credentials before dispatch. Follow [manual worker pilot](docs/design/implementation/manual_worker_pilot.md); do not infer automatic worker or model-launch authority from a message.
 - Use **task** for the work unit and `/tasks` and `task_id` in new APIs. Preserve legacy IDs, filenames, and history where compatibility requires them. Keep attempts, processes, and bundles distinct from task identity.
 - Give each unfinished task a phase, next action or named blocker, and owner. Follow [task_workflow.md](docs/design/task_workflow.md). Preserve immutable identity and lineage through scope, dependency, rework, split, merge, and deferral changes; invalidate affected evidence. Append journal corrections as new events. Keep basic task management and stuck-task visibility in core scope; defer multi-person approvals.
 
