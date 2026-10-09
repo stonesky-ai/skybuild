@@ -9,10 +9,12 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+_SOURCE_ROOT = str(Path(__file__).resolve().parents[1])
+if _SOURCE_ROOT not in sys.path:
+    sys.path.insert(0, _SOURCE_ROOT)
 
-LOG_PATH = Path("/tmp/marshall_dunsel.log")
-EXIT_PATH = Path("/tmp/marshall_dunsel.off-now")
-PID_PATH = Path("/tmp/marshall_dunsel.pid")
+from skybuild import dunsel_state  # noqa: E402
+
 
 
 def _now() -> str:
@@ -44,17 +46,14 @@ def _disk(path: str) -> dict[str, int | str]:
 
 
 def _write_pid() -> None:
-    temporary = PID_PATH.with_suffix(".pid.tmp")
-    temporary.write_text(f"{os.getpid()}\n", encoding="ascii")
-    os.chmod(temporary, 0o600)
-    temporary.replace(PID_PATH)
+    dunsel_state.write_text(dunsel_state.PID_FILE, f"{os.getpid()}\n")
 
 
 def _clear_pid() -> None:
     try:
-        if PID_PATH.read_text(encoding="ascii").strip() == str(os.getpid()):
-            PID_PATH.unlink()
-    except (OSError, UnicodeError):
+        if dunsel_state.read_text(dunsel_state.PID_FILE).strip() == str(os.getpid()):
+            dunsel_state.unlink_file(dunsel_state.PID_FILE)
+    except (OSError, UnicodeError, ValueError):
         pass
 
 
@@ -66,19 +65,18 @@ def _log(file, record: dict) -> None:
 def run() -> int:
     if sys.argv[1:] != ["--instance", "dunsel"]:
         return 2
-    LOG_PATH.touch(mode=0o600, exist_ok=True)
-    os.chmod(LOG_PATH, 0o600)
     _write_pid()
     try:
-        with LOG_PATH.open("a", encoding="utf-8", buffering=1) as log:
+        log_descriptor = dunsel_state.open_file(
+            dunsel_state.LOG_FILE, os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        )
+        with os.fdopen(log_descriptor, "a", encoding="utf-8", buffering=1) as log:
             _log(log, {"at": _now(), "event": "started", "pid": os.getpid()})
             while True:
-                if EXIT_PATH.exists():
-                    try:
-                        EXIT_PATH.unlink()
-                    except FileNotFoundError:
-                        pass
-                    _log(log, {"at": _now(), "event": "saw exit file", "path": str(EXIT_PATH)})
+                if dunsel_state.file_exists(dunsel_state.EXIT_FILE):
+                    dunsel_state.unlink_file(dunsel_state.EXIT_FILE)
+                    exit_path = dunsel_state.STATE_DIR / dunsel_state.EXIT_FILE
+                    _log(log, {"at": _now(), "event": "saw exit file", "path": str(exit_path)})
                     return 0
 
                 _log(log, {

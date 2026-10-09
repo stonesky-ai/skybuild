@@ -13,13 +13,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .. import dunsel_state
+
 
 WORKER = Path(__file__).resolve().parents[1] / "marshall_dunsel.py"
-LOG_PATH = Path("/tmp/marshall_dunsel.log")
-EXIT_PATH = Path("/tmp/marshall_dunsel.off-now")
-DISABLED_PATH = Path("/tmp/marshall_dunsel.disabled")
-PID_PATH = Path("/tmp/marshall_dunsel.pid")
-CONTROL_LOCK = Path("/tmp/marshall_dunsel.control.lock")
 _LOOPBACKS = {"127.0.0.1", "::1", "localhost"}
 
 
@@ -33,9 +30,10 @@ def _now() -> str:
 
 @contextmanager
 def _locked_control():
-    descriptor = os.open(CONTROL_LOCK, os.O_CREAT | os.O_RDWR, 0o600)
+    descriptor = dunsel_state.open_file(
+        dunsel_state.LOCK_FILE, os.O_CREAT | os.O_RDWR
+    )
     try:
-        os.chmod(CONTROL_LOCK, 0o600)
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         yield
     finally:
@@ -63,35 +61,32 @@ def _worker_processes() -> list[dict[str, int | str]]:
 
 
 def _write_pid(pid: int) -> None:
-    temporary = PID_PATH.with_name(PID_PATH.name + ".web.tmp")
-    temporary.write_text(f"{pid}\n", encoding="ascii")
-    os.chmod(temporary, 0o600)
-    temporary.replace(PID_PATH)
+    dunsel_state.write_text(dunsel_state.PID_FILE, f"{pid}\n")
 
 
 def set_enabled(enabled: bool) -> None:
     with _locked_control():
         if enabled:
-            DISABLED_PATH.unlink(missing_ok=True)
+            dunsel_state.unlink_file(dunsel_state.DISABLED_FILE)
         else:
-            DISABLED_PATH.touch(mode=0o600, exist_ok=True)
-            os.chmod(DISABLED_PATH, 0o600)
+            dunsel_state.touch_file(dunsel_state.DISABLED_FILE)
 
 
 def start() -> dict:
     with _locked_control():
-        if DISABLED_PATH.exists():
+        if dunsel_state.file_exists(dunsel_state.DISABLED_FILE):
             raise MarshallConflict("Dunsel is disabled. Enable it before starting.")
         existing = _worker_processes()
         if existing:
             return {"started": False, "pid": existing[0]["pid"]}
-        EXIT_PATH.unlink(missing_ok=True)
+        dunsel_state.unlink_file(dunsel_state.EXIT_FILE)
         nohup = shutil.which("nohup")
         if not nohup:
             raise RuntimeError("nohup is unavailable")
-        LOG_PATH.touch(mode=0o600, exist_ok=True)
-        os.chmod(LOG_PATH, 0o600)
-        with LOG_PATH.open("a", encoding="utf-8") as output:
+        log_descriptor = dunsel_state.open_file(
+            dunsel_state.LOG_FILE, os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        )
+        with os.fdopen(log_descriptor, "a", encoding="utf-8") as output:
             process = subprocess.Popen(
                 [nohup, sys.executable, str(WORKER), "--instance", "dunsel"],
                 stdin=subprocess.DEVNULL,
@@ -107,7 +102,7 @@ def start() -> dict:
             if any(int(row["pid"]) == process.pid for row in _worker_processes()):
                 return {"started": True, "pid": process.pid}
             if process.poll() is not None:
-                PID_PATH.unlink(missing_ok=True)
+                dunsel_state.unlink_file(dunsel_state.PID_FILE)
                 raise RuntimeError("Dunsel exited during startup")
             time.sleep(0.02)
         process.terminate()
@@ -115,7 +110,7 @@ def start() -> dict:
             process.wait(timeout=2)
         except subprocess.TimeoutExpired:
             pass
-        PID_PATH.unlink(missing_ok=True)
+        dunsel_state.unlink_file(dunsel_state.PID_FILE)
         raise RuntimeError("Dunsel did not become visible in the process table")
 
 
@@ -124,8 +119,9 @@ def graceful_stop() -> dict:
         processes = _worker_processes()
         if not processes:
             return {"requested": False, "reason": "not-running"}
-        EXIT_PATH.write_text(f"requested_at={_now()}\n", encoding="ascii")
-        os.chmod(EXIT_PATH, 0o600)
+        dunsel_state.write_text(
+            dunsel_state.EXIT_FILE, f"requested_at={_now()}\n"
+        )
         return {"requested": True, "pid": processes[0]["pid"]}
 
 
@@ -141,7 +137,7 @@ def kill() -> dict:
         result = subprocess.run([pkill, "-f", "--", pattern], capture_output=True, timeout=5, check=False)
         if result.returncode not in (0, 1):
             raise RuntimeError("pkill failed for the Dunsel process pattern")
-        PID_PATH.unlink(missing_ok=True)
+        dunsel_state.unlink_file(dunsel_state.PID_FILE)
         return {"killed": result.returncode == 0, "pids": [row["pid"] for row in processes]}
 
 
@@ -200,9 +196,9 @@ def _top_line(pid: int | None) -> str | None:
 
 def _log_snapshot() -> tuple[str | None, str | None]:
     try:
-        stat = LOG_PATH.stat()
-        last_seen = datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
-        tail = LOG_PATH.read_bytes()[-8192:].decode("utf-8", "replace").splitlines()
+        info, raw = dunsel_state.read_tail(dunsel_state.LOG_FILE, 8192)
+        last_seen = datetime.fromtimestamp(info.st_mtime, UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+        tail = raw.decode("utf-8", "replace").splitlines()
         return last_seen, tail[-1][:2000] if tail else None
     except OSError:
         return None, None
@@ -212,18 +208,18 @@ def snapshot() -> dict:
     processes = _worker_processes()
     pid = int(processes[0]["pid"]) if processes else None
     if pid is None:
-        PID_PATH.unlink(missing_ok=True)
+        dunsel_state.unlink_file(dunsel_state.PID_FILE)
     last_seen, last_line = _log_snapshot()
     return {
         "marshall": "dunsel",
-        "enabled": not DISABLED_PATH.exists(),
+        "enabled": not dunsel_state.file_exists(dunsel_state.DISABLED_FILE),
         "running": pid is not None,
         "pid": pid,
         "processes": _process_tree(pid),
         "top_line": _top_line(pid),
         "last_seen": last_seen,
         "last_line": last_line,
-        "exit_requested": EXIT_PATH.exists(),
+        "exit_requested": dunsel_state.file_exists(dunsel_state.EXIT_FILE),
         "observed_at": _now(),
     }
 
