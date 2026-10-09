@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sys
 
@@ -109,3 +109,22 @@ def test_measured_peak_over_cap_blocks_ramp(tmp_path):
     assert state["status"] == "measured_peak_exceeds_new_job_cap"
     assert state["target_jobs"] == 0
     assert state["max_new_jobs"] == 0
+
+
+def test_stale_observed_concurrency_cannot_keep_large_target(tmp_path):
+    root = tmp_path / "cgroups"
+    root.mkdir()
+    registry = tmp_path / "jobs"
+    registry.mkdir()
+    state_path = tmp_path / "capacity.json"
+    write_state(state_path, {
+        "schema_version": 1, "target_jobs": 10, "healthy_samples": 0,
+        "lifetime_peak_bytes": 2 * GIB, "measurement_count": 1,
+        "latest_measurement_at": datetime.now(timezone.utc).isoformat(),
+        "max_observed_running": 10,
+        "max_observed_running_at": (datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
+    })
+    state = observe(registry, state_path, available_bytes=50 * GIB,
+                    reserve_bytes=8 * GIB, new_job_limit_bytes=4 * GIB, cgroup_root=root)
+    assert state["max_observed_running"] == 1
+    assert state["target_jobs"] == 2

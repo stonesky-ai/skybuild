@@ -178,8 +178,18 @@ def observe(registry_path: Path, prior_state_path: Path, *, available_bytes: int
         prior_observed = prior.get("max_observed_running", 0)
         if not isinstance(prior_observed, int) or prior_observed < 0:
             prior_observed = 0
+        prior_observed_at = prior.get("max_observed_running_at")
+        if isinstance(prior_observed_at, str):
+            observed_age = (now_time - _time(prior_observed_at)).total_seconds()
+            if observed_age < 0 or observed_age > _MEASUREMENT_MAX_AGE_SECONDS:
+                prior_observed = 0
+        else:
+            prior_observed = 0
         observed_running = max(prior_observed, running, 1 if measured_peak is not None else 0)
         result["max_observed_running"] = observed_running
+        result["max_observed_running_at"] = (now if running >= observed_running or
+                                             (observed_running == 1 and new_measurements)
+                                             else prior_observed_at)
         result["active_remaining_budget_bytes"] = active_remaining
         headroom = available_bytes - reserve_bytes - active_remaining
         result["uncommitted_headroom_bytes"] = headroom
@@ -206,6 +216,7 @@ def observe(registry_path: Path, prior_state_path: Path, *, available_bytes: int
                 healthy = 0
         else:
             target, healthy = previous_target, 0
+        target = min(target, observed_running + 1)
         result["target_jobs"] = target
         result["healthy_samples"] = healthy
         result["max_new_jobs"] = max(0, min(target, safe_total) - running)
