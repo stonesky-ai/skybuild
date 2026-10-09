@@ -67,13 +67,14 @@ def test_runtime_cannot_delegate_grants(restricted_database):
         ).fetchone()[0]
 
 
-@pytest.mark.parametrize("operation", ["claims", "admission", "observations", "effects"])
+@pytest.mark.parametrize("operation", ["claims", "admission", "observations", "effects", "fake-dispatch"])
 def test_runtime_supports_launch_free_store_operations(restricted_database, operation):
     from test_store import actors
     from test_claims import test_concurrent_claims_one_winner_and_stable_replay
     from test_admission import test_atomic_capacity_and_explicit_cancel_replay
     from test_observations import test_replay_reordering_restart_and_identity_pinning
     from test_effects import test_stable_operation_duplicate_and_conflicting_identity
+    from test_cpu_dispatch import test_crash_boundaries_and_restart_preserve_one_identity
 
     admin_dsn, runtime_dsn, database, _ = restricted_database
     # Only identity provisioning uses the administrator. Every operation below
@@ -84,6 +85,7 @@ def test_runtime_supports_launch_free_store_operations(restricted_database, oper
         "admission": test_atomic_capacity_and_explicit_cancel_replay,
         "observations": test_replay_reordering_restart_and_identity_pinning,
         "effects": test_stable_operation_duplicate_and_conflicting_identity,
+        "fake-dispatch": test_crash_boundaries_and_restart_preserve_one_identity,
     }
     operations[operation](Store(runtime_dsn, database), identities)
 
