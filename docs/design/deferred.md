@@ -1,6 +1,6 @@
 # SkyBuild deferred tasks
 
-Authority: Git-backed planning ledger, revision A34, 2026-10-08. API cutover has not occurred. Stable IDs occur in only one ledger. Deferral means deliberate postponement, not implementation failure. See [architecture](architecture.md) and [mastertodo](mastertodo.md).
+Authority: Git-backed planning ledger, revision A35, 2026-10-08. API cutover has not occurred. Stable IDs occur in only one ledger. Deferral means deliberate postponement, not implementation failure. See [architecture](architecture.md) and [mastertodo](mastertodo.md).
 
 ## SKYBUILD-MULTIPROJECT — Concurrent autonomous operation across products
 
@@ -37,6 +37,15 @@ Authority: Git-backed planning ledger, revision A34, 2026-10-08. API cutover has
 - Revisit: control/client adoption and behavioral tests are stable; a bounded proposal names a demonstrated problem.
 - Acceptance: retained capabilities and stop/update/ownership guarantees remain intact with measured benefit.
 - Architecture: section 10.
+
+## SKYBUILD-PREBUNDLE-PRECHECK — Prepare reviewed tasks before integration
+
+- Status: deferred. Priority: conditional. Area: integration throughput. Dependencies: SKYBUILD-BUNDLED-INTEGRATION, exact-head review evidence and qualified gate/publication contracts.
+- Brief: adapt useful SkyKeep bundler marshall and `seam_bundle.py` logic to group reviewed ready task branches by dependencies and overlapping files. Against a pinned target base, prepare a candidate, identify conflicts, run applicable cheap checks and hand the integrator a reproducible manifest with member heads, base, candidate, policy, environment, results, exclusions and reasons. Keep final publication with the integrator.
+- Reason: find failures while integration is occupied and shorten its serial path. Core MVP bundling does not depend on this optimization. Do not copy SkyKeep host paths, lane exclusions, capacity limits or authority assumptions without current source inspection.
+- Revisit: the self-building MVP is running **or** at least 11 integration-ready tasks wait simultaneously. Backlog can trigger earlier selection, not make this an MVP prerequisite.
+- Acceptance: stale heads/base/policy invalidate evidence; conflicts and failures have actionable owners. The integrator revalidates freshness and runs the final full combined gate. New arrivals do not alter a frozen candidate; retries or competing preparation cannot create duplicate integration or stale acceptance. Measure preparation and integrator wait time. Reuse checks only for equivalent inputs, environment and trusted results.
+- Architecture: sections 2, 8–10 and 13. Plan: follow-on to area 5a. ADR: [0028](../adr/integration.md#adr-0028).
 
 ## SKYBUILD-LAPTOP-HA-DR — Optional second-laptop hot failover
 
