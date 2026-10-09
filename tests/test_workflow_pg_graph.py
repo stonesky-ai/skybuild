@@ -21,6 +21,7 @@ def test_gate_overrides_live_dsn_and_cleans_up_on_test_failure(tmp_path, monkeyp
     module = load("disposable_pg_gate")
     calls = []
     monkeypatch.setenv("SKYBUILD_DSN", "postgresql://LIVE")
+    monkeypatch.setenv("SKYBUILD_ROLE_ADMIN_DSN", "postgresql://LIVE")
     monkeypatch.setenv("SKYBUILD_TEST_DSN", "postgresql://LIVE")
 
     def fake(argv, **kwargs):
@@ -28,6 +29,7 @@ def test_gate_overrides_live_dsn_and_cleans_up_on_test_failure(tmp_path, monkeyp
         if argv == ["fake-pytest"]:
             env = kwargs["env"]
             assert "SKYBUILD_DSN" not in env
+            assert "SKYBUILD_ROLE_ADMIN_DSN" not in env
             for variable in ("SKYBUILD_TEST_DSN", "SKYBUILD_HTTP_TEST_DSN", "SKYBUILD_IMPORT_TEST_DSN"):
                 assert "@127.0.0.1:15432/skybuild_" in env[variable]
                 assert "LIVE" not in env[variable]
