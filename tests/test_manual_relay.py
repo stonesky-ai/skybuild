@@ -14,6 +14,7 @@ from skybuild.manual_cord import receive_assignment, send_result
 from skybuild.store import Store
 from test_manual_assignment import pinned  # noqa: F401
 from test_manual_dispatch import FakeClient, _git
+from test_store import seed_api_authority
 
 
 @pytest.fixture(params=["wonko", "wowbagger"])
@@ -26,7 +27,7 @@ def relay_assignment(pinned, request, monkeypatch):
     _git(repo, "add", path)
     _git(repo, "commit", "-qm", "Bind pilot identities")
     base = _git(repo, "rev-parse", "HEAD")
-    monkeypatch.setattr(manual_dispatch, "_published_head", lambda _repo: base)
+    monkeypatch.setattr(manual_dispatch, "_published_head", lambda _repo, _base_ref: base)
     return repo, path, brief
 
 
@@ -45,6 +46,7 @@ def dispatch_assignment(relay_assignment, tmp_path, client_factory, project="sky
 def test_dispatcher_message_is_accepted_by_worker(relay_assignment, tmp_path):
     repo, _, brief = relay_assignment
     sender = FakeClient()
+    sender.task["task_id"] = brief["task_id"]
     sent = dispatch_assignment(relay_assignment, tmp_path, lambda *_args, **_kwargs: sender)
     body = sender.calls[0][1]
     from test_manual_cord import FakeClient as WorkerClient
@@ -64,10 +66,19 @@ def test_authenticated_assignment_and_result_roundtrip(relay_assignment, restric
     project = "relay-" + uuid4().hex
     dispatcher, worker = brief["dispatcher"], brief["worker"]
     admin = Store(admin_dsn, database)
-    scopes = ["cord:send", "cord:read", "cord:handle"]
+    seed_api_authority(admin, project)
+    scopes = ["tasks:read", "cord:send", "cord:read", "cord:handle"]
     dispatcher_token, worker_token = uuid4().hex + uuid4().hex, uuid4().hex + uuid4().hex
     admin.provision_principal(dispatcher, dispatcher_token, grants={project: scopes})
     admin.provision_principal(worker, worker_token, grants={project: scopes})
+    owner_token = uuid4().hex + uuid4().hex
+    admin.provision_principal("owner-" + project, owner_token, is_admin=True)
+    owner = admin.authenticate(owner_token)
+    task = admin.create_task(owner, project, {
+        "task_id": brief["task_id"], "title": "Relay coding task", "description": "Bounded relay test",
+        "acceptance_criteria": ["Worker receives an API-bound assignment and reports a result"]}, "create")
+    task = admin.task_action(owner, project, task["task_id"], "ready", {"reason": "Ready for manual relay"},
+                             task["revision"], "ready")
     with TestClient(create_app(Store(runtime_dsn, database))) as api:
         def transport(request):
             response = api.request(request.method, str(request.url),
@@ -83,6 +94,9 @@ def test_authenticated_assignment_and_result_roundtrip(relay_assignment, restric
             receive_assignment(receiver, project, repo, worker=worker, dispatcher=dispatcher,
                                message_id=sent["message_id"], destination=destination)
             assignment = json.loads(destination.read_text())
+            assert assignment["schema"] == "manual-work-v2"
+            assert assignment["task_revision"] == task["revision"]
+            assert assignment["task_status"] == "ready"
             worktree = tmp_path / "worker"
             _git(repo, "worktree", "add", "-b", assignment["branch"], str(worktree), assignment["base_sha"])
             result = {"schema": "manual-work-v1", "assignment_id": assignment["assignment_id"],

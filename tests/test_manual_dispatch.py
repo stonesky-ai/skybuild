@@ -67,7 +67,7 @@ class FakeClient:
         return {"principal_id": "pilot_dispatcher", "is_admin": False, "grants": self.grants}
 
     def get_task(self, project, task_id):
-        assert (project, task_id) == ("skybuild", "SKYBUILD-TASK-CUTOVER")
+        assert project == "skybuild"
         self.task_reads += 1
         return self.task
 
