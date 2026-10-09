@@ -13,6 +13,7 @@
 - Verify `codegraph status` names this checkout before querying. Use this session's CodeGraph MCP server with an explicit `projectPath`, or run CodeGraph locally here. Never reuse another session's server or checkout's index. If no local index exists, `codegraph init --yes` is authorized; keep the index local, Git-ignored, and limited to code. Sync after large pulls, branch switches, or merges. Use CodeGraph first for code navigation and impact; confirm absence claims independently. Use Serena for precise symbol work when useful and RTK for shell output. Avoid duplicate full reads.
 - Use the matching project skill and guarded script for disposable PostgreSQL tests, reviewed PR integration, branch closeout, PR text, and CodeGraph checkout setup. Skills live in `.claude/skills/`; triggers also live in `.agents/skills/`. Skills do not grant new authority.
 - During sustained coding, load [session failure review](.claude/skills/skybuild-session-failures/SKILL.md), run its ripgrep-backed scan every 30 minutes, inspect actual failures, and add a narrow prevention skill plus `.agents` trigger when a demonstrated repeat warrants it.
+- During sustained work on each SkyBuild box, use [host watch](.claude/skills/skybuild-host-watch/SKILL.md) for one CPU-only minute-spaced status file. Check it before heavy gates; maintain the owner's 4 GiB memory reserve without model polling or broad process cleanup.
 
 ## Authority and data
 

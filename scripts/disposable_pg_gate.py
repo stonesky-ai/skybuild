@@ -15,7 +15,19 @@ import tempfile
 import time
 
 
-def run_gate(checkout: Path, timeout: float, image: str, command: list[str]) -> tuple[dict, int]:
+def available_memory_bytes() -> int:
+    try:
+        status = Path("/proc/meminfo").read_text(encoding="ascii")
+    except OSError as error:
+        raise RuntimeError("Available memory cannot be measured") from error
+    match = re.search(r"^MemAvailable:\s+(\d+) kB$", status, re.MULTILINE)
+    if not match:
+        raise RuntimeError("Available memory cannot be measured")
+    return int(match[1]) * 1024
+
+
+def run_gate(checkout: Path, timeout: float, image: str, command: list[str],
+             min_available_bytes: int = 0) -> tuple[dict, int]:
     name = "skybuild-gate-" + secrets.token_hex(8)
     password = secrets.token_urlsafe(32)
     descriptor, log_path = tempfile.mkstemp(prefix=name + "-", suffix=".log")
@@ -39,11 +51,17 @@ def run_gate(checkout: Path, timeout: float, image: str, command: list[str]) -> 
             return completed
 
         try:
+            def require_headroom():
+                if min_available_bytes and available_memory_bytes() < min_available_bytes:
+                    raise RuntimeError("Available memory is below the gate minimum")
+
+            require_headroom()
             env = dict(os.environ, POSTGRES_PASSWORD=password)
             # The random loopback binding and anonymous volume belong only to this container.
             started = True
             execute(["docker", "run", "--detach", "--name", name,
-                     "--label", "skybuild.disposable-gate=true", "--publish", "127.0.0.1::5432",
+                     "--label", "skybuild.disposable-gate=true", "--memory", "512m",
+                     "--memory-swap", "512m", "--pids-limit", "128", "--publish", "127.0.0.1::5432",
                      "--env", "POSTGRES_PASSWORD", image], env=env)
             while execute(["docker", "exec", name, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"], check=False).returncode:
                 time.sleep(min(0.25, max(0, deadline - time.monotonic())))
@@ -61,6 +79,7 @@ def run_gate(checkout: Path, timeout: float, image: str, command: list[str]) -> 
                                        ("SKYBUILD_IMPORT_TEST_DSN", "skybuild_import_test")):
                 execute(["docker", "exec", name, "createdb", "-U", "postgres", database])
                 test_env[variable] = f"postgresql://postgres:{password}@127.0.0.1:{port}/{database}"
+            require_headroom()
             exit_code = execute(command, env=test_env, check=False).returncode
             result["ok"] = exit_code == 0
         except (OSError, RuntimeError, subprocess.SubprocessError, TimeoutError, KeyboardInterrupt) as error:
@@ -97,10 +116,14 @@ def main() -> int:
     parser.add_argument("--checkout", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--timeout", type=float, default=600, help="Total gate deadline in seconds")
     parser.add_argument("--image", default="postgres:16", help="Disposable PostgreSQL Docker image")
+    parser.add_argument("--min-available-gib", type=int, default=0,
+                        help="Refuse to start PostgreSQL or tests below this available-memory threshold")
     parser.add_argument("command", nargs=argparse.REMAINDER, help="Optional command argv after --")
     args = parser.parse_args()
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
+    if args.min_available_gib < 0:
+        parser.error("--min-available-gib must not be negative")
     try:
         checkout = verify_skybuild(args.checkout.resolve())
     except RepoGuardError as error:
@@ -111,7 +134,8 @@ def main() -> int:
     if command[:1] == ["--"]:
         command = command[1:]
     result, code = run_gate(checkout, args.timeout, args.image,
-                            command or ["uv", "run", "--extra", "test", "python", "-m", "pytest", "-q"])
+                            command or ["uv", "run", "--extra", "test", "python", "-m", "pytest", "-q"],
+                            min_available_bytes=args.min_available_gib * 1024**3)
     print(json.dumps(result, sort_keys=True))
     return code if 0 <= code <= 125 else 1
 
