@@ -137,6 +137,20 @@ def test_added_task_semicolon_dependency_field_is_not_omitted(frozen_checkout):
     assert report["cutover_ready"] is False
 
 
+@pytest.mark.parametrize("line, expected_references", [
+    ("- Area: task authority. Dependencies: none. Assignee: owner and SKYBUILD-ARCHITECTURE.", []),
+    ("- Area: task authority. Dependencies: SKYBUILD-BOOTSTRAP; Assignee: SKYBUILD-NOT-IN-LEDGER.",
+     ["SKYBUILD-BOOTSTRAP"]),
+])
+def test_dependency_value_stops_before_next_field(frozen_checkout, line, expected_references):
+    _replace_cutover_dependency(frozen_checkout, line)
+    row = _dependency_row(audit_ledgers(frozen_checkout, CONTRACT), "SKYBUILD-TASK-CUTOVER")
+    assert row["dependency_lines"] == [line]
+    assert row["literal_references"] == expected_references
+    assert row["unknown_references"] == []
+    assert row["unresolved_prose"] == []
+
+
 def test_changed_dependency_text_and_mapping_difference_are_visible(frozen_checkout):
     _replace_cutover_dependency(frozen_checkout, "- Area: task authority. Dependencies: SKYBUILD-ARCHITECTURE instead.")
     report = audit_ledgers(frozen_checkout, CONTRACT)

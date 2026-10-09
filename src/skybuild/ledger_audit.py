@@ -13,6 +13,7 @@ from .importer import LEDGERS, prepare_import
 from .ledger import build_manifest
 
 _DEPENDENCIES = re.compile(r"(?:^|[.;][ \t]+)Dependencies:[ \t]*")
+_NEXT_FIELD = re.compile(r"[.;][ \t]+(?=[A-Z][A-Za-z -]*:[ \t]*)")
 _TASK_ID = re.compile(r"SKYBUILD-[A-Z0-9]+(?:-[A-Z0-9]+)*")
 
 
@@ -26,7 +27,9 @@ def _dependency_evidence(task: dict, current_ids: set[str]) -> dict:
         match = _DEPENDENCIES.search(line.lstrip()[2:])
         if match:
             lines.append(line)
-            values.append(line.lstrip()[2:][match.end():])
+            value = line.lstrip()[2:][match.end():]
+            next_field = _NEXT_FIELD.search(value)
+            values.append(value[:next_field.start()] if next_field else value)
 
     mentions = [match.group() for value in values for match in _TASK_ID.finditer(value)]
     resolved = sorted(set(mentions) & current_ids)
