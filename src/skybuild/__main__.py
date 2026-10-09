@@ -28,6 +28,9 @@ def main(argv: list[str] | None = None) -> int:
     ledger_import.add_argument("--project-id", default="skybuild")
     ledger_import.add_argument("--apply-disposable", action="store_true")
     ledger_import.add_argument("--expected-import-sha256")
+    audit = commands.add_parser("ledger-audit", help="Audit frozen versus current Markdown without database access or authority changes")
+    audit.add_argument("--ledger-dir", type=Path, default=Path("docs/design"))
+    audit.add_argument("--contract", type=Path, default=Path("docs/design/implementation/frozen_ledger_import.json"))
     commands.add_parser("migrate", help="Apply migrations to the explicitly configured dedicated database")
     provision = commands.add_parser("provision", help="Provision a principal using SKYBUILD_TOKEN or --token-stdin")
     provision.add_argument("principal_id")
@@ -62,6 +65,12 @@ def main(argv: list[str] | None = None) -> int:
 
             print(json.dumps(build_manifest(args.paths), ensure_ascii=False, indent=2))
             return 0
+        if args.command == "ledger-audit":
+            from .ledger_audit import audit_ledgers
+
+            report = audit_ledgers(args.ledger_dir, args.contract)
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            return 2 if report["stale_freeze"] else 0
         if args.command == "ledger-import":
             from .importer import import_frozen, prepare_import
             from .store import Store
