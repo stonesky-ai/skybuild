@@ -54,6 +54,8 @@
         <form id="edit-form">
           <label for="edit-title">Title</label><input id="edit-title" required maxlength="500" disabled>
           <label for="edit-description">Description</label><textarea id="edit-description" required maxlength="32768" rows="8" disabled></textarea>
+          <label for="edit-acceptance">Acceptance criteria (JSON array)</label><textarea id="edit-acceptance" rows="4" spellcheck="false" disabled></textarea>
+          <label for="edit-architecture">Architecture references (JSON array)</label><textarea id="edit-architecture" rows="3" spellcheck="false" disabled></textarea>
           <div class="field-pair">
             <div><label for="edit-status">Status</label><select id="edit-status" disabled><option>proposed</option><option>ready</option><option>in-progress</option><option>blocked</option><option>deferred</option><option>done</option></select></div>
             <div><label for="edit-phase">Phase</label><input id="edit-phase" maxlength="200" disabled></div>
@@ -62,7 +64,7 @@
           <label for="edit-blocker">Blocker</label><textarea id="edit-blocker" maxlength="4096" rows="2" disabled></textarea>
           <label for="edit-responsible">Responsible component or person</label><input id="edit-responsible" required maxlength="200" disabled>
           <label for="edit-dependencies">Dependencies, one task ID per line</label><textarea id="edit-dependencies" rows="4" disabled></textarea>
-          <p class="hint">Unfinished tasks require a next action or blocker and a responsible component or person.</p>
+          <p class="hint">Unfinished tasks require a next action or blocker and a responsible component or person. Editing a definition after workflow activity sends it for reassessment.</p>
           <button id="save" type="submit" disabled>Save changes</button>
         </form>
         <form id="action-form">

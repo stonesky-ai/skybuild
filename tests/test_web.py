@@ -94,7 +94,7 @@ const get = id => {
 global.document = { getElementById: get, createElement: tag => new Element(tag) };
 const task = {task_id: " task ", title: "Title", description: "Brief", status: "proposed",
   phase: "triage", next_action: "Review", blocker: null, responsible: "owner",
-  dependencies: [" dep ", "dep"], acceptance_criteria: ["one", "two"], architecture_refs: ["ref"], revision: 7};
+  dependencies: [" dep ", "dep"], acceptance_criteria: ["one\ntwo"], architecture_refs: ["ref\nsection"], revision: 7};
 const other = {...task, task_id: "other", revision: 3, acceptance_criteria: ["three"], dependencies: ["dep"]};
 const requests = [];
 global.fetch = async (url, options) => {
@@ -111,12 +111,20 @@ async function run() {
   get("project").value = " project "; get("token").value = "test-token";
   get("connection-form").listeners.submit({preventDefault() {}}); await tick();
   get("task-list").querySelectorAll()[0].listeners.click(); await tick();
+  assert.deepEqual(JSON.parse(get("edit-acceptance").value), ["one\ntwo"]);
+  assert.deepEqual(JSON.parse(get("edit-architecture").value), ["ref\nsection"]);
   get("edit-title").value = "Renamed";
   get("edit-dependencies").value = " dep \r\ndep\r\n   \r\n\t\r\n";
+  get("edit-acceptance").value = "not JSON";
+  get("edit-form").listeners.submit({preventDefault() {}}); await tick();
+  assert.equal(requests.filter(request => request.options.method === "PATCH").length, 0);
+  get("edit-acceptance").value = JSON.stringify(["one\ntwo"]);
   get("edit-form").listeners.submit({preventDefault() {}}); await tick();
   const patches = requests.filter(request => request.options.method === "PATCH");
   assert.equal(patches.length, 1);
   assert.deepEqual(JSON.parse(patches[0].options.body).dependencies, [" dep ", "dep"]);
+  assert.deepEqual(JSON.parse(patches[0].options.body).acceptance_criteria, ["one\ntwo"]);
+  assert.deepEqual(JSON.parse(patches[0].options.body).architecture_refs, ["ref\nsection"]);
   assert.equal(patches[0].options.headers["If-Match"], "7");
   assert.ok(patches[0].url.endsWith("/tasks/%20task%20"));
   assert.ok(requests.every(request => request.url.startsWith("/api/v1/projects/%20project%20/")));

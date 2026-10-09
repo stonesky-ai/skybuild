@@ -130,6 +130,8 @@
       ["edit-phase", "phase"], ["edit-next", "next_action"], ["edit-blocker", "blocker"], ["edit-responsible", "responsible"],
     ]) byId(id).value = task[field] ?? "";
     byId("edit-dependencies").value = task.dependencies.join("\n");
+    byId("edit-acceptance").value = JSON.stringify(task.acceptance_criteria, null, 2);
+    byId("edit-architecture").value = JSON.stringify(task.architecture_refs, null, 2);
     const events = byId("history"); events.replaceChildren();
     for (const event of history) {
       const item = document.createElement("li"), summary = document.createElement("p");
@@ -175,12 +177,23 @@
   edit.addEventListener("submit", (event) => {
     event.preventDefault();
     if (!selected || stale) return;
+    let acceptance, architecture;
+    try {
+      acceptance = JSON.parse(byId("edit-acceptance").value);
+      architecture = JSON.parse(byId("edit-architecture").value);
+      if (![acceptance, architecture].every((items) => Array.isArray(items) && items.every((item) => typeof item === "string"))) throw new Error();
+    } catch {
+      notice("Acceptance criteria and architecture references must be JSON arrays of strings.", true);
+      return;
+    }
     perform(async () => {
       const body = {
         title: byId("edit-title").value, description: byId("edit-description").value,
         next_action: byId("edit-next").value,
         responsible: byId("edit-responsible").value,
         dependencies: byId("edit-dependencies").value.split(/\r?\n/).filter((line) => line.trim()),
+        acceptance_criteria: acceptance,
+        architecture_refs: architecture,
       };
       await request(`tasks/${encodeURIComponent(selected.task_id)}`, { method: "PATCH", body, revision: selected.revision });
       await loadTasks(); await selectTask(selected.task_id); notice("Task changes saved.");

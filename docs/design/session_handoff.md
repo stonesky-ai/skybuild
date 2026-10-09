@@ -16,6 +16,8 @@ The next [task merge slice](implementation/task_merge_slice.md) creates a new ta
 
 The [structural workbench slice](implementation/structural_workbench_slice.md) now exposes reviewed split/merge plan preview and apply controls. The preview displays exact JSON allocations and definitions, fetches merge source requirements and revisions, and invalidates Apply on edits. Separate `structure_ui_review` found an incomplete preview, then accepted its correction. The full disposable suite passed 134 tests with the existing upstream warning. Guarded completion, automatic due catch-up and active-effect reconciliation remain open. No live task authority changed.
 
+The [definition editor slice](implementation/definition_editor_slice.md) exposes acceptance criteria and architecture references in the workbench. JSON-array editing preserves embedded newlines and exact values across unrelated edits. Independent review caught and corrected an initially lossy line-based representation. This remains definition editing only; it does not fabricate acceptance, review or integration evidence. No live task authority changed.
+
 Saved 2026-10-08 after architecture revision A33 and the subsequent implementation authorization below. Resume from /home/kevin/my_code with sibling skybuild and skykeep checkouts. This is context, not a competing design plan.
 
 ## Committed checkpoint and immediate next task
