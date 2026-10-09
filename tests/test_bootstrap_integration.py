@@ -210,7 +210,8 @@ def test_http_preserves_literal_unicode_escape_but_rejects_nul(service):
     assert refused.status_code == 422
     current = client.get(base + "/escape", headers=headers(token)).json()
     assert current["revision"] == 2
-    assert current["metadata"] == {literal: literal}
+    assert current["metadata"][literal] == literal
+    assert set(current["metadata"]) == {literal, "_skybuild_workflow"}
 
 
 def test_cli_service_process_restart_preserves_task(service, tmp_path):

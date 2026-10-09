@@ -268,6 +268,9 @@ class Store:
 
     def _replace_task(self, connection, principal, project_id, task_id, before, changes, *, operation, reason):
         values = self._task_values(changes, before)
+        self._advance_readiness(connection, project_id, task_id, values,
+                                acknowledge=operation in {'ready', 'completed'},
+                                preserve_input=operation == 'completed')
         columns = [key for key in values if key != 'dependencies']
         parameters = [Jsonb(values[key]) if key == 'metadata' else values[key] for key in columns]
         assignments = sql.SQL(', ').join(sql.SQL('{} = %s').format(sql.Identifier(key)) for key in columns)
@@ -275,7 +278,62 @@ class Store:
         self._dependencies(connection, project_id, task_id, values['dependencies'])
         after = self._task(connection, project_id, task_id)
         self._journal(connection, principal, after, before, operation=operation, reason=reason)
+        self._invalidate_dependents(connection, principal, project_id, task_id)
         return after
+
+    @staticmethod
+    def _advance_readiness(connection, project_id, task_id, values, *, acknowledge=False, preserve_input=False):
+        connection.execute('INSERT INTO task_readiness (project_id, task_id) VALUES (%s, %s) ON CONFLICT DO NOTHING',
+                           (project_id, task_id))
+        row = connection.execute(
+            'UPDATE task_readiness SET input_generation = input_generation + %s, '
+            'assessed_generation = CASE WHEN %s THEN input_generation + %s ELSE assessed_generation END '
+            'WHERE project_id = %s AND task_id = %s RETURNING input_generation, assessed_generation',
+            (0 if preserve_input else 1, acknowledge, 0 if preserve_input else 1, project_id, task_id)).fetchone()
+        metadata = json.loads(json.dumps(values['metadata']))
+        workflow = metadata.setdefault('_skybuild_workflow', {})
+        workflow.setdefault('generation', 0)
+        workflow['readiness'] = dict(row)
+        values['metadata'] = metadata
+
+    def _invalidate_dependents(self, connection, principal, project_id, task_id):
+        # The graph lock covers discovery, generation changes and all journal writes.
+        rows = connection.execute(
+            'WITH RECURSIVE edges(task_id, dependency_id) AS ('
+            'SELECT task_id, dependency_id FROM task_dependencies WHERE project_id = %s UNION '
+            "SELECT task_id, metadata->'_skybuild_workflow'->'deferral'->>'milestone_task_id' FROM tasks "
+            "WHERE project_id = %s AND metadata->'_skybuild_workflow'->'deferral'->>'milestone_task_id' IS NOT NULL), "
+            'affected(task_id) AS (SELECT task_id FROM edges WHERE dependency_id = %s UNION '
+            'SELECT e.task_id FROM edges e JOIN affected a ON e.dependency_id = a.task_id) '
+            'SELECT task_id FROM affected WHERE task_id <> %s ORDER BY task_id',
+            (project_id, project_id, task_id, task_id)).fetchall()
+        for row in rows:
+            dependent_id = row['task_id']
+            before = self._task(connection, project_id, dependent_id, lock=True)
+            if before['status'] == 'superseded':
+                continue
+            values = self._task_values({}, before)
+            metadata = json.loads(json.dumps(before['metadata']))
+            workflow = metadata.setdefault('_skybuild_workflow', {})
+            workflow['generation'] = workflow.get('generation', 0) + 1
+            workflow.update({'last_action': 'dependency_invalidated', 'reason': f'Dependency {task_id} changed'})
+            values['metadata'] = metadata
+            if before['status'] != 'deferred':
+                values.update({'status': 'blocked', 'phase': 'reassess',
+                               'blocker': f'Dependency {task_id} changed',
+                               'next_action': 'Reconcile active effects and reassess dependencies' if
+                               self._has_started_history(connection, project_id, dependent_id) else
+                               'Reassess current definition and dependencies'})
+            self._advance_readiness(connection, project_id, dependent_id, values)
+            columns = [key for key in values if key != 'dependencies']
+            assignments = sql.SQL(', ').join(sql.SQL('{} = %s').format(sql.Identifier(key)) for key in columns)
+            parameters = [Jsonb(values[key]) if key == 'metadata' else values[key] for key in columns]
+            connection.execute(sql.SQL('UPDATE tasks SET {}, revision = revision + 1, updated_at = now() '
+                                       'WHERE project_id = %s AND task_id = %s').format(assignments),
+                               (*parameters, project_id, dependent_id))
+            after = self._task(connection, project_id, dependent_id)
+            self._journal(connection, principal, after, before, operation='dependency_invalidated',
+                          reason=f'Dependency {task_id} changed')
 
     @staticmethod
     def _dependencies(connection, project_id, task_id, dependencies):
@@ -303,6 +361,9 @@ class Store:
     @staticmethod
     def _journal(connection, principal, after, before=None, *, operation=None, reason=None):
         operation = operation or ('updated' if before else 'created')
+        if operation == 'created':
+            connection.execute('INSERT INTO task_readiness (project_id, task_id) VALUES (%s, %s) ON CONFLICT DO NOTHING',
+                               (after['project_id'], after['task_id']))
         connection.execute(
             'INSERT INTO task_journal (event_id, project_id, task_id, actor, operation, revision, reason, before_state, after_state) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)',
             (uuid4(), after['project_id'], after['task_id'], principal.principal_id, operation,
@@ -385,9 +446,17 @@ class Store:
             _invalid('Unsupported task action')
         _body(body, ACTION_FIELDS)
         def changes(before, connection):
-            if action == 'ready' and (not before['acceptance_criteria'] or before['dependencies'] or
-                                      self._has_started_history(connection, project_id, task_id)):
-                raise DomainError('workflow_conflict', 'Readiness requires acceptance, no dependencies and no started history', 409)
+            if action == 'ready':
+                if not before['acceptance_criteria'] or self._has_started_history(connection, project_id, task_id):
+                    raise DomainError('workflow_conflict', 'Readiness requires acceptance and no started history', 409)
+                for dependency_id in before['dependencies']:
+                    dependency = self._task(connection, project_id, dependency_id)
+                    readiness = connection.execute(
+                        'SELECT input_generation, assessed_generation FROM task_readiness '
+                        'WHERE project_id = %s AND task_id = %s', (project_id, dependency_id)).fetchone()
+                    if (dependency['status'] != 'done' or not readiness or
+                            readiness['input_generation'] != readiness['assessed_generation']):
+                        raise DomainError('workflow_conflict', f'Dependency {dependency_id} lacks current completion', 409)
             result = action_change(before, action, body)
             milestone = body.get('milestone_task_id')
             if milestone is not None:
@@ -670,6 +739,8 @@ class Store:
                          'metadata': metadata}, operation='dependency_rewired', reason=f'Merge into {target_id}: {reason}'))
                 replaced = []
                 for source in sources:
+                    # Earlier source retirement can invalidate another source in this atomic merge.
+                    source = self._task(connection, project_id, source['task_id'], lock=True)
                     metadata = dict(source['metadata'])
                     workflow = dict(metadata.get('_skybuild_workflow', {}))
                     workflow['generation'] = workflow.get('generation', 0) + 1
