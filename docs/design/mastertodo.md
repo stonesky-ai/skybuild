@@ -1,6 +1,6 @@
 # SkyBuild current tasks
 
-Authority: Git-backed planning ledger, revision A40, 2026-10-09. API cutover has not occurred. See [architecture section 4](architecture.md#4-temporary-task-authority-and-transition) for the lifecycle. Order below is proposed priority. The owner authorizes repository implementation and isolated validation toward the parallel MVP; live authority cutover, unqualified inference, paid starts and deployment retain separate controls.
+Authority: Git-backed planning ledger, revision A41, 2026-10-09. API cutover has not occurred. See [architecture section 4](architecture.md#4-temporary-task-authority-and-transition) for the lifecycle. Order below is proposed priority. The owner authorizes repository implementation and isolated validation toward the parallel MVP; live authority cutover, unqualified inference, paid starts and deployment retain separate controls.
 
 Each task ID lives in exactly one ledger. Related ledgers: [deferred](deferred.md), [alreadydone](alreadydone.md). These are new SkyBuild project records, not updates to the old SkyKeep queue. Until claims/fencing exist, coordinate any later authorized execution manually and serially.
 
@@ -76,6 +76,13 @@ Each task ID lives in exactly one ledger. Related ledgers: [deferred](deferred.m
 - Completed preview evidence: branch `task/task-workbench`, commits `d87b6b0`, `9b553ca`, `58bd3b9`, `d7ef0c2`, `8290283`, `9cb25ca`, `f877185`, `587e66b`, `801c87c`, `baf6d93`, `5af2fd1`, `0280b50`, and `7b8c6d1`. This is preview/UI evidence, not real-data wire-in acceptance.
 - Architecture: sections 5, 9 and 13; [workflow](task_workflow.md). Plan: area 3a. ADR: [0031](../adr/tasks.md#adr-0031).
 - Preview boundary: the local Workbench uses an always-signed-in fake `user1` account and read-only task records parsed from this ledger. Each preview record is marked fake and has no live journal or write path. Real user accounts, browser sessions and human-to-API authentication remain deferred under [SKYBUILD-USER-LOGIN](deferred.md#skybuild-user-login). The demo credentials do not authorize API or database access.
+
+## SKYBUILD-WORKBENCH-MARSHALLS-DUNSEL — Add local Workbench controls for the Dunsel marshall
+
+- Status: in-progress (owner-authorized implementation). Phase: local preview implementation. Responsible: lead. Next action: add the Marshalls page, local-only lifecycle routes and Dunsel process/status view. Priority: normal. Area: Workbench and local operations. Dependencies: SKYBUILD-TASK-WORKBENCH.
+- Brief: add a Marshalls left-bar link and a Dunsel card to the local Workbench preview. Provide explicit enable/disable, start, graceful-stop and immediate-kill controls for one fixed CPU-only Python marshall. Dunsel logs memory and disk samples to `/tmp/marshall_dunsel.log`, checks `/tmp/marshall_dunsel.off-now` at each sample, removes that request, records its UTC exit time and exits. Sample every ten seconds, sleeping only until the next minute boundary when less than ten seconds remain. Keep this a fixed, local development utility, not a general command runner or worker-admission path.
+- Acceptance: the local preview launches the fixed script with nohup and prevents duplicate Dunsel starts; graceful stop creates the named flag and the worker removes/logs it before exit; immediate kill uses a Dunsel-specific `pkill` pattern and never targets unrelated processes. Disable prevents future starts without silently stopping a current run; enable permits starts again. The page refreshes status once per minute and shows enabled/running state, PID, process descendants, the matching `top` process row, latest log line and logfile modification time when stopped. Control routes accept loopback/same-origin requests only and are absent from the normal service. The UI and worker use no task API, database, model or credential.
+- Architecture: sections 2, 8–9. This local preview adapter reports component state from the process table and log; it does not grant execution admission or expand the managed worker lifecycle.
 
 ## SKYBUILD-LEGACY-MIGRATION — Extract and port every legacy build API writer
 

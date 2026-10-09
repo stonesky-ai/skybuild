@@ -69,8 +69,8 @@ Provisioning reads a high-entropy bearer token from standard input or `SKYBUILD_
 
 Open `/workbench/tasks` for the dedicated task tabs: list, history, create, and defer/resume. It uses the existing authenticated task API. The journal shows commit, author, box, and review details when those fields exist in recorded task evidence; absent commit metadata is not inferred. Open `/workbench` for the broader task workbench, including definition edits, lineage, and guarded actions. Enter the project and bearer token; the token stays only in page memory and clears on logout/reload. A stale edit requires an explicit refresh before saving. Definition and dependency changes durably invalidate readiness; this does not admit or start a worker. Live task cutover is not implemented.
 
-For interactive UI work, use one stable preview URL: `http://127.0.0.1:8767/workbench`.
-Start it with `uv run uvicorn skybuild.workbench_preview:app --app-dir src --reload --reload-dir src/skybuild --reload-include '*.py' --reload-include '*.html' --reload-include '*.js' --reload-include '*.css' --host 127.0.0.1 --port 8767`.
+For interactive UI work, use one stable preview URL: `http://127.0.0.1:8766/workbench`.
+Start it with `uv run uvicorn skybuild.workbench_preview:app --app-dir src --reload --reload-dir src/skybuild --reload-include '*.py' --reload-include '*.html' --reload-include '*.js' --reload-include '*.css' --host 127.0.0.1 --port 8766`.
 The preview restarts on source edits and refreshes the open browser when its source changes. Connected task lists refresh every 15 seconds through the existing REST API.
 
 Set `SKYBUILD_API_URL` and `SKYBUILD_TOKEN` for read-only CLI views:
