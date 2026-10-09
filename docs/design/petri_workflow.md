@@ -138,22 +138,40 @@ Roll out domain contracts, Store persistence, compatible APIs, component adapter
 
 Create parent `SKYBUILD-PETRI` and `SKYBUILD-PETRI-01` through `SKYBUILD-PETRI-12` in the existing SkyBuild task API, all at priority **5**, with `initiative: Petri` metadata. Petri names this feature project; enrolling another runtime/API project is unnecessary for planning it. Current task status belongs only in the API. The table below references deliverables and sequencing, not a second editable queue.
 
-Each slice targets about 30 minutes of focused implementation, roughly six coding hours total. Independent review, corrections and combined gates add time. This is an estimate, not a delivery promise. A slice that cannot reach its boundary checkpoints or splits explicitly. The parent is an umbrella; no child depends on parent completion. Give every task a named next owner/action and exact acceptance checks. No implementation, task-completion attestation, deployment, or worker launch occurs in this design pass.
+Each slice targets roughly 30 minutes of focused work. Estimated code generation totals **230–360 minutes (3 hours 50 minutes to 6 hours)**. Independent review, test execution, corrections and combined gates are additional. These are planning judgments, not measured model benchmarks or delivery promises. A slice that cannot reach its boundary checkpoints or splits explicitly. The parent is an umbrella; no child depends on parent completion. Give every task a named next owner/action and exact acceptance checks. No implementation, task-completion attestation, deployment, or worker launch occurs in this design pass.
 
-| Slice | Deliverable and focused acceptance | Depends on slices |
+| Slice | Deliverable and focused acceptance | Depends on slices | Author model | Code generation | Reviewer model |
+| --- | --- | --- | --- | --- | --- |
+| 01 | Four compact classes/enums and bounded token/result serialization; preserve task identity and JSON round-trip. | None | Luna | 10–15 min | Sol |
+| 02 | Transition catalogue and Ready, Working, Validating, Integrating and Done kernel; reject every unnamed movement, expose disabled reasons. | 01 | Luna | 15–20 min | Sol |
+| 03 | Validation substages, fault-to-Ready, hold/defer/resume and Done reopening; cover all legal source places and evidence invalidation. | 02 | Sol | 20–30 min | Sol |
+| 04 | Store transaction, next numbered migration and claim-to-Working atomicity; journal/idempotency/fence/rollback checks. | 03 | Sol | 25–40 min | Sol |
+| 05 | Existing API/client action adaptation and computed capabilities; compatible fields, auth and stale-edit checks. | 04 | Sol | 15–25 min | Sol |
+| 06 | Worker/dispatcher/result wiring for Ready, Working and Validating, plus Working failure; reject stale/duplicate assignments and results. | 05 | Sol | 15–25 min | Grok* |
+| 07 | Check/review/rebase result wiring; all five substages, independent review, exact inputs and late-pass-after-failure check. | 06 | Sol | 20–30 min | Grok* |
+| 08 | Bundle freeze/exclusion/gate/publication wiring for Validating, Integrating and Done, plus Integrating failure; retain unknown publication and exact inclusion checks. | 07 | Sol | 25–40 min | Sol |
+| 09 | Existing dependency/due/reconciliation/structural actions adapted; preserve generation, lineage, effects and hold/defer semantics. | 08 | Sol | 25–40 min | Sol |
+| 10 | Board/count/next-work query and seven-column accessible workbench; global totals, badges and safe rendering. | 05, 09 | Luna | 20–30 min | Sol |
+| 11 | Guarded workbench controls, dependency/evidence detail and shared-contract diagram; expected revisions and keyboard flow. | 10 | Luna | 20–30 min | Sol |
+| 12 | Full transition/race coverage, two-project acceptance and migration/promotion handoff. | 11 | Sol | 20–35 min | Sol |
+
+### Estimate assumptions and total build time
+
+“Code generation” means active model time to inspect the bounded inputs, produce source/test changes and perform the first edit pass. It excludes waiting for model slots, test processes, independent review, correction rounds and integration. Sol, Luna and Grok are the owner's model/profile labels; pin the actual permitted model version at assignment. No token-per-second comparison or live qualification is claimed.
+
+Use Luna for bounded records, a fixed transition catalogue and UI work against already-guarded APIs. Use Sol for evidence, transactions, claims, compatibility, worker results, integration and recovery. Reviewers always use a separate session, even when author and reviewer both say Sol. **Grok*** is a proposed independent reviewer for slices 06 and 07 only if its route is already qualified for those task classes; otherwise use a separate qualified Sol session with the same review allowance. Grok is not on the author critical path. These choices reflect task risk, not a measured speed ranking.
+
+| Budget component | Estimate | Basis |
 | --- | --- | --- |
-| 01 | Four compact classes/enums and bounded token/result serialization; preserve task identity and JSON round-trip. | None |
-| 02 | Transition catalogue and Ready, Working, Validating, Integrating and Done kernel; reject every unnamed movement, expose disabled reasons. | 01 |
-| 03 | Validation substages, fault-to-Ready, hold/defer/resume and Done reopening; cover all legal source places and evidence invalidation. | 02 |
-| 04 | Store transaction, next numbered migration and claim-to-Working atomicity; journal/idempotency/fence/rollback checks. | 03 |
-| 05 | Existing API/client action adaptation and computed capabilities; compatible fields, auth and stale-edit checks. | 04 |
-| 06 | Worker/dispatcher/result wiring for Ready, Working and Validating, plus Working failure; reject stale/duplicate assignments and results. | 05 |
-| 07 | Check/review/rebase result wiring; all five substages, independent review, exact inputs and late-pass-after-failure check. | 06 |
-| 08 | Bundle freeze/exclusion/gate/publication wiring for Validating, Integrating and Done, plus Integrating failure; retain unknown publication and exact inclusion checks. | 07 |
-| 09 | Existing dependency/due/reconciliation/structural actions adapted; preserve generation, lineage, effects and hold/defer semantics. | 08 |
-| 10 | Board/count/next-work query and seven-column accessible workbench; global totals, badges and safe rendering. | 05, 09 |
-| 11 | Guarded workbench controls, dependency/evidence detail and shared-contract diagram; expected revisions and keyboard flow. | 10 |
-| 12 | Full transition/race coverage, two-project acceptance and migration/promotion handoff. | 11 |
+| Code generation, Luna | 65–95 min | Slices 01, 02, 10 and 11. |
+| Code generation, Sol | 165–265 min | Remaining eight slices. |
+| Independent review | 96–180 min | 8–15 minutes per task; separate Sol/Grok sessions as listed. |
+| Targeted test execution and inspection | 60–120 min | 5–10 minutes per task; no full combined gate per task. |
+| Correction allowance | 60–90 min | Approximately 25% of initial generation; additional failures require re-estimation. |
+| Final combined gate and bundle handling | 60–120 min | One combined candidate assumed; use actual required suite duration when known. |
+| **Total serial build budget** | **506–870 min (about 8.5–14.5 hours)** | Excludes unavailable capacity, new missing components and production promotion. |
+
+The current dependency chain is mostly serial, so extra author models do not divide this total by worker count. Some review and CPU tests can overlap later work after their prerequisite boundary is accepted, but the estimate does not assume those savings. Allow roughly one to two working days when qualified model slots and the existing component seams are available. Keep the earlier 30-minute slice target as a checkpoint rule; slices 04, 08, 09 and 12 may overrun it and should split at a real interface if needed. Re-estimate from actual generation, review and gate times after slices 01–03 instead of treating these ranges as observed performance.
 
 Every code task gets applicable checks and separate independent exact-head review. Integrate eligible reviewed tasks using the existing frozen-bundle process, in dependency order, at most 20 tasks per bundle. No task-specific PR or new delivery machinery is required. Reuse accepted controls/components rather than blocking slices on unfinished umbrella tasks. If a required component seam is absent, name the missing interface and split only that actual gap.
 
