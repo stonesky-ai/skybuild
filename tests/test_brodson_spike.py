@@ -650,3 +650,53 @@ def test_fake_http_total_deadline_is_persisted_across_restart(http_setup):
     assert restarted["consumed_generation"] == result["consumed_generation"]
     assert restarted["reserved_token_exposure"] == result["reserved_token_exposure"]
     assert json.loads((root / "attempts.json").read_text())["entries"] == state["entries"]
+
+
+def test_fake_http_shortened_deadline_survives_restart_and_cannot_be_extended(http_setup):
+    result = run_http(http_setup)
+    assert result["status"] == "prepared"
+    path = http_setup[2] / "attempts.json"
+    original = json.loads(path.read_text())["identity"]
+
+    shortened = run_http(http_setup, deadline_seconds=0.5)
+    assert shortened["status"] == "prepared"
+    after_shorten = json.loads(path.read_text())["identity"]
+    assert after_shorten["run_deadline_monotonic"] < original["run_deadline_monotonic"]
+    assert after_shorten["run_deadline_unix"] < original["run_deadline_unix"]
+
+    extended = run_http(http_setup, deadline_seconds=60)
+    assert extended["status"] == "prepared"
+    after_extend = json.loads(path.read_text())["identity"]
+    assert after_extend["run_deadline_monotonic"] == after_shorten["run_deadline_monotonic"]
+    assert after_extend["run_deadline_unix"] == after_shorten["run_deadline_unix"]
+
+
+def test_fake_http_expired_completed_prefix_is_not_renewed_by_wall_clock_rollback(
+        http_setup, monkeypatch):
+    import time
+    result = run_http(http_setup)
+    assert result["status"] == "prepared"
+    path = http_setup[2] / "attempts.json"
+    state = json.loads(path.read_text())
+    state["entries"] = state["entries"][:1]  # Completed discovery, generation still resumable.
+    expired_mono = time.monotonic() - 1
+    state["identity"]["run_deadline_monotonic"] = expired_mono
+    spike.write_result(path, spike.canonical(state))
+
+    monkeypatch.setattr(spike.time, "monotonic", lambda: expired_mono + 1)
+    monkeypatch.setattr(spike.time, "time", lambda: state["identity"]["run_deadline_unix"] - 1000)
+
+    def forbidden(request):
+        raise AssertionError("an expired resumed run must not dispatch after clock rollback")
+
+    resumed = run_http(http_setup, __import__("httpx").MockTransport(forbidden))
+    assert resumed["status"] == "stopped"
+    assert resumed["stop_reason"] == "total_wall_deadline_exhausted"
+    assert json.loads(path.read_text())["entries"] == state["entries"]
+
+
+def test_fake_http_rejects_journal_from_another_boot(http_setup, monkeypatch):
+    run_http(http_setup)
+    monkeypatch.setattr(spike, "_boot_id", lambda: "f" * 36)
+    with pytest.raises(spike.SpikeError, match="journal_boot_changed"):
+        run_http(http_setup)

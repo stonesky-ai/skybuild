@@ -221,3 +221,16 @@ The owner requested committing and pushing the recovered work. Jeltz's
 authenticated dispatcher was notified through Cord. Independent exact-head
 review and frozen-bundle integration remain with the dispatcher; this
 checkpoint does not claim either gate has passed.
+
+## Deadline recovery correction, 2026-10-09
+
+Independent review found that reconstructing a monotonic deadline from wall
+time could renew expired work after a clock rollback, and that a shortened
+deadline was not durable across another restart. The journal now records the
+monotonic deadline with the host boot ID, durably keeps the earliest observed
+deadline, and refuses reuse after reboot because the old monotonic epoch cannot
+be trusted. Regression coverage exercises deadline shortening, attempted
+extension, rollback with a completed discovery prefix, and boot change. The
+focused suite passes 93 tests. All checks use explicit `httpx.MockTransport`;
+no endpoint call or worker launch was made. Exact-head independent review and
+frozen-bundle integration remain pending.

@@ -376,6 +376,17 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
+def _boot_id():
+    """Identify the monotonic-clock epoch; fail closed after a host reboot."""
+    try:
+        value = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+    except OSError:
+        raise SpikeError("journal_boot_id_unavailable") from None
+    if len(value) != 36 or any(char not in "0123456789abcdef-" for char in value):
+        raise SpikeError("journal_boot_id_invalid")
+    return value
+
+
 def _fake_http_child(connection, transport, method, path, body, deadline_at):
     """Fixed owned child: stream, bound and sanitize before crossing IPC."""
     import httpx
@@ -529,22 +540,35 @@ class FakeHTTPJournal:
                 finally:
                     os.close(descriptor)
                 saved_identity = self.state.get("identity")
+                deadline_fields = {"run_deadline_unix", "run_deadline_monotonic", "run_deadline_boot_id"}
                 expected_identity = {key: value for key, value in identity.items()
-                                     if key != "run_deadline_unix"}
+                                     if key not in deadline_fields}
                 existing_identity = ({key: value for key, value in saved_identity.items()
-                                      if key != "run_deadline_unix"}
+                                      if key not in deadline_fields}
                                      if isinstance(saved_identity, dict) else None)
                 if (existing_identity != expected_identity or self.state.get("synthetic") is not True
                         or not isinstance(self.state.get("entries"), list)):
                     raise SpikeError("journal_identity_changed")
+                if saved_identity.get("run_deadline_boot_id") != identity.get("run_deadline_boot_id"):
+                    raise SpikeError("journal_boot_changed")
             saved_deadline = self.state["identity"].get("run_deadline_unix")
             requested_deadline = identity.get("run_deadline_unix")
+            saved_monotonic = self.state["identity"].get("run_deadline_monotonic")
+            requested_monotonic = identity.get("run_deadline_monotonic")
+            boot_id = identity.get("run_deadline_boot_id")
             if (type(saved_deadline) not in (int, float) or type(requested_deadline) not in (int, float)
                     or not 0 < saved_deadline < float("inf")
-                    or not 0 < requested_deadline < float("inf")):
+                    or not 0 < requested_deadline < float("inf")
+                    or type(saved_monotonic) not in (int, float) or not 0 < saved_monotonic < float("inf")
+                    or type(requested_monotonic) not in (int, float) or not 0 < requested_monotonic < float("inf")
+                    or not isinstance(boot_id, str) or len(boot_id) != 36):
                 raise SpikeError("journal_deadline_invalid")
-            self.deadline_at = time.monotonic() + max(
-                0, min(saved_deadline, requested_deadline) - time.time())
+            self.deadline_at = min(saved_monotonic, requested_monotonic)
+            tightened_unix = min(saved_deadline, requested_deadline)
+            if self.deadline_at != saved_monotonic or tightened_unix != saved_deadline:
+                self.state["identity"]["run_deadline_monotonic"] = self.deadline_at
+                self.state["identity"]["run_deadline_unix"] = tightened_unix
+                self.save()
             self.cursor = 0
         except BlockingIOError:
             os.close(self.lock)
@@ -670,7 +694,12 @@ def run_fake_http(manifest, recordings, transport, journal_root, *, authority,
     if not callable(count_tokens):
         raise SpikeError("tokenization_unknown")
     run_deadline_unix = min(run_deadline_unix, authority["expires_at"])
+    boot_id = _boot_id()
     identity = authority | {"run_deadline_unix": run_deadline_unix,
+                            "run_deadline_monotonic": min(
+                                run_deadline_mono,
+                                time.monotonic() + max(0, authority["expires_at"] - time.time())),
+                            "run_deadline_boot_id": boot_id,
                             "manifest_sha256": digest(canonical(manifest)), "origin": HTTP_ORIGIN,
                             "model": HTTP_MODEL, "limits": LIMITS,
                             "journal_root": str(Path(journal_root).resolve())}
