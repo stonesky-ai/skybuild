@@ -46,6 +46,7 @@
     create.reset(); edit.reset(); action.reset(); structure.reset();
     byId("structure-preview").textContent = "No plan previewed.";
     byId("task-list").replaceChildren(); byId("history").replaceChildren();
+    byId("lineage").replaceChildren();
     byId("task-count").textContent = "Not connected";
     byId("selection").textContent = "Select a task to view its definition and history.";
     controls();
@@ -122,6 +123,7 @@
     const path = `tasks/${encodeURIComponent(taskId)}`;
     const task = await request(path);
     const history = await request(`${path}/history?limit=100&offset=0`);
+    const lineage = await request(`${path}/lineage`);
     selected = task; stale = false;
     structuralPlan = null; byId("structure-preview").textContent = "No plan previewed.";
     byId("selection").textContent = `${task.task_id} · Revision ${task.revision}`;
@@ -133,6 +135,15 @@
     byId("edit-acceptance").value = JSON.stringify(task.acceptance_criteria, null, 2);
     byId("edit-architecture").value = JSON.stringify(task.architecture_refs, null, 2);
     const events = byId("history"); events.replaceChildren();
+    const links = byId("lineage"); links.replaceChildren();
+    if (!lineage.length) {
+      const item = document.createElement("li"); item.textContent = "No split or merge lineage."; links.append(item);
+    }
+    for (const edge of lineage) {
+      const item = document.createElement("li");
+      item.textContent = `${edge.source_task_id} → ${edge.target_task_id} (${edge.action})`;
+      links.append(item);
+    }
     for (const event of history) {
       const item = document.createElement("li"), summary = document.createElement("p");
       summary.textContent = `Revision ${event.revision} · ${event.actor} · ${event.operation} · ${event.created_at || event.at || ""} · ${event.reason || ""}`;

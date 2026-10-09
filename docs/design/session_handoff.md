@@ -18,6 +18,8 @@ The [structural workbench slice](implementation/structural_workbench_slice.md) n
 
 The [definition editor slice](implementation/definition_editor_slice.md) exposes acceptance criteria and architecture references in the workbench. JSON-array editing preserves embedded newlines and exact values across unrelated edits. Independent review caught and corrected an initially lossy line-based representation. This remains definition editing only; it does not fabricate acceptance, review or integration evidence. No live task authority changed.
 
+Task detail now displays immutable split/merge lineage links from the API. Independent review accepted the read-only display and focused browser regression. No live task authority changed.
+
 Saved 2026-10-08 after architecture revision A33 and the subsequent implementation authorization below. Resume from /home/kevin/my_code with sibling skybuild and skykeep checkouts. This is context, not a competing design plan.
 
 ## Committed checkpoint and immediate next task

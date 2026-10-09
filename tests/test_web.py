@@ -101,7 +101,9 @@ global.fetch = async (url, options) => {
   requests.push({url, options});
   const data = url.endsWith("/split") ? {children: [{task_id: "child"}]} :
     url.endsWith("/tasks/merge") ? {target: {task_id: "combined"}} :
-    url.includes("/history?") ? [] : url.includes("tasks?") ? [task] :
+    url.includes("/history?") ? [] : url.endsWith("/lineage") ?
+      [{source_task_id: " task ", target_task_id: "<child>", action: "split"}] :
+    url.includes("tasks?") ? [task] :
     url.endsWith("/tasks/other") ? other : task;
   return {ok: true, status: 200, json: async () => data};
 };
@@ -111,6 +113,8 @@ async function run() {
   get("project").value = " project "; get("token").value = "test-token";
   get("connection-form").listeners.submit({preventDefault() {}}); await tick();
   get("task-list").querySelectorAll()[0].listeners.click(); await tick();
+  assert.equal(get("lineage").children[0].textContent, " task  → <child> (split)");
+  assert.ok(requests.some(request => request.url.endsWith("/tasks/%20task%20/lineage")));
   assert.deepEqual(JSON.parse(get("edit-acceptance").value), ["one\ntwo"]);
   assert.deepEqual(JSON.parse(get("edit-architecture").value), ["ref\nsection"]);
   get("edit-title").value = "Renamed";
