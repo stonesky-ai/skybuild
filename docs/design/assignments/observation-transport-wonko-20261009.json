@@ -1,0 +1,39 @@
+{
+  "schema": "manual-work-brief-v1",
+  "assignment_id": "MWP-20261009-WONKO-OBSERVATION-013",
+  "task_id": "SKYBUILD-EXECUTION-CONTROLS",
+  "worker": "wonko",
+  "dispatcher": "pilot_dispatcher",
+  "branch": "task/wonko-observation-transport",
+  "owned_paths": [
+    "src/skybuild/api.py",
+    "src/skybuild/client.py",
+    "src/skybuild/observation_transport.py",
+    "tests/test_observation_transport.py",
+    "docs/design/implementation/observation_transport.md"
+  ],
+  "checks": [
+    "Source baseline: e85c22451a517bca94d780eca325f6f0fd4759ee, architecture A38 working contract and sections 3/8/9/16, implementation-plan area 5. The published commit containing this brief is the assignment base; do not substitute a later ref.",
+    "Read AGENTS.md, manual_worker_pilot.md and committed brief. Verify authenticated sender pilot_dispatcher, worker wonko, exact assignment/base/brief hash and scope. Use the existing protected token and public CA references; keep credentials out of artifacts.",
+    "Reuse Store.record_observation (observations.py:11), ObservationSpool.replay (observation_spool.py:264), existing API auth/error patterns and Client transport. Inspect through this checkout's CodeGraph first. Add no replacement store, queue or reporting framework.",
+    "Add POST /api/v1/projects/{project_id}/observations and Client.record_observation(project_id, body), returning the unchanged Store event. Use existing principal dependency and Store authorization. Preserve project scope, tasks:claim and reservation actor checks.",
+    "Require exactly event_id, task_id, attempt_id, claim_fence, component_id, source_id, boot_id, pid, process_start, source_sequence, observed_at, state and evidence_refs. Reject missing/extra fields and implicit type coercion before Store invocation.",
+    "Identifier fields and evidence references are strict strings using existing valid_identifier semantics, maximum 200 characters. claim_fence, pid and source_sequence are strict integers with 0 < value < 2**63; reject booleans, floats and numeric strings.",
+    "process_start is an unchanged nonblank string of at most 200 characters, without NUL. observed_at stays an offset-aware ISO string accepted by existing Store validation; reject naive/malformed/nonstring dates. Avoid datetime serialization or identity normalization drift.",
+    "Allow only running, waiting, unknown, exited, interrupted and result-reported states. evidence_refs is a list of at most eight opaque valid identifiers. Preserve order, body identity and existing size/error bounds; never accept completion or settlement states.",
+    "Preserve event-ID and identity/sequence deduplication, full returned identity/evidence, and HTTP409 conflicts. Do not require new generic idempotency/revision headers: immutable observation event/sequence already supply identity. Do not call observation_status or expose SELECT e.* reads.",
+    "Supply a small callable adapter for ObservationSpool.replay, in client.py or optional observation_transport.py. It accepts (project_id, packet), returns the exact event and preserves spool semantics. Keep global ClientError inheritance and behavior unchanged.",
+    "Translate HTTP409 ClientError locally into the existing DomainError conflict shape so replay retains conflict with status409. Other HTTP/transport failures, malformed acknowledgments and lost responses remain unknown or typed non409 failures; never discard pending evidence.",
+    "Use finite client timeouts and bounded retries; replay must resend the same event ID, sequence and packet, without generating a new attempt. The spool alone validates matching acknowledgment before deletion. Do not persist credentials, raw responses or exception text.",
+    "Add focused CPU tests for strict input types/bounds, auth and project scope, exact Client path/body/response, and the real Client-to-spool adapter. Exercise matching ack deletion, HTTP409 retention, unavailable/unknown retention and lost-response replay with unchanged identity.",
+    "Use fake API/HTTP transport and temporary private spool files. Add scratch PostgreSQL integration cases for real authorization, duplicate/conflicting events and retained CPU/effect exposure, using existing isolated fixtures. No live pilot task, pool or reservation may be created.",
+    "No Store, observation_spool.py, schema, runtime-role, CPU admission, permission-grant, launcher or model changes. Existing pilot workers lack tasks:claim: implement against isolated fixtures only; do not expand tokens or attempt live observation POSTs.",
+    "Own only listed paths; observation_transport.py is optional. Keep tests in the new focused file and one implementation note. If a required fix needs another path, stop affected work and report the specific dependency to the dispatcher instead of widening scope.",
+    "Use the task checkout's absolute src PYTHONPATH and verify the imported package path when borrowing an interpreter. Run focused tests at nice 10 with at least 8 GiB available memory. Do not run a full gate; parent runs one frozen combined gate after independent review.",
+    "Existing owner-approved interactive worker only. No daemon, additional worker/model start, endpoint inference/discovery, provider action, service/unit/timer start, deployment, task-authority cutover, paid profile/fallback or credential transfer is authorized.",
+    "Hard model-query cutoff is 2026-10-09T15:20:53Z, including nested calls. The 99% usage ceiling does not extend time or billing authority. Stop sooner if eligible approved subscription capacity is unavailable; preserve WIP, exact sources and a bounded resume handoff.",
+    "Commit and push the clean owned branch, report exact pushed head/checks/changed paths/risks/next action through the existing pinned result protocol, and wait for separate exact-head review. Open no task PR, merge nothing, and never claim receipt means task acceptance."
+  ],
+  "model_limit": "Existing approved interactive Wonko subscription only; no extra model/provider starts or paid fallback. Hard cutoff 2026-10-09T15:20:53Z; 99% usage ceiling does not renew time/billing authority.",
+  "next_action": "Wait for parent independent brief review, frozen-bundle publication and explicit dispatch clearance. After the published pinned REST assignment is received and verified, implement only this observation POST/client/spool transport slice in the owned branch. Preserve blockers and send the exact pushed result for independent review. This brief does not itself dispatch, wake or launch a worker."
+}
