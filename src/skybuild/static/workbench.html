@@ -32,7 +32,7 @@
         <section class="panel" aria-labelledby="tasks-title">
           <div class="section-heading"><h2 id="tasks-title">Tasks</h2><button id="refresh-tasks" type="button" disabled>Refresh tasks</button></div>
           <button id="reconcile-due" type="button" disabled>Reassess due deferrals</button>
-          <p class="hint">Shows up to 100 tasks. History shows up to 100 events.</p>
+          <p class="hint">Shows up to 100 tasks. History loads 100 events per page.</p>
           <p id="task-count">Not connected</p>
           <ul id="task-list" class="task-list"></ul>
         </section>
@@ -91,6 +91,7 @@
         <ul id="lineage" class="lineage"><li>No task selected.</li></ul>
         <h3>History</h3>
         <ol id="history" class="history"></ol>
+        <button id="load-more-history" type="button" disabled>Load more history</button>
       </section>
     </div>
   </main>

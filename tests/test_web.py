@@ -101,7 +101,9 @@ global.fetch = async (url, options) => {
   requests.push({url, options});
   const data = url.endsWith("/split") ? {children: [{task_id: "child"}]} :
     url.endsWith("/tasks/merge") ? {target: {task_id: "combined"}} :
-    url.includes("/history?") ? [] : url.endsWith("/lineage") ?
+    url.includes("/history?") ? (url.includes("offset=100") ? [{revision: 101, actor: "owner", operation: "updated"}] :
+      Array.from({length: 100}, (_, index) => ({revision: index + 1, actor: "owner", operation: "updated"}))) :
+    url.endsWith("/lineage") ?
       [{source_task_id: " task ", target_task_id: "<child>", action: "split"}] :
     url.includes("tasks?") ? [task] :
     url.endsWith("/tasks/other") ? other : task;
@@ -113,6 +115,11 @@ async function run() {
   get("project").value = " project "; get("token").value = "test-token";
   get("connection-form").listeners.submit({preventDefault() {}}); await tick();
   get("task-list").querySelectorAll()[0].listeners.click(); await tick();
+  assert.equal(get("history").children.length, 100);
+  assert.equal(get("load-more-history").disabled, false);
+  get("load-more-history").listeners.click(); await tick();
+  assert.equal(get("history").children.length, 101);
+  assert.equal(get("load-more-history").disabled, true);
   assert.match(get("full-task-record").textContent, /"task_id": " task "/);
   assert.match(get("full-task-record").textContent, /"acceptance_criteria": \[/);
   assert.equal(get("lineage").children[0].textContent, " task  → <child> (split)");

@@ -7,7 +7,7 @@
   const edit = byId("edit-form");
   const action = byId("action-form");
   const structure = byId("structure-form");
-  let token = "", project = "", selected = null, busy = false, stale = false, epoch = 0, controller = null, reconcileOffset = 0, structuralPlan = null;
+  let token = "", project = "", selected = null, busy = false, stale = false, epoch = 0, controller = null, reconcileOffset = 0, structuralPlan = null, historyOffset = 0, historyHasMore = false;
 
   class ApiError extends Error {
     constructor(status) { super(`Request failed (${status})`); this.status = status; }
@@ -27,6 +27,7 @@
     byId("refresh-tasks").disabled = !connected || busy;
     byId("reconcile-due").disabled = !connected || busy;
     byId("refresh-selected").disabled = !connected || busy || !selected;
+    byId("load-more-history").disabled = !connected || busy || !selected || !historyHasMore;
     for (const field of create.elements) field.disabled = !connected || busy;
     for (const field of edit.elements) field.disabled = !connected || busy || !selected;
     for (const id of ["edit-status", "edit-phase", "edit-blocker"]) byId(id).disabled = true;
@@ -40,7 +41,7 @@
   function disconnect() {
     epoch += 1;
     if (controller) controller.abort();
-    token = ""; project = ""; selected = null; stale = false; busy = false; reconcileOffset = 0; structuralPlan = null;
+    token = ""; project = ""; selected = null; stale = false; busy = false; reconcileOffset = 0; structuralPlan = null; historyOffset = 0; historyHasMore = false;
     byId("project").value = "";
     byId("token").value = "";
     create.reset(); edit.reset(); action.reset(); structure.reset();
@@ -120,6 +121,19 @@
     byId("task-count").textContent = `${tasks.length} tasks shown for ${project}`;
   }
 
+  function appendHistory(history) {
+    const events = byId("history");
+    for (const event of history) {
+      const item = document.createElement("li"), summary = document.createElement("p");
+      summary.textContent = `Revision ${event.revision} · ${event.actor} · ${event.operation} · ${event.created_at || event.at || ""} · ${event.reason || ""}`;
+      const details = document.createElement("details"), label = document.createElement("summary"), body = document.createElement("pre");
+      label.textContent = "Event details"; body.textContent = JSON.stringify(event, null, 2);
+      details.append(label, body); item.append(summary, details); events.append(item);
+    }
+    historyOffset += history.length;
+    historyHasMore = history.length === 100;
+  }
+
   async function selectTask(taskId) {
     const path = `tasks/${encodeURIComponent(taskId)}`;
     const task = await request(path);
@@ -136,7 +150,7 @@
     byId("edit-dependencies").value = task.dependencies.join("\n");
     byId("edit-acceptance").value = JSON.stringify(task.acceptance_criteria, null, 2);
     byId("edit-architecture").value = JSON.stringify(task.architecture_refs, null, 2);
-    const events = byId("history"); events.replaceChildren();
+    byId("history").replaceChildren(); historyOffset = 0; appendHistory(history);
     const links = byId("lineage"); links.replaceChildren();
     if (!lineage.length) {
       const item = document.createElement("li"); item.textContent = "No split or merge lineage."; links.append(item);
@@ -145,13 +159,6 @@
       const item = document.createElement("li");
       item.textContent = `${edge.source_task_id} → ${edge.target_task_id} (${edge.action})`;
       links.append(item);
-    }
-    for (const event of history) {
-      const item = document.createElement("li"), summary = document.createElement("p");
-      summary.textContent = `Revision ${event.revision} · ${event.actor} · ${event.operation} · ${event.created_at || event.at || ""} · ${event.reason || ""}`;
-      const details = document.createElement("details"), label = document.createElement("summary"), body = document.createElement("pre");
-      label.textContent = "Event details"; body.textContent = JSON.stringify(event, null, 2);
-      details.append(label, body); item.append(summary, details); events.append(item);
     }
     for (const button of byId("task-list").querySelectorAll("button")) {
       button.setAttribute("aria-current", String(button.dataset.taskId === task.task_id));
@@ -178,6 +185,11 @@
     await loadTasks(); notice(`${total} due task(s) sent for reassessment.${reconcileOffset ? " Continue scan for more tasks." : ""}`);
   }, true));
   byId("refresh-selected").addEventListener("click", () => perform(async () => { await selectTask(selected.task_id); notice("Task and history refreshed. Current revision loaded."); }));
+  byId("load-more-history").addEventListener("click", () => perform(async () => {
+    if (!selected || !historyHasMore) return;
+    const history = await request(`tasks/${encodeURIComponent(selected.task_id)}/history?limit=100&offset=${historyOffset}`);
+    appendHistory(history); notice(`${history.length} more history event(s) loaded.`);
+  }));
   create.addEventListener("submit", (event) => {
     event.preventDefault();
     perform(async () => {
