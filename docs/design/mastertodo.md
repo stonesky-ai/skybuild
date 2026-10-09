@@ -1,6 +1,6 @@
 # SkyBuild current tasks
 
-Authority: Git-backed planning ledger, revision A38, 2026-10-09. API cutover has not occurred. See [architecture section 4](architecture.md#4-temporary-task-authority-and-transition) for the lifecycle. Order below is proposed priority. The owner authorizes repository implementation and isolated validation toward the parallel MVP; live authority cutover, unqualified inference, paid starts and deployment retain separate controls.
+Authority: Git-backed planning ledger, revision A39, 2026-10-09. API cutover has not occurred. See [architecture section 4](architecture.md#4-temporary-task-authority-and-transition) for the lifecycle. Order below is proposed priority. The owner authorizes repository implementation and isolated validation toward the parallel MVP; live authority cutover, unqualified inference, paid starts and deployment retain separate controls.
 
 Each task ID lives in exactly one ledger. Related ledgers: [deferred](deferred.md), [alreadydone](alreadydone.md). These are new SkyBuild project records, not updates to the old SkyKeep queue. Until claims/fencing exist, coordinate any later authorized execution manually and serially.
 
@@ -62,7 +62,7 @@ Each task ID lives in exactly one ledger. Related ledgers: [deferred](deferred.m
 
 ## SKYBUILD-TASK-CUTOVER — Switch the three ledgers to REST authority
 
-- Status: in-progress (cutover guard and API authority migration implemented; no live task import). Phase: frozen-manifest reconciliation. Responsible: lead. Next action: finalize the exact 34-task dependency/workflow manifest and digest, complete independent exact-head review, then publish the candidate and use the guarded runtime promotion for migration 012. After verified migration, take and inspect a private PostgreSQL backup, run the atomic API-authority cutover, and verify task list/history/update after API restart. The full disposable PostgreSQL suite passed 1,034 tests, 1 skipped; no current 34-task import or live migration/cutover has run. Do not use the stale 28-task contract. At 2026-10-09, host-side TLS and owner authentication succeeded, but `/tasks` returned zero records; remote-device access and production migration/cutover remain unverified.
+- Status: in-progress (migration 012 implementation merged; runtime promotion and task import remain). Phase: freeze and reconcile current 38-task ledger. Responsible: lead. Next action: freeze all three current ledgers in a clean commit, independently reconcile the 38-task dependency/workflow mapping and import digest, and repeat the disposable PostgreSQL rehearsal. Then perform guarded migration 012 promotion, create and inspect the pinned private backup, and run the atomic API-authority import. Verify all 38 task IDs, history, update and restart through the authenticated API; then replace Markdown ledgers with one-way read-only exports. Do not use the stale 28- or 34-task contracts. The live database remains schema 11 with no authority receipt and zero tasks; remote-device access and runtime-role/cutover acceptance remain unverified.
 - Area: task authority. Dependencies: SKYBUILD-BOOTSTRAP.
 - Brief: define/rehearse a lossless importer, freeze at a commit/hash, validate all three ledgers and history, record one authority switch, then make file ledgers generated/read-only. No bidirectional sync.
 - Acceptance: missing or Markdown authority receipt denies task writes and claims; only explicit API authority permits them. IDs, dependencies, status counts, ordering, full briefs and evidence match; repeat import is safe; conflict import is refused; API/restart/import checks pass; live import and API authority switch are atomic; post-write recovery preserves API authority.
@@ -133,3 +133,30 @@ Each task ID lives in exactly one ledger. Related ledgers: [deferred](deferred.m
 - Acceptance: reproducible evidence builds/starts the pinned service in a disposable environment and restores covered tasks/history/Cord/artifacts; repeated replay is safe; missing/corrupt/uncommitted artifacts produce explicit recovery limits. Reconcile stops, approvals, usage, claims and live effects without automatically running tasks/models or duplicating completed effects. Keep application/production databases untouched during the drill.
 - A30 refinement: restore starts with a new authority epoch and quarantined old credentials/permits; reconcile surviving effects and current restrictions before resuming. Recover immutable task history without replaying its actions or rewriting historical entries.
 - Architecture: sections 4, 7–9 and 16. Plan: daily database backups and later recovery. ADR: [0027](../adr/hosting-recovery.md#adr-0027). Low priority, not a bootstrap or daily-task prerequisite.
+
+## SKYBUILD-PG-TEST-ISOLATION — Make schema-isolated PostgreSQL tests the standard
+
+- Status: proposed. Priority: P3. Area: test infrastructure. Dependencies: SKYBUILD-BOOTSTRAP's disposable PostgreSQL gate.
+- Brief: replace shared test data in PostgreSQL integration tests with a unique schema and non-superuser login role per test, each with a unique password and access limited to its own schema. Keep one disposable PostgreSQL container and test database set alive for the gate; create and remove per-test schemas and roles during the run, then remove the container and volumes. Sequence work through SKYBUILD-PG-TEST-SCHEMA-FIXTURE, SKYBUILD-PG-TEST-SUITE-MIGRATION, and SKYBUILD-PG-TEST-GATE-CUTOVER.
+- Acceptance: every PostgreSQL integration test uses its own schema and login credentials by default; tests cannot read or modify another test's schema; database-wide administrative cases use a clearly scoped control connection and cannot affect another test's data. The gate creates one container per run, cleans test schemas/roles and the container on success or failure, and completes faster than the current gate on comparable runs. Record comparable elapsed-time evidence and retain the normal unit-test path.
+- Parent of: SKYBUILD-PG-TEST-SCHEMA-FIXTURE, SKYBUILD-PG-TEST-SUITE-MIGRATION, SKYBUILD-PG-TEST-GATE-CUTOVER.
+
+## SKYBUILD-PG-TEST-SCHEMA-FIXTURE — Add per-test schema and login fixtures
+
+- Status: proposed. Priority: P3. Area: test infrastructure. Parent: SKYBUILD-PG-TEST-ISOLATION. Dependencies: SKYBUILD-BOOTSTRAP's disposable PostgreSQL gate.
+- Brief: define and implement function-scoped fixture lifecycle for unique schema, login role and password. Set the test connection's search path to its schema. Restrict role privileges to that schema, keep control credentials out of application connections, and reliably drop role/schema after each test, including failure paths. Prove cross-schema access is denied and teardown is safe after interrupted tests.
+- Acceptance: focused fixture tests prove distinct identities, schema-local object creation, denied cross-schema access, no superuser test login and cleanup after pass/fail. Migration helpers work in a selected schema. Document how tests requiring cluster-wide role or database administration receive narrowly scoped control access.
+- Next: SKYBUILD-PG-TEST-SUITE-MIGRATION.
+
+## SKYBUILD-PG-TEST-SUITE-MIGRATION — Move PostgreSQL tests onto isolated fixtures
+
+- Status: proposed. Priority: P3. Area: test infrastructure. Parent: SKYBUILD-PG-TEST-ISOLATION. Dependencies: SKYBUILD-PG-TEST-SCHEMA-FIXTURE.
+- Brief: convert Store, HTTP/runtime-role, importer and every other PostgreSQL integration test to per-test schema/login fixtures. Remove shared schema state and order dependencies. Refactor tests that currently create database-wide roles or databases to use explicit control operations while preserving their tested behavior and isolation. Keep non-PostgreSQL unit tests fast and independent of Docker.
+- Acceptance: repository inventory finds no PostgreSQL integration test relying on a shared schema or test order; repeated and parallel runs show no cross-test state leakage; applicable database tests pass with test logins restricted to their schemas. Administrative cases have explicit coverage and cleanup.
+- Next: SKYBUILD-PG-TEST-GATE-CUTOVER.
+
+## SKYBUILD-PG-TEST-GATE-CUTOVER — Make one-container isolated gate the default
+
+- Status: proposed. Priority: P3. Area: test infrastructure. Parent: SKYBUILD-PG-TEST-ISOLATION. Dependencies: SKYBUILD-PG-TEST-SUITE-MIGRATION.
+- Brief: update the disposable PostgreSQL gate and developer instructions so the standard PostgreSQL test run provisions one container for the run and delegates per-test schema/login setup to fixtures. Preserve live-database refusal, bounded resources, secret redaction, cleanup on every exit path and standalone unit-test use without PostgreSQL.
+- Acceptance: standard gate runs all PostgreSQL integration tests without skips, starts one container per gate, and removes its container, volumes, schemas and roles after both success and failure. End-to-end checks pass, and comparable same-host timing demonstrates lower elapsed time than the current gate. README commands and environment variables match the new fixture contract.

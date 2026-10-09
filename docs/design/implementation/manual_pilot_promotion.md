@@ -199,7 +199,7 @@ On each qualified worker, rerun read-only `fleet_preflight` with existing scoped
 
 ## Follow-on task-authority cutover
 
-Perform this only after the candidate with migration 012 is deployed and healthy, the exact 34-task manifest below has passed the disposable rehearsal, and the owner has stopped Markdown task edits and all other ledger writers. Keep the stable deployment checkout clean at the reviewed published candidate. The live transaction independently checks the PostgreSQL system identifier, retained database container, backup archive database name and pinned backup evidence before it inserts all 34 tasks and the API-authority receipt atomically.
+Perform this only after the candidate with migration 012 is deployed and healthy, the exact 38-task manifest below has passed the disposable rehearsal, and the owner has stopped Markdown task edits and all other ledger writers. Keep the stable deployment checkout clean at the reviewed published candidate. The live transaction independently checks the PostgreSQL system identifier, retained database container, backup archive database name and pinned backup evidence before it inserts all 38 tasks and the API-authority receipt atomically.
 
 ```sh
 export SKYBUILD_EXPECTED_DATABASE='skybuild_pilot'
@@ -208,14 +208,14 @@ nice -n 10 ./.venv/bin/python -m skybuild ledger-cutover \
   --ledger-dir docs/design \
   --contract docs/design/implementation/current_task_import.json \
   --apply-live \
-  --expected-import-sha256 576d23f09d444e6d684b62481536ec24cb78a3feaeec092947fcb51936376710 \
+  --expected-import-sha256 b25770457bc3c55d5697e67cb582a302ed39712b2693c3218e0079517376663a \
   --backup-file "$PRIVATE_DUMP" --backup-sha256 "$BACKUP_SHA256" \
   --backup-evidence "$PRIVATE_BACKUP_EVIDENCE" --backup-evidence-sha256 "$BACKUP_EVIDENCE_SHA256" \
   --expected-system-identifier "$CURRENT_DB_SYSTEM_ID" \
   --database-container-id "$CURRENT_DB_CONTAINER"
 ```
 
-After the transaction, verify the authenticated owner API returns exactly the 34 frozen task IDs and that `SKYBUILD-TASK-CUTOVER` history contains the `imported` event. Then use one idempotent owner update to set the next action to retire the Markdown ledgers; verify the updated revision and second history event. Preserve the workflow phase through its guarded task-action interface. Keep the retired Markdown snapshot in Git history and replace the old `mastertodo.md` contents with a generated/read-only retirement notice or API export in a subsequent reviewed change. Do not re-import the edited snapshot or add bidirectional synchronization.
+After the transaction, verify the authenticated owner API returns exactly the 38 frozen task IDs and that `SKYBUILD-TASK-CUTOVER` history contains the `imported` event. Then use one idempotent owner update to set the next action to retire the Markdown ledgers; verify the updated revision and second history event. Preserve the workflow phase through its guarded task-action interface. Keep the retired Markdown snapshot in Git history and replace the old `mastertodo.md` contents with a generated/read-only retirement notice or API export in a subsequent reviewed change. Do not re-import the edited snapshot or add bidirectional synchronization.
 
 ## Rollback boundary and remaining gaps
 
