@@ -97,6 +97,24 @@ new candidate. Keep output artifacts with the bundle handoff. Candidate review,
 the full combined gate, publication and confirmed per-task inclusion follow as
 separate operations under the existing policy.
 
+### Reviewed publication gate evidence
+
+`SKYBUILD-INTEGRATION-GATE-PINS` hardens the existing publication helper from
+source base `b9ee24ebd6d70bcd56e102c4af4017d5f49aef91`. Its default full gate
+receives an exclusive durable artifact, unique run ID, and exact candidate
+commit/tree pins. Acceptance requires terminal passing evidence for that same
+run and candidate, confirmed container cleanup, a clean unchanged commit/tree,
+and the existing remote-ref and published-tree checks. An empty commit during
+the gate invalidates acceptance even when the tree is identical.
+
+Use `--gate-artifact /absolute/private/evidence/run.json` to select the retained
+record. Its parent must already be an owned private directory outside the
+candidate. When omitted, the helper allocates a private evidence directory and
+reports the artifact path. Failed records are preserved and must not be reused.
+Custom validation-only gates still cannot publish, and do not accept this
+artifact option. This implements existing frozen-candidate acceptance; it does
+not qualify an atomic GitHub expected-base publisher.
+
 Reuse is deliberately narrow: SkyBuild `integrate_reviewed_pr.py` supplies the
 guarded exact-ref/detached-candidate mechanics and `_repo_guard` is reused
 directly. SkyKeep `383d3d375979c66b39df0f61c19a165957fecdcf`

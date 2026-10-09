@@ -15,10 +15,14 @@ Before reading a referenced file, confirm its path exists with `rg --files` or `
 
 After applying a patch or creating a file, verify the target exists and `git status` or `git diff` shows the expected change before relying on it; a tool response alone does not prove the write succeeded.
 
+Use a context-bounded patch for structural code edits. If a scripted replacement is necessary, assert its expected match count before writing; an unrestricted replacement can insert local variables into unrelated tests. Check each tool command's exit code before continuing dependent calls, including calls orchestrated in JavaScript.
+
 CodeGraph and Serena are navigation aids, not proof of absence. Confirm zero-caller or other absence claims with direct search before deleting code. Required tests and independent review still apply.
 
 When a task uses another checkout's virtual-environment interpreter, set `PYTHONPATH` to the task checkout's absolute `src` directory before running Python or pytest. An editable installation in the shared environment otherwise imports the other checkout, even when the shell runs in the task directory. Confirm `skybuild.__file__` resolves inside the intended task checkout before recording test evidence. Prefer the disposable gate's checkout-local `uv run` environment for the combined gate. Use the project interpreter for provisioning commands that need installed dependencies; a successful standard-library preflight does not prove system Python can provision the service. Check each prerequisite command's exit status before starting dependent services.
 
 For Git commands in another worktree, use the tool's `workdir` or `git -C /absolute/checkout`; a trailing directory is a pathspec, not a checkout selector. Search a known directory with `rg` globs instead of listing remembered filenames. Only pass individual paths after confirming them with `rg --files`. Before an API request to an unfamiliar route, inspect its declared route or client method; do not infer a read endpoint from a mutation endpoint.
+
+For guarded task actions, read the action-specific validator as well as the API input model before mutating state. The `ready` action rejects `next_action`; supply its reason and responsible owner, then read the returned revision/status before claiming. A failed transition is not evidence that the task is already ready.
 
 The skill-creator validator requires PyYAML, which is not in SkyBuild's project test environment. If that dependency is absent, run the validator through `uv run --no-project --with pyyaml python /absolute/path/to/quick_validate.py /absolute/skill/path`, using a writable task-owned `UV_CACHE_DIR`. Do not add the validator's dependency to SkyBuild runtime requirements.

@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from uuid import uuid4
 from _repo_guard import RepoGuardError, verify_skybuild, verify_skybuild_remote
 from _worktree_capacity import reserve_worktree_slots
 
@@ -96,26 +97,52 @@ def integrate(args):
     with reserve_worktree_slots(root, 1), tempfile.TemporaryDirectory(prefix="skybuild-pr-candidate-") as directory:
         candidate = Path(directory) / "checkout"
         added = False
+        artifact = None
         try:
             run(["git", "worktree", "add", "--detach", str(candidate), base], root)
             added = True
             run(["git", "-c", "user.name=SkyBuild candidate", "-c", "user.email=candidate@localhost",
                  "merge", "--no-ff", "--no-edit", head], candidate)
+            candidate_head = run(["git", "rev-parse", "HEAD"], candidate)
             tree = run(["git", "rev-parse", "HEAD^{tree}"], candidate)
+            run_id = "pr-" + str(args.pr) + "-" + uuid4().hex
+            if not args.gate_argv:
+                artifact = getattr(args, "gate_artifact", None)
+                if artifact is None:
+                    artifact = Path(tempfile.mkdtemp(prefix="skybuild-pr-gate-")) / "run.json"
+                artifact = artifact.absolute()
+            elif getattr(args, "gate_artifact", None) is not None:
+                raise RuntimeError("Gate artifacts require the default project gate")
             gate = args.gate_argv or [sys.executable, str(root / "scripts/disposable_pg_gate.py"),
-                                      "--checkout", str(candidate), "--min-available-gib", "6"]
+                                      "--checkout", str(candidate), "--min-available-gib", "6",
+                                      "--artifact", str(artifact), "--run-id", run_id,
+                                      "--expected-head", candidate_head, "--expected-tree", tree]
             gate = [word.replace("{checkout}", str(candidate)) for word in gate]
             gate_result = run_gate(gate, candidate)
+            if artifact is not None:
+                if (not isinstance(gate_result, dict) or gate_result.get("ok") is not True
+                        or gate_result.get("cleaned_up") is not True):
+                    raise RuntimeError("Project gate did not confirm success and cleanup")
+                durable = json.loads(artifact.read_text())
+                expected = {"schema": "skybuild.gate-run.v1", "run_id": run_id,
+                            "checkout": str(candidate), "head": candidate_head, "tree": tree,
+                            "phase": "terminal", "status": "passed", "cleanup": "confirmed",
+                            "ok": True, "exit_code": 0}
+                if not isinstance(durable, dict) or any(durable.get(key) != value for key, value in expected.items()):
+                    raise RuntimeError("Gate artifact differs from the passed candidate")
             if run(["git", "status", "--porcelain"], candidate):
                 raise RuntimeError("Gate modified the candidate checkout")
-            if run(["git", "rev-parse", "HEAD^{tree}"], candidate) != tree:
-                raise RuntimeError("Gate changed the candidate tree")
+            if (run(["git", "rev-parse", "HEAD"], candidate) != candidate_head
+                    or run(["git", "rev-parse", "HEAD^{tree}"], candidate) != tree):
+                raise RuntimeError("Gate changed the candidate head or tree")
             view()
             if remote_oid("refs/heads/" + args.base) != base or remote_oid(f"refs/pull/{args.pr}/head") != head:
                 raise RuntimeError("Remote refs changed during validation")
             result = {"ok": True, "merged": False, "pr": args.pr, "head": head, "base": base,
                       "expected_base": args.expected_base, "gate": gate_result,
-                      "candidate_tree": tree, "review_sha256": hashlib.sha256(evidence).hexdigest(),
+                      "candidate_head": candidate_head, "candidate_tree": tree,
+                      "gate_artifact": str(artifact) if artifact is not None else None,
+                      "review_sha256": hashlib.sha256(evidence).hexdigest(),
                       "atomic_expected_base": False}
             if args.merge:
                 run(["gh", "pr", "merge", str(args.pr), *gh_repo, "--merge", "--match-head-commit", head], root)
@@ -130,9 +157,18 @@ def integrate(args):
                 run(["git", "merge-base", "--is-ancestor", commit, "FETCH_HEAD"], root)
                 result.update(merged=True, published_commit=commit)
             return result
+        except (OSError, RuntimeError, ValueError, KeyError) as error:
+            if artifact is not None:
+                raise RuntimeError(str(error) + "; artifact=" + str(artifact)) from error
+            raise
         finally:
             if added:
-                run(["git", "worktree", "remove", "--force", str(candidate)], root)
+                try:
+                    run(["git", "worktree", "remove", "--force", str(candidate)], root)
+                except (OSError, RuntimeError) as error:
+                    if artifact is not None:
+                        raise RuntimeError(str(error) + "; artifact=" + str(artifact)) from error
+                    raise
 
 
 def main(argv=None):
@@ -143,6 +179,8 @@ def main(argv=None):
     parser.add_argument("--expected-head", required=True)
     parser.add_argument("--expected-base", required=True)
     parser.add_argument("--review-evidence", type=Path, required=True)
+    parser.add_argument("--gate-artifact", type=Path,
+                        help="Exclusive durable default-gate record in an external private directory; retained automatically when omitted")
     parser.add_argument("--repo")
     parser.add_argument("--remote", default="origin")
     parser.add_argument("--merge", action="store_true", help="Publish the validated merge (requires existing authority)")
