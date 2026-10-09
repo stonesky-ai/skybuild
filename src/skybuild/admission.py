@@ -98,6 +98,7 @@ class CPUAdmission:
             self._graph_lock(connection, project_id)
             self._cpu_lock(connection, project_id)
             connection.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))', ('skybuild:cpu-action:' + action_id,))
+            connection.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))', ('skybuild:cpu-attempt:' + attempt_id,))
             prior = connection.execute('SELECT * FROM cpu_reservations WHERE action_id = %s', (action_id,)).fetchone()
             if prior:
                 if prior['intent_hash'] != digest:
@@ -124,8 +125,14 @@ class CPUAdmission:
                 raise DomainError('capacity_conflict', 'CPU pool capacity exhausted', 409)
             if connection.execute('SELECT 1 FROM cpu_reservations WHERE attempt_id = %s', (attempt_id,)).fetchone():
                 raise DomainError('idempotency_conflict', 'CPU attempt identity already exists', 409)
-            connection.execute('INSERT INTO cpu_reservations (action_id, attempt_id, project_id, task_id, actor, claim_fence, task_revision, readiness_generation, generation, local_generation, units, intent_hash) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)',
-                               (action_id, attempt_id, project_id, task_id, principal.principal_id, claim_fence, expected_revision, readiness_generation, generation, local_generation, units, digest))
+            inserted = connection.execute('INSERT INTO cpu_reservations (action_id, attempt_id, project_id, task_id, actor, claim_fence, task_revision, readiness_generation, generation, local_generation, units, intent_hash) '
+                                          'SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s '
+                                          'WHERE EXISTS (SELECT 1 FROM task_claims WHERE project_id = %s AND task_id = %s '
+                                          'AND held AND holder = %s AND fence = %s AND task_revision = %s AND lease_until > clock_timestamp())',
+                                          (action_id, attempt_id, project_id, task_id, principal.principal_id, claim_fence, expected_revision, readiness_generation, generation, local_generation, units, digest,
+                                           project_id, task_id, principal.principal_id, claim_fence, expected_revision))
+            if inserted.rowcount != 1:
+                raise DomainError('claim_conflict', 'Ownership lease expired before CPU reservation', 409)
             after = connection.execute('SELECT * FROM cpu_reservations WHERE action_id = %s', (action_id,)).fetchone()
             self._cpu_event(connection, principal, project_id, 'reserve', 'Unredeemable reservation; no dispatch authorized', None, after)
             return _public(after)

@@ -799,6 +799,9 @@ class Store(Claims, CPUAdmission):
 
     @staticmethod
     def _require_no_effect_exposure(connection, project_id, task_id):
+        if connection.execute("SELECT 1 FROM cpu_reservations WHERE project_id = %s AND task_id = %s AND state = 'reserved' LIMIT 1",
+                              (project_id, task_id)).fetchone():
+            raise DomainError('capacity_conflict', 'Task has a held CPU reservation', 409)
         if connection.execute('SELECT 1 FROM task_claims WHERE project_id = %s AND task_id = %s AND held',
                               (project_id, task_id)).fetchone():
             raise DomainError('claim_conflict', 'Task ownership must be reconciled before mutation', 409)

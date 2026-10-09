@@ -1,5 +1,29 @@
 # SkyBuild
 
+CPU reservation scaffold (Store only): `configure_cpu_pool` and
+`set_cpu_local_control` persist separate owner/admin restrictions with expected
+generations. A newly configured project pool starts locally disabled. Both controls
+must be enabled at their current generations for `reserve_cpu`. Reservations bind
+global immutable action and attempt identities, the authenticated actor, task
+revision, assessed readiness generation and current claim fence. CPU units are
+positive integers in a finite, project-scoped pool; capacity cannot shrink below
+held units. Replaying an action returns its current state, including cancellation.
+
+These reservations are **unredeemable** and authorize no execution. There is no
+launcher, dispatch, redemption, HTTP route, model/provider/billing accounting or
+full architecture section 8 admission guarantee. Fleet, box, role and run controls,
+runtime authority and physical launch reconciliation remain unimplemented; future
+physical launch must remain denied until every applicable control is enforced.
+No migration, authority switch, worker start or deployment is implicit.
+
+Only explicit `cancel_cpu_reservation` releases units, and only where no effect
+history exists for the task. Current claim holders may cancel; owner/admin may
+cancel a never-dispatched reservation after lease expiry. Cancellation does not
+release the claim. Stop, timeout, lost contact, claim expiry, claim reconciliation
+and unknown effect observations never free CPU units. Held reservations block
+claim release/reconciliation and semantic task mutation. Control and reservation
+events share an append-only `cpu_journal` transaction with their state changes.
+
 SkyBuild is being built toward a running system that rebuilds and extends itself with parallel workers. The current code is the launch-free bootstrap: a PostgreSQL task service, append-only task and Cord history, durable messages, a shared HTTP client, explicit administrative commands, and a thin browser task workbench. It does not launch workers or switch the Markdown ledgers to API authority.
 
 The [architecture](docs/design/architecture.md) governs the [MVP sequence](docs/design/implementation_plan.md). The selected [bootstrap contract](docs/design/implementation/bootstrap.md) describes the current slice. [Session handoff](docs/design/session_handoff.md) records actual progress and remaining gates.
