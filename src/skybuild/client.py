@@ -18,7 +18,7 @@ class ClientError(Exception):
 
 class Client:
     def __init__(self, base_url: str, token: str, *, retries: int = 2, timeout: float = 10, transport: httpx.BaseTransport | None = None) -> None:
-        if not 0 <= retries <= 5 or not 0 < timeout <= 120:
+        if not isinstance(retries, int) or isinstance(retries, bool) or not 0 <= retries <= 5 or not 0 < timeout <= 120:
             raise ValueError("Retries must be 0–5 and timeout must be 0–120 seconds")
         if not token or "\n" in token or "\r" in token:
             raise ValueError("A bearer token is required")

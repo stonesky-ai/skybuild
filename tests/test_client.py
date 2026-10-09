@@ -251,3 +251,26 @@ def test_cli_ledger_manifest_needs_no_database_or_credentials(monkeypatch, tmp_p
     output = capsys.readouterr()
     assert not output.out
     assert "Operation failed" in output.err
+
+
+@pytest.mark.parametrize("retries", [True, False, 1.0, 0.5, "2", None, [], {}, -1, 6])
+def test_invalid_retries_fail_before_http_client_creation(monkeypatch, retries):
+    def unexpected_client(*args, **kwargs):
+        pytest.fail("Invalid retries must fail before creating an HTTP client")
+    monkeypatch.setattr("skybuild.client.httpx.Client", unexpected_client)
+    with pytest.raises(ValueError, match="Retries must be"):
+        Client("https://skybuild.test", "secret-token", retries=retries)
+
+
+@pytest.mark.parametrize("retries", [0, 1, 5])
+def test_valid_retry_boundaries_make_expected_attempts(monkeypatch, retries):
+    monkeypatch.setattr("skybuild.client.time.sleep", lambda _: None)
+    requests = []
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(503, json={"error": {"code": "unavailable"}})
+    with Client("https://skybuild.test", "secret-token", retries=retries,
+                transport=httpx.MockTransport(handle)) as client:
+        with pytest.raises(ClientError):
+            client.list_tasks("p")
+    assert len(requests) == retries + 1

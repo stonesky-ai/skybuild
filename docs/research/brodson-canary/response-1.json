@@ -1,0 +1,46 @@
+{
+  "latency_seconds": 0.861,
+  "response": {
+    "choices": [
+      {
+        "finish_reason": "stop",
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "if not isinstance(self.retries, int) or not 0 <= self.retries <= 5 or not 0 < self.timeout <= 120:\n    raise ValueError(\"Retries must be an integer between 0 and 5, and timeout must be between 0 and 120 seconds\")"
+        }
+      }
+    ],
+    "created": 1791523113,
+    "model": "qwen3.5-think",
+    "system_fingerprint": "b11371-99b95488c",
+    "object": "chat.completion",
+    "usage": {
+      "completion_tokens": 66,
+      "prompt_tokens": 147,
+      "total_tokens": 213,
+      "prompt_tokens_details": {
+        "cached_tokens": 3
+      }
+    },
+    "id": "chatcmpl-6i577N96blOh9ePrS49oVwGuMzbUIYdt",
+    "timings": {
+      "cache_n": 3,
+      "prompt_n": 144,
+      "prompt_ms": 82.868,
+      "prompt_per_token_ms": 0.5754722222222222,
+      "prompt_per_second": 1737.7033354250134,
+      "predicted_n": 66,
+      "predicted_ms": 582.307,
+      "predicted_per_token_ms": 8.95856923076923,
+      "predicted_per_second": 111.62496758582671
+    }
+  },
+  "prompt": "SkyBuild Python client constructor currently uses:\nif not 0 <= retries <= 5 or not 0 < timeout <= 120:\n    raise ValueError(\"Retries must be 0\u20135 and timeout must be 0\u2013120 seconds\")\nLater request code uses range(self.retries + 1). Tiny task: replace only retry validation so retries must be a Python integer (not bool) in inclusive 0..5. Invalid values including floats, strings, None, containers, bool must raise existing ValueError before constructing httpx.Client. Preserve timeout validation and existing message. Return only replacement if statement plus raise. No tools or shell.",
+  "request": {
+    "model": "qwen3.5-think",
+    "max_tokens": 512,
+    "temperature": 0,
+    "enable_thinking": false
+  }
+}
