@@ -111,6 +111,59 @@ def test_cli_credentials_never_appear_in_error_output(monkeypatch, capsys):
     assert "SECRET" not in output.err + output.out
 
 
+def test_cli_reconcile_due_is_bounded_and_reports_continuation(monkeypatch, capsys):
+    from skybuild.__main__ import main
+    monkeypatch.setenv("SKYBUILD_API_URL", "https://skybuild.test")
+    monkeypatch.setenv("SKYBUILD_TOKEN", "secret-token")
+    calls = []
+
+    def page(self, project_id, *, limit, offset):
+        calls.append((project_id, limit, offset))
+        return {"scanned": 2, "reassessed": [f"due-{offset}"], "next_offset": offset + 2}
+
+    monkeypatch.setattr(Client, "reconcile_due_deferrals", page)
+    assert main(["reconcile-due", "project", "--page-size", "2", "--max-pages", "2", "--offset", "10"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert calls == [("project", 2, 10), ("project", 2, 12)]
+    assert result == {"scanned": 4, "reassessed": ["due-10", "due-12"], "complete": False, "next_offset": 14}
+    assert main(["reconcile-due", "project", "--max-pages", "0"]) == 1
+    assert len(calls) == 2
+
+
+def test_cli_reconcile_due_stops_after_final_page(monkeypatch, capsys):
+    from skybuild.__main__ import main
+    monkeypatch.setenv("SKYBUILD_API_URL", "https://skybuild.test")
+    monkeypatch.setenv("SKYBUILD_TOKEN", "secret-token")
+    calls = []
+
+    def page(self, project_id, *, limit, offset):
+        calls.append(offset)
+        return {"scanned": 1, "reassessed": ["due"], "next_offset": None}
+
+    monkeypatch.setattr(Client, "reconcile_due_deferrals", page)
+    assert main(["reconcile-due", "project"]) == 0
+    assert calls == [0]
+    assert json.loads(capsys.readouterr().out)["complete"] is True
+
+
+def test_cli_reconcile_due_reports_confirmed_pages_after_later_failure(monkeypatch, capsys):
+    from skybuild.__main__ import main
+    monkeypatch.setenv("SKYBUILD_API_URL", "https://skybuild.test")
+    monkeypatch.setenv("SKYBUILD_TOKEN", "secret-token")
+
+    def page(self, project_id, *, limit, offset):
+        if offset:
+            raise ClientError("unavailable", "secret-token")
+        return {"scanned": limit, "reassessed": ["first"], "next_offset": limit}
+
+    monkeypatch.setattr(Client, "reconcile_due_deferrals", page)
+    assert main(["reconcile-due", "project", "--page-size", "2"]) == 1
+    output = capsys.readouterr()
+    assert json.loads(output.out) == {"scanned": 2, "reassessed": ["first"],
+                                     "complete": False, "next_offset": 2, "uncertain_page": True}
+    assert "secret-token" not in output.out + output.err
+
+
 def test_cli_ledger_manifest_needs_no_database_or_credentials(monkeypatch, tmp_path, capsys):
     from skybuild.__main__ import main
     for name in ("SKYBUILD_DSN", "SKYBUILD_EXPECTED_DATABASE", "SKYBUILD_TOKEN", "SKYBUILD_API_URL"):

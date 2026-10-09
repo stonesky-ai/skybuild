@@ -1,0 +1,7 @@
+# Bounded due-deferral CLI pass
+
+`skybuild reconcile-due PROJECT_ID` invokes the existing authenticated CPU-only API action to reassess date- or milestone-due deferrals. It makes at most 20 pages of 100 tasks by default; `--page-size`, `--max-pages` and `--offset` control a bounded pass and its continuation. It prints confirmed scanned and reassessed totals, whether the pass reached the end, and the next offset when more remains. The command does not launch an executor, infer readiness or schedule itself.
+
+Each page commits independently on the service. If a later page fails or its response is invalid, the CLI returns nonzero and prints the earlier confirmed totals plus the failed page's offset with `uncertain_page: true`. The failed page may have committed before its response was lost. Rerunning from that offset is safe for already resumed tasks because the service only acts on tasks still deferred; the immutable history remains authoritative. This is not an atomic all-project scan or a timer. The imported SkyBuild project still refuses task writes while Markdown is authoritative.
+
+Independent `workflow_review` found the initial partial-failure reporting gap and accepted the correction. Client/CLI regressions cover page bounds, continuation, terminal pages and a later failure without leaking token text. The full disposable PostgreSQL suite passed 137 tests with the existing Starlette TestClient deprecation warning.
