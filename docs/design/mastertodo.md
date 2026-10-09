@@ -45,6 +45,14 @@ Each task ID lives in exactly one ledger. Related ledgers: [deferred](deferred.m
 - Owner notification: tell the owner as soon as restricted database role, private API reachability, scoped credential and Cord round-trip checks make another laptop eligible for the manual pilot. Give the exact enrollment/start steps then. Managed automatic fleet admission still requires its separate fenced controls. At 2026-10-09 05:10 UTC, `wonko` was reachable by SSH and its separate clean `dev-002` SkyBuild checkout had dependencies installed; `wowbagger` remained offline. The controller still had no Tailscale HTTPS serve configuration, so authenticated relay and worker admission were not yet qualified.
 - Architecture: section 2. Plan: [manual worker pilot](implementation/manual_worker_pilot.md) in the pre-MVP parallel path.
 
+## SKYBUILD-CORD-WAIT — Wait for durable worker messages without model polling
+
+- Status: in-progress (owner-requested responsive worker communication, 2026-10-09). Phase: bounded REST wait implementation. Responsible: mailbox-wait author; lead owns integration. Next action: add optional bounded inbox waiting, validate arrival/timeout/revocation behavior, independently review and publish the exact task head after the REST pilot bundle.
+- Area: Cord notification. Dependencies: existing durable authenticated inbox and client; no task-authority cutover or worker-launch dependency.
+- Brief: let a worker hold a bounded inbox request open and return when a durable message arrives. Keep immediate reads as the default. CPU performs the wait; receiving a message grants no execution or model-launch authority. Preserve project scopes, recheck credentials and grants while waiting, bound request/client timeouts, and keep the API responsive to other requests. The one-shot CLI exits with messages or an empty timeout result so the caller controls the next action.
+- Acceptance: assignment arrival wakes a waiting request promptly; timeout returns an empty page; revocation or lost scope stops delivery; ordinary inbox semantics remain compatible; applicable tests and independent exact-head review pass. Disconnect/retry preserves durable mailbox contents without duplicate ownership.
+- Architecture: Cord and CPU observation boundaries in sections 3 and 9. The wait is notification, not a new queue or worker daemon.
+
 ## SKYBUILD-DAILY-DB-BACKUP — Commit a scheduled PostgreSQL dump daily
 
 - Status: proposed. Priority: normal. Area: database operations. Dependencies: SKYBUILD-BOOTSTRAP provides a usable dedicated SkyBuild PostgreSQL database.

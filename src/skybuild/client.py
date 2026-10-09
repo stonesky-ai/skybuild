@@ -49,7 +49,7 @@ class Client:
     def _path(project_id: str, suffix: str) -> str:
         return f"api/v1/projects/{Client._segment(project_id)}/{suffix}"
 
-    def request(self, method: str, path: str, *, body: dict | None = None, params: dict | None = None, idempotency_key: str | None = None, revision: int | None = None) -> Any:
+    def request(self, method: str, path: str, *, body: dict | None = None, params: dict | None = None, idempotency_key: str | None = None, revision: int | None = None, timeout: float | httpx.Timeout | None = None) -> Any:
         if httpx.URL(path).is_absolute_url or path.startswith("//"):
             raise ValueError("Requests must use relative service paths")
         headers = {}
@@ -59,7 +59,8 @@ class Client:
             headers["If-Match"] = str(revision)
         for attempt in range(self.retries + 1):
             try:
-                response = self.http.request(method, path, json=body, params=params, headers=headers)
+                response = self.http.request(method, path, json=body, params=params, headers=headers,
+                                             **({"timeout": timeout} if timeout is not None else {}))
             except httpx.TransportError:
                 if attempt == self.retries:
                     raise ClientError("unavailable", "SkyBuild service unavailable") from None
@@ -135,8 +136,17 @@ class Client:
     def send_message(self, project_id: str, body: dict, *, idempotency_key: str | None = None) -> dict:
         return self.request("POST", self._path(project_id, "cord/messages"), body=body, idempotency_key=idempotency_key)
 
-    def inbox(self, project_id: str, *, limit: int = 100, offset: int = 0) -> list:
-        return self.request("GET", self._path(project_id, "cord/inbox"), params={"limit": limit, "offset": offset})
+    def inbox(self, project_id: str, *, limit: int = 100, offset: int = 0, wait_seconds: int = 0) -> list:
+        if type(wait_seconds) is not int or not 0 <= wait_seconds <= 25:
+            raise ValueError("Inbox wait must be 0–25 whole seconds")
+        params = {"limit": limit, "offset": offset}
+        if wait_seconds:
+            params["wait_seconds"] = wait_seconds
+            timeout = httpx.Timeout(self.http.timeout)
+            timeout.read = max(timeout.read or 0, wait_seconds + 5)
+            return self.request("GET", self._path(project_id, "cord/inbox"), params=params,
+                                timeout=timeout)
+        return self.request("GET", self._path(project_id, "cord/inbox"), params=params)
 
     def message_action(self, project_id: str, message_id: str, action: str, body: dict | None = None, *, idempotency_key: str | None = None) -> dict:
         if action not in {"receipt", "handle", "reply"}:
