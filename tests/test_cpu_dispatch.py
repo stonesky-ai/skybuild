@@ -234,6 +234,52 @@ def test_foreign_proof_and_direct_release_rejected_by_database(store, actors):
     assert_held(store, operation)
 
 
+def test_two_running_operations_keep_separate_capacity_and_terminal_proofs(store, actors):
+    project, people = actors
+    runner, owner = CPUDispatch(store), people['owner']
+    operations = []
+    for task_id in ('parallel-first', 'parallel-second'):
+        request = setup(store, people, project, task_id, capacity=2)
+        store.reserve_cpu(people['worker'], project, **request)
+        operation = uuid4().hex
+        runner.prepare_fake(owner, project, request['action_id'], operation, input_digest='a' * 64)
+        operations.append(operation)
+    first, second = operations
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        started = list(executor.map(lambda operation: runner.start_fake(owner, project, operation), operations))
+    assert all(result['receipt']['state'] == 'running' for result in started)
+    assert all(result['receipt']['starts'] == 1 for result in started)
+    assert_held(store, first)
+    assert_held(store, second)
+
+    terminal = stop_and_settle(runner, owner, project, first)
+    first_proof = terminal['receipt']
+    assert first_proof['state'] == 'terminal'
+    assert persisted(store, first)[1]['state'] == 'released'
+    assert runner.reconcile_fake(owner, project, first) == terminal
+    assert runner.reconcile_fake(owner, project, second)['receipt'] == started[1]['receipt']
+    assert_held(store, second)
+    with store._connection() as connection:
+        assert connection.execute("SELECT sum(units) AS held FROM cpu_reservations "
+                                  "WHERE project_id = %s AND state = 'reserved'", (project,)).fetchone()['held'] == 1
+
+    # Even a genuine terminal proof from another operation cannot be transplanted.
+    # Commit the second stop intent first so rejection reaches identity validation,
+    # rather than merely detecting the absence of a stop request.
+    runner.request_fake_stop(owner, project, second)
+    with pytest.raises(DomainError) as caught:
+        with store._connection() as connection:
+            connection.execute("UPDATE cpu_fake_receipts SET process_identity = %s, "
+                               "reservation_hash = %s, state = 'terminal' WHERE operation_id = %s",
+                               (first_proof['process_identity'], first_proof['reservation_hash'], second))
+    assert isinstance(caught.value.__cause__, psycopg.errors.RaiseException)
+    assert 'Only a requested fake stop may create terminal proof' in str(caught.value.__cause__)
+    pending = runner.reconcile_fake(owner, project, second)
+    assert pending['state'] == 'stop-pending'
+    assert pending['receipt'] == started[1]['receipt']
+    assert_held(store, second)
+
+
 @pytest.mark.parametrize('boundary', ['prepare', 'start', 'stop', 'ack', 'settle'])
 def test_journal_failure_rolls_back_entire_transition(store, actors, monkeypatch, boundary):
     project, people = actors
