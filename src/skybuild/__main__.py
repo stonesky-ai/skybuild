@@ -17,6 +17,20 @@ def _environment(name: str) -> str:
     return value
 
 
+def _cord_payload(args: argparse.Namespace) -> dict:
+    if args.body_file is not None:
+        with args.body_file.open("r", encoding="utf-8") as stream:
+            raw = stream.read(262_145)
+    else:
+        raw = sys.stdin.read(262_145)
+    if len(raw.encode("utf-8")) > 262_144:
+        raise ValueError("Cord payload is too large")
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError("Cord payload must be a JSON object")
+    return payload
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="skybuild")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -47,6 +61,24 @@ def main(argv: list[str] | None = None) -> int:
         if command != "get":
             view.add_argument("--limit", type=int, default=100)
             view.add_argument("--offset", type=int, default=0)
+    inbox = commands.add_parser("cord-inbox", help="Read pending Cord messages for this credential")
+    inbox.add_argument("project_id")
+    inbox.add_argument("--limit", type=int, default=100)
+    inbox.add_argument("--offset", type=int, default=0)
+    for command in ("cord-send", "cord-reply"):
+        message = commands.add_parser(command, help="Send a Cord JSON message from a UTF-8 file or standard input")
+        message.add_argument("project_id")
+        if command == "cord-reply":
+            message.add_argument("message_id")
+        source = message.add_mutually_exclusive_group(required=True)
+        source.add_argument("--body-file", type=Path)
+        source.add_argument("--body-stdin", action="store_true")
+        message.add_argument("--idempotency-key")
+    for command in ("cord-receipt", "cord-handle"):
+        action = commands.add_parser(command, help="Acknowledge a Cord message transition")
+        action.add_argument("project_id")
+        action.add_argument("message_id")
+        action.add_argument("--idempotency-key")
     due = commands.add_parser("reconcile-due", help="Run one bounded CPU-only pass over due deferrals through the API")
     due.add_argument("project_id")
     due.add_argument("--page-size", type=int, default=100)
@@ -96,6 +128,20 @@ def main(argv: list[str] | None = None) -> int:
                     result = client.task_history(args.project_id, args.task_id, limit=args.limit, offset=args.offset)
                 else:
                     result = client.list_tasks(args.project_id, limit=args.limit, offset=args.offset)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+        if args.command.startswith("cord-"):
+            with Client(_environment("SKYBUILD_API_URL"), _environment("SKYBUILD_TOKEN")) as client:
+                if args.command == "cord-inbox":
+                    result = client.inbox(args.project_id, limit=args.limit, offset=args.offset)
+                elif args.command == "cord-send":
+                    result = client.send_message(args.project_id, _cord_payload(args),
+                                                 idempotency_key=args.idempotency_key)
+                else:
+                    action = args.command.removeprefix("cord-")
+                    body = _cord_payload(args) if action == "reply" else None
+                    result = client.message_action(args.project_id, args.message_id, action, body,
+                                                   idempotency_key=args.idempotency_key)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
         if args.command == "schedule-due":
