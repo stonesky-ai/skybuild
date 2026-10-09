@@ -44,7 +44,8 @@ def test_public_page_contains_no_private_tasks_and_assets_cannot_be_overridden()
         assert 'type="password"' in page
         assert 'id="task-list" class="task-list"></ul>' in page
         assert 'id="history" class="history"></ol>' in page
-        assert "ledgers remain authoritative" in page
+        assert "REST API is the task authority" in page
+        assert "does not launch workers or models" in page
         expected = client.get("/workbench/assets/workbench.js").content
         assert client.get("/workbench/assets/workbench.js?path=/etc/passwd&content_type=text/html").content == expected
         for path in (

@@ -1,5 +1,13 @@
 # SkyBuild session handoff
 
+## 2026-10-09 schema 012 and task-authority cutover checkpoint
+
+This is the current checkpoint; sections below preserve earlier evidence and may describe superseded state. PR 45's exact reviewed source `c216feab8d68b33733b597c775c418423fcc362f` passed the required combined disposable PostgreSQL gate (1,052 passed, 1 skipped, 1 warning) and was integrated to `dev-002` as `e0cc07c2a6fa72e1aff1bcc7b3bf93bcd2a443e2`. The pilot API now runs that source on schema 12; the runtime-role audit passed, and the API remained healthy after service replacement/restart.
+
+The owner-authorized atomic cutover imported the three frozen Markdown ledgers from commit `d79d2e1947d2c8e9edb577ab5f5093edfa3c94e3` and switched project `skybuild` to API authority. The exact source content digest is `307019c967c0531912be0441809da8d89ca506905ff63594976bf5463ba142c7`; import digest is `b25770457bc3c55d5697e67cb582a302ed39712b2693c3218e0079517376663a`. The authenticated owner API returns exactly 38 task IDs (8 in-progress, 12 proposed, 16 deferred, 2 done), with 41 dependencies, 38 workflow projections, 38 imported journal events and one authority receipt. `SKYBUILD-TASK-CUTOVER` has a guarded revision-2 next action; the update preserved its workflow phase. Do not re-import edited notices or restore the old ledger snapshot as a writer.
+
+The deployed private HTTPS API passed readiness, CA-pinned owner identity and scoped task access. Wonko completed a bounded Cord receipt/reply preflight; no task assignment, worker process or model was started by that check. The three former ledger files are being replaced on the current docs branch by retirement notices pointing to `/api/v1/projects/skybuild/tasks`; their frozen source remains in Git history. This pilot remains launch-free. Brodson is disabled by owner direction. The bounded memory sampler tracked host availability and owned Docker usage; process RSS was namespace-limited and could not account for other host sessions. No process or cache was stopped or cleared.
+
 ## 2026-10-09 schema 011 promotion checkpoint
 
 This checkpoint supersedes older runtime and pending-work statements below; historical evidence remains unchanged. The canonical task remains `SKYBUILD-SELF-BUILD-MVP`, supported by the manual worker pilot. Markdown ledgers still own tasks. No task-authority cutover or model-worker launch has occurred, and remote credit protection remains unqualified.
