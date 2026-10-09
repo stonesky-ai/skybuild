@@ -230,9 +230,11 @@ deadline was not durable across another restart. The journal now records the
 monotonic deadline with the host boot ID, durably keeps the earliest observed
 deadline, and refuses reuse after reboot because the old monotonic epoch cannot
 be trusted. Regression coverage exercises deadline shortening, attempted
-extension, rollback with a completed discovery prefix, boot change, and wall
-rollback during preflight. The wall/monotonic pair is captured before
-preflight, so later wall-clock changes cannot extend authority expiry. All
-checks use explicit `httpx.MockTransport`; the focused suite passes 94 tests.
+extension, rollback with a completed discovery prefix, boot change, wall
+rollback during preflight, and a startup sampling pause. The monotonic clock is
+sampled before wall time, making sampling delay shorten the derived authority
+budget. The clock pair is captured before preflight, so later wall-clock
+changes cannot extend authority expiry. All checks use explicit
+`httpx.MockTransport`; the focused suite passes 95 tests.
 No endpoint call or worker launch was made. Exact-head independent review and
 frozen-bundle integration remain pending.

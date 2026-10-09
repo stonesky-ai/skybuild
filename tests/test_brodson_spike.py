@@ -723,3 +723,34 @@ def test_fake_http_preflight_wall_rollback_does_not_extend_authority(http_setup,
     identity = json.loads((http_setup[2] / "attempts.json").read_text())["identity"]
     assert monotonic_start < identity["run_deadline_monotonic"] <= monotonic_start + 5.1
     assert identity["run_deadline_unix"] == http_setup[3]["expires_at"]
+
+
+def test_fake_http_startup_sampling_pause_cannot_extend_authority(http_setup, monkeypatch):
+    import time
+    from types import SimpleNamespace
+    wall_start = time.time()
+    monotonic_start = time.monotonic()
+    http_setup[3]["expires_at"] = wall_start + 5
+    clocks = {"wall": wall_start, "monotonic": monotonic_start, "first": True}
+
+    def read_monotonic():
+        value = clocks["monotonic"]
+        if clocks["first"]:
+            clocks["first"] = False
+            clocks["monotonic"] += 2
+            clocks["wall"] += 2
+        return value
+
+    def read_wall():
+        value = clocks["wall"]
+        if clocks["first"]:
+            clocks["first"] = False
+            clocks["monotonic"] += 2
+            clocks["wall"] += 2
+        return value
+
+    monkeypatch.setattr(spike, "time", SimpleNamespace(time=read_wall, monotonic=read_monotonic))
+    result = run_http(http_setup, deadline_seconds=60)
+    assert result["status"] == "prepared"
+    identity = json.loads((http_setup[2] / "attempts.json").read_text())["identity"]
+    assert identity["run_deadline_monotonic"] <= monotonic_start + 5.1

@@ -680,8 +680,8 @@ def run_fake_http(manifest, recordings, transport, journal_root, *, authority,
     import httpx
     if type(deadline_seconds) not in (float, int) or not 0 < deadline_seconds <= 60:
         raise SpikeError("invalid_total_wall_deadline")
-    started_wall = time.time()
     started_mono = time.monotonic()
+    started_wall = time.time()
     run_deadline_unix = started_wall + deadline_seconds
     run_deadline_mono = started_mono + deadline_seconds
     if type(transport) is not httpx.MockTransport:
