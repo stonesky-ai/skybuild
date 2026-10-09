@@ -1,12 +1,18 @@
 # SkyBuild implementation plan
 
-Derived from architecture revision A41, 2026-10-09. Status: MVP sequence refined; the launch-free task API and frozen-ledger cutover are complete for the SkyBuild project. Fleet activation and model execution remain separate boundaries. [architecture.md](architecture.md) governs. This plan supersedes the delivery section of the dated combined revision 2 plan.
+Derived from architecture revision A42, 2026-10-09. Status: MVP sequence refined; the launch-free task API and frozen-ledger cutover are complete for the SkyBuild project. Fleet activation and model execution remain separate boundaries. [architecture.md](architecture.md) governs. This plan supersedes the delivery section of the dated combined revision 2 plan.
 
 ## Planning discipline
 
 When architecture changes, update the affected work areas, dependencies, interfaces, acceptance and task records here in the same revision. Keep detail proportional to the next decision. Each major item should have a compact brief with exact scope, fixed interfaces, completion evidence and a bounded correction allowance when selected for implementation. Task IDs below originated in the frozen [ledger snapshot](mastertodo.md); this plan is not a second queue, and the API is now authoritative.
 
 The selected [bootstrap brief](implementation/bootstrap.md) fixes the first API/Store contract and manually assigned work scopes. Introduce migration or execution area plans when those boundaries are ready for sustained work and need independent review. Keep this parent plan as the sequence and boundary map, and link each area's governing architecture sections.
+
+## Petri workflow project (priority 5)
+
+Parent task: `SKYBUILD-PETRI`. [Compact design and simplicity review](petri_workflow.md), derived from architecture section 5. The owner requested design first. Exactly seven places replace the earlier many-phase proposal; validation substages travel as token evidence and confirmed V/I failures return to Ready. Preserve existing API task authority, journal, dependency, claim and effect contracts.
+
+Proposed sequence: four small domain classes and one guarded transition table; transactional Store and compatible API; existing worker/check/review/rebase/bundle wiring; seven-column workbench; transition and recovery acceptance. Twelve approximately 30-minute implementation slices are API tasks, all priority 5. Review, corrections and gates add time. No SNAKES runtime dependency is needed initially; retain it as the best-fit optional colored-net modeling library. Do not add a scheduler, database or event bus. Delivering this design does not implement or deploy it. Other accepted components keep their existing task identity and ownership; Petri adapts their seams rather than reimplementing their scope.
 
 ## MVP delivery target
 
