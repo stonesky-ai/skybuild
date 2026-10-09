@@ -299,6 +299,7 @@ def test_schema_010_role_audit_and_atomic_candidate_requalification(monkeypatch)
     migrations = sorted((Path(skybuild.__file__).parent / 'migrations').glob('*.sql'))
     old = [path for path in migrations if int(path.name.split('_', 1)[0]) <= 10]
     expansions = [path for path in migrations if int(path.name.split('_', 1)[0]) > 10]
+    candidate_version = int(expansions[-1].name.split('_', 1)[0])
     authority = next(path for path in migrations if path.name == '012_api_task_authority.sql')
     with psycopg.connect(base, autocommit=True) as cluster:
         cluster.execute(sql.SQL('CREATE DATABASE {}').format(sql.Identifier(target)))
@@ -404,7 +405,7 @@ def test_schema_010_role_audit_and_atomic_candidate_requalification(monkeypatch)
                 'missing table: cpu_fake_dispatches', 'missing table: cpu_fake_receipts']
         with psycopg.connect(dsn) as connection:
             upgrade(connection)
-        assert store.readiness() == {'ready': True, 'schema_version': 12}
+        assert store.readiness() == {'ready': True, 'schema_version': candidate_version}
         with psycopg.connect(dsn) as connection:
             assert runtime_role.audit_runtime_role(connection, target, role)['ok'] is True
 
