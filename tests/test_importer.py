@@ -205,7 +205,11 @@ def test_live_cutover_rehearsal_switches_authority_with_import(plan, fresh_store
             connection.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(database)))
 
 
-def test_current_34_task_cutover_rehearsal_serves_frozen_tasks(current_plan, fresh_store):
+def test_current_38_task_cutover_rehearsal_serves_frozen_tasks(current_plan, fresh_store):
+    assert current_plan["task_count"] == 38
+    assert current_plan["counts"] == {
+        "in-progress": 8, "proposed": 12, "deferred": 16, "done": 2,
+    }
     database = "skybuild_pilot"
     with psycopg.connect(fresh_store.dsn, autocommit=True) as connection:
         connection.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database)))
@@ -217,17 +221,17 @@ def test_current_34_task_cutover_rehearsal_serves_frozen_tasks(current_plan, fre
         store.provision_principal("current-cutover-owner", token, is_admin=True)
         result = cutover_live(store, LEDGERS, CURRENT_CONTRACT, current_plan["import_sha256"])
         assert result == {"result": "imported", "project_id": "skybuild",
-                          "task_count": 34, "authority": "api"}
+                          "task_count": 38, "authority": "api"}
         assert cutover_live(store, LEDGERS, CURRENT_CONTRACT, current_plan["import_sha256"])["result"] == "unchanged"
         with TestClient(create_app(store)) as client:
             headers = {"Authorization": "Bearer " + token}
             tasks = client.get("/api/v1/projects/skybuild/tasks", headers=headers)
-            assert tasks.status_code == 200 and len(tasks.json()) == 34
+            assert tasks.status_code == 200 and len(tasks.json()) == 38
             expected = {record["task_id"] for record in current_plan["records"]}
             assert {task["task_id"] for task in tasks.json()} == expected
             cutover_task = client.get("/api/v1/projects/skybuild/tasks/SKYBUILD-TASK-CUTOVER", headers=headers)
             assert cutover_task.status_code == 200
-            assert cutover_task.json()["next_action"].startswith("finalize the exact 34-task dependency/workflow manifest")
+            assert cutover_task.json()["next_action"].startswith("freeze all three current ledgers in a clean commit")
             history = client.get("/api/v1/projects/skybuild/tasks/SKYBUILD-TASK-CUTOVER/history", headers=headers)
             assert history.status_code == 200 and len(history.json()) == 1
             assert history.json()[0]["operation"] == "imported"
@@ -242,7 +246,7 @@ def test_current_34_task_cutover_rehearsal_serves_frozen_tasks(current_plan, fre
             assert [event["operation"] for event in revised_history.json()] == ["imported", "updated"]
         with store._connection() as connection:
             receipt = connection.execute("SELECT authority, task_count, status_counts FROM ledger_imports WHERE project_id = 'skybuild'").fetchone()
-            assert receipt["authority"] == "api" and receipt["task_count"] == 34
+            assert receipt["authority"] == "api" and receipt["task_count"] == 38
             assert receipt["status_counts"] == current_plan["counts"]
     finally:
         with psycopg.connect(fresh_store.dsn, autocommit=True) as connection:
