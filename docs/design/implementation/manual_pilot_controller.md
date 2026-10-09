@@ -6,14 +6,15 @@ Task: `SKYBUILD-MANUAL-WORKER-PILOT`. Source base: `77ede37b83515c3b461279116da2
 
 Docker Compose runs a dedicated `postgres:16` database and a SkyBuild API container. Its database data lives in an operator-owned directory outside Git. Docker publishes PostgreSQL only on `127.0.0.1:55432` and the API only on `127.0.0.1:8000`. Tailscale Serve adds private HTTPS after the local service and scope checks pass. The database container has 768 MiB and the API 512 MiB memory limits, PID limits and `unless-stopped` restart policies. The API has only the restricted runtime DSN; migrations and credential provisioning are explicit administrator steps.
 
-Run from a reviewed SkyBuild checkout with its virtual environment installed. Set an absolute, new state directory outside the checkout; do not use a SkyKeep path:
+Run from a clean SkyBuild checkout at the exact commit approved for deployment and published at `origin/dev-002` (or `origin/main` after promotion). Obtain that 40-character SHA from the reviewed integration record; do not derive it from the local checkout. Set an absolute, new state directory outside the checkout; do not use a SkyKeep path:
 
 ```sh
 export SKYBUILD_PILOT_STATE=/home/kevin/my_code/skybuild-pilot-state
-./.venv/bin/python scripts/manual_pilot_controller.py --checkout "$PWD"
+APPROVED_SHA='REPLACE_WITH_APPROVED_40_HEX_SHA'
+./.venv/bin/python scripts/manual_pilot_controller.py --checkout "$PWD" --expected-sha "$APPROVED_SHA" --published-ref refs/heads/dev-002
 ```
 
-The preflight is read-only. It requires 10 GiB available memory, leaving room above the owner's 8 GiB reserve, 4 GiB disk headroom, free loopback ports, local `postgres:16`, a free pilot container name, a running Tailscale client and an empty Serve configuration. A failed or unknown check stops setup. Inspect current Tailscale grants for the intended devices separately; local status cannot prove access policy.
+The preflight is read-only. It requires the exact published SHA and a clean checkout, 10 GiB available memory, leaving room above the owner's 8 GiB reserve, 4 GiB disk headroom, free loopback ports, local `postgres:16`, a free pilot container name, a running Tailscale client and an empty Serve configuration. A failed or unknown check stops setup. Inspect current Tailscale grants for the intended devices separately; local status cannot prove access policy. The image build context uses a root `.dockerignore` allowlist that sends only `pyproject.toml`, `src/`, the pilot Dockerfile and pinned requirements; ignored credentials and local checkout state are excluded.
 
 ## Explicit setup after approval
 
@@ -28,7 +29,7 @@ docker compose -f ops/manual-pilot/compose.yaml up -d --build api
 curl --fail --silent http://127.0.0.1:8000/health/ready
 ```
 
-`init-secrets` creates high-entropy administrator/runtime passwords and owner/worker tokens in a private mode-0700 directory. The PostgreSQL password file is mode 0644 because PostgreSQL's container user must read its mounted copy; its host parent directory is mode 0700. Every other secret file is mode 0600. The one-time provisioner refuses a preexisting `skybuild_pilot` database or `skybuild_pilot_runtime` role, verifies Compose ownership of the database container, applies checked-in migrations, installs and audits the restricted runtime grants, and creates `pilot_owner`, `wonko` and `wowbagger` principals. Workers receive only `tasks:read`, `cord:read`, `cord:send` and `cord:handle` on project `skybuild`. It writes `runtime.env` only after the audit passes. Never put secrets in shell arguments, Git, logs or Cord bodies. A partial setup needs inspection; do not rerun provisioning blindly.
+`init-secrets` creates high-entropy administrator/runtime passwords and owner, dispatcher and worker tokens in a private mode-0700 directory. The PostgreSQL password file is mode 0644 because PostgreSQL's container user must read its mounted copy; its host parent directory is mode 0700. Every other secret file is mode 0600. The one-time provisioner refuses a preexisting `skybuild_pilot` database or `skybuild_pilot_runtime` role, verifies the running Compose container, its local image, loopback port, mounted state and PostgreSQL system identity before any mutation, applies checked-in migrations, installs and audits the restricted runtime grants, and creates `pilot_owner`, `pilot_dispatcher`, `wonko` and `wowbagger` principals. `pilot_dispatcher` is non-admin and has only `cord:send` on `skybuild`. Workers receive only `tasks:read`, `cord:read`, `cord:send` and `cord:handle` on project `skybuild`. It writes `runtime.env` only after the audit passes. Never put secrets in shell arguments, Git, logs or Cord bodies. A partial setup needs inspection; do not rerun provisioning blindly.
 
 Verify the API container receives only `SKYBUILD_DSN` and `SKYBUILD_EXPECTED_DATABASE`. Check `/health/ready` and authenticated `/api/v1/me` locally. Then, after checking tailnet grants and confirming Serve is still empty, run:
 
@@ -45,7 +46,7 @@ Copy each worker's token file through the approved SSH channel to a user-owned m
 python -m skybuild.fleet_preflight --url https://jeltz.tail991ac1.ts.net --project skybuild --token-file <private-worker-token-path> --principal <wonko-or-wowbagger>
 ```
 
-The worker check verifies private TLS/DNS, readiness, exact identity, project grants and Cord inbox. Next send a harmless JSON pilot message from `pilot_owner` to each worker using `skybuild cord-send` with `--body-file`, let the worker receive it with `cord-inbox`, acknowledge with `cord-receipt` and `cord-handle`, and verify the owner sees the result. Use a unique idempotency key and record message IDs and exact outcomes. Only then dispatch the two committed, disjoint briefs under [manual worker pilot](manual_worker_pilot.md). The ledgers remain authoritative.
+The worker check verifies private TLS/DNS, readiness, exact identity, project grants and Cord inbox. Next send a harmless JSON pilot message from `pilot_owner` to each worker using `skybuild cord-send` with `--body-file`, let the worker receive it with `cord-inbox`, acknowledge with `cord-receipt` and `cord-handle`, and verify the owner sees the result. Use a unique idempotency key and record message IDs and exact outcomes. Use `pilot_dispatcher`'s token for the bounded manual assignment dispatch command, whose identity check requires exactly `cord:send`. Only then dispatch the two committed, disjoint briefs under [manual worker pilot](manual_worker_pilot.md). The ledgers remain authoritative.
 
 ## Restart, rollback and limits
 

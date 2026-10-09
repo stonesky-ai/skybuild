@@ -68,7 +68,7 @@ def init_secrets(state: Path) -> dict:
     secret_dir.mkdir(mode=0o700)
     if secret_dir.is_symlink() or secret_dir.stat().st_mode & 0o077:
         raise ValueError("Secret directory must be private")
-    names = ("admin-password", "runtime-password", "pilot_owner-token",
+    names = ("admin-password", "runtime-password", "pilot_owner-token", "pilot_dispatcher-token",
              *(f"{worker}-token" for worker in WORKERS))
     if any((secret_dir / name).exists() for name in names):
         raise ValueError("Existing pilot secrets require reconciliation; refusing partial overwrite")
@@ -81,15 +81,56 @@ def init_secrets(state: Path) -> dict:
     return {"initialized": True, "state_dir": str(state), "secret_names": list(names)}
 
 
-def _dedicated_container() -> None:
+def _dedicated_container(state: Path) -> str:
     result = subprocess.run(["docker", "container", "inspect", CONTAINER,
-                             "--format", "{{json .Config.Labels}}"],
+                             "--format", "{{json .}}"],
                             capture_output=True, text=True, check=False, timeout=10)
     if result.returncode != 0:
         raise ValueError("Pilot PostgreSQL container is unavailable")
-    labels = json.loads(result.stdout)
+    inspected = json.loads(result.stdout)
+    labels = inspected["Config"]["Labels"]
     if labels.get("com.docker.compose.project") != "skybuild-pilot" or labels.get("com.docker.compose.service") != "db":
         raise ValueError("Container is not owned by the SkyBuild pilot Compose project")
+    if not inspected["State"]["Running"] or inspected["State"].get("Health", {}).get("Status") != "healthy":
+        raise ValueError("Pilot PostgreSQL container is not healthy")
+    if inspected["Config"]["Image"] != "postgres:16":
+        raise ValueError("Pilot PostgreSQL container uses an unexpected image")
+    image = subprocess.run(["docker", "image", "inspect", "postgres:16", "--format", "{{.Id}}"],
+                           capture_output=True, text=True, check=False, timeout=10)
+    if image.returncode != 0 or inspected["Image"] != image.stdout.strip():
+        raise ValueError("Pilot PostgreSQL image does not match the local reviewed image")
+    expected_port = [{"HostIp": "127.0.0.1", "HostPort": "55432"}]
+    if (inspected["HostConfig"]["PortBindings"] != {"5432/tcp": expected_port}
+            or inspected["NetworkSettings"]["Ports"].get("5432/tcp") != expected_port):
+        raise ValueError("Pilot PostgreSQL does not own the expected loopback port")
+    data = state / "pgdata"
+    password = state / "secrets" / "admin-password"
+    if data.is_symlink() or password.is_symlink() or not data.is_dir():
+        raise ValueError("Pilot state mounts are not ordinary owned paths")
+    expected_mounts = {
+        (str(data.resolve()), "/var/lib/postgresql/data", True),
+        (str(password.resolve()), "/run/secrets/admin-password", False),
+    }
+    mounts = {(mount["Source"], mount["Destination"], mount["RW"])
+              for mount in inspected["Mounts"] if mount["Type"] == "bind"}
+    if mounts != expected_mounts or len(inspected["Mounts"]) != 2:
+        raise ValueError("Pilot PostgreSQL mounts do not match the requested state directory")
+    if (inspected["HostConfig"]["Memory"] <= 0 or inspected["HostConfig"]["Memory"] > 768 * 1024 ** 2
+            or inspected["HostConfig"]["PidsLimit"] <= 0 or inspected["HostConfig"]["PidsLimit"] > 128):
+        raise ValueError("Pilot PostgreSQL resource limits are missing")
+    identifier = subprocess.run(["docker", "exec", "--user", "postgres", CONTAINER, "psql",
+                                 "--no-psqlrc", "--tuples-only", "--no-align", "--dbname=postgres",
+                                 "--command=SELECT system_identifier FROM pg_control_system()"],
+                                capture_output=True, text=True, check=False, timeout=10)
+    if identifier.returncode != 0 or not identifier.stdout.strip().isdigit():
+        raise ValueError("Pilot PostgreSQL system identifier is unavailable")
+    return identifier.stdout.strip()
+
+
+def _require_same_cluster(connection, expected_identifier: str) -> None:
+    observed = connection.execute("SELECT system_identifier FROM pg_control_system()").fetchone()[0]
+    if str(observed) != expected_identifier:
+        raise ValueError("Loopback PostgreSQL listener is not the inspected pilot container")
 
 
 def _dsn(password: str, database: str, *, host: str, port: int) -> str:
@@ -99,7 +140,7 @@ def _dsn(password: str, database: str, *, host: str, port: int) -> str:
 
 def provision(state: Path) -> dict:
     state = _state_dir(state, create=False)
-    _dedicated_container()
+    expected_identifier = _dedicated_container(state)
     secret_dir = state / "secrets"
     admin_password = _read_secret(secret_dir / "admin-password", mode=0o644)
     runtime_password = _read_secret(secret_dir / "runtime-password", mode=0o600)
@@ -107,6 +148,7 @@ def provision(state: Path) -> dict:
     # The target starts absent. Any partial prior attempt requires human
     # reconciliation; rerunning must not rotate credentials or duplicate setup.
     with psycopg.connect(admin_postgres, connect_timeout=5, autocommit=True) as connection:
+        _require_same_cluster(connection, expected_identifier)
         if connection.execute("SELECT 1 FROM pg_database WHERE datname = %s", (DATABASE,)).fetchone():
             raise ValueError("Pilot database already exists; inspect before retry")
         if connection.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (ROLE,)).fetchone():
@@ -122,6 +164,8 @@ def provision(state: Path) -> dict:
     if not qualified["ok"]:
         raise ValueError("Restricted runtime role provisioning failed")
     store.provision_principal("pilot_owner", _read_secret(secret_dir / "pilot_owner-token", mode=0o600), is_admin=True)
+    store.provision_principal("pilot_dispatcher", _read_secret(secret_dir / "pilot_dispatcher-token", mode=0o600),
+                              grants={PROJECT: {"cord:send"}})
     scopes = {PROJECT: {"tasks:read", "cord:read", "cord:send", "cord:handle"}}
     for worker in WORKERS:
         store.provision_principal(worker, _read_secret(secret_dir / f"{worker}-token", mode=0o600), grants=scopes)
@@ -133,7 +177,7 @@ def provision(state: Path) -> dict:
     runtime_file = state / "runtime.env"
     _write_new(runtime_file, f"SKYBUILD_DSN={container_dsn}\nSKYBUILD_EXPECTED_DATABASE={DATABASE}\n", 0o600)
     return {"provisioned": True, "database": DATABASE, "runtime_role_audit": "passed",
-            "principals": ["pilot_owner", *WORKERS], "runtime_env": str(runtime_file)}
+            "principals": ["pilot_owner", "pilot_dispatcher", *WORKERS], "runtime_env": str(runtime_file)}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -143,7 +187,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         result = init_secrets(args.state_dir) if args.command == "init-secrets" else provision(args.state_dir)
-    except (OSError, ValueError, psycopg.Error, subprocess.TimeoutExpired):
+    except (OSError, ValueError, KeyError, TypeError, psycopg.Error, subprocess.TimeoutExpired):
         print(json.dumps({"ok": False, "reason": "Pilot setup failed; inspect owned state before retry"}))
         return 2
     print(json.dumps({"ok": True, **result}, sort_keys=True))

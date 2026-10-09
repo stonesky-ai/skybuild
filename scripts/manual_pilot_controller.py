@@ -6,6 +6,7 @@ workers. The matching operator runbook contains the explicit deployment steps.
 
 import argparse
 import json
+import re
 import shutil
 import socket
 import subprocess
@@ -42,7 +43,7 @@ def _port_free(port: int) -> bool:
     return True
 
 
-def preflight(checkout: Path) -> dict:
+def preflight(checkout: Path, expected_sha: str, published_ref: str) -> dict:
     """Return actionable checks without mutating the host or printing secrets."""
     checks: dict[str, dict] = {}
 
@@ -52,9 +53,20 @@ def preflight(checkout: Path) -> dict:
     checkout = checkout.resolve()
     git = _command("git", "-C", str(checkout), "rev-parse", "--show-toplevel")
     remote = _command("git", "-C", str(checkout), "remote", "get-url", "origin")
+    push_remote = _command("git", "-C", str(checkout), "remote", "get-url", "--push", "origin")
     add("checkout", git.returncode == 0 and Path(git.stdout.strip()) == checkout
-        and remote.stdout.strip() == "https://github.com/stonesky-ai/skybuild.git",
-        "Require exact SkyBuild checkout and origin")
+        and remote.stdout.strip() == "https://github.com/stonesky-ai/skybuild.git"
+        and push_remote.stdout.strip() == remote.stdout.strip(),
+        "Require exact SkyBuild checkout and matching origin fetch/push URLs")
+    head = _command("git", "-C", str(checkout), "rev-parse", "HEAD")
+    status = _command("git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=all")
+    published = _command("git", "-C", str(checkout), "ls-remote", "--exit-code", "origin", published_ref)
+    pinned = bool(re.fullmatch(r"[0-9a-f]{40}", expected_sha)) and published_ref in {
+        "refs/heads/dev-002", "refs/heads/main"}
+    add("published_clean_head", pinned and head.returncode == 0 and head.stdout.strip() == expected_sha
+        and status.returncode == 0 and not status.stdout
+        and published.returncode == 0 and published.stdout.strip() == f"{expected_sha}\t{published_ref}",
+        "Require clean checkout at the exact approved, published dev-002 or main SHA")
 
     available = _available_gib()
     add("memory", available >= MIN_AVAILABLE_GIB,
@@ -100,9 +112,11 @@ def preflight(checkout: Path) -> dict:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkout", type=Path, required=True)
+    parser.add_argument("--expected-sha", required=True)
+    parser.add_argument("--published-ref", choices=("refs/heads/dev-002", "refs/heads/main"), required=True)
     args = parser.parse_args(argv)
     try:
-        report = preflight(args.checkout)
+        report = preflight(args.checkout, args.expected_sha, args.published_ref)
     except (OSError, ValueError, subprocess.TimeoutExpired):
         report = {"ready_for_operator_setup": False, "checks": {}, "no_changes_made": True,
                   "error": "Preflight unavailable; inspect local dependencies"}
