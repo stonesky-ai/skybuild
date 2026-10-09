@@ -34,6 +34,7 @@ Each task ID lives in exactly one ledger. Related ledgers: [deferred](deferred.m
 - Area: pre-MVP parallel coding. Dependencies: usable SKYBUILD-BOOTSTRAP Cord and two disjoint committed task briefs; no dependency on automatic worker admission.
 - Brief: manually relay versioned, pinned assignments/results through Cord while Git-backed ledgers remain task authority. Start one interactive worker per box; each owns a branch/worktree, checks and pushed head. Main session coordinates exact-head independent review and frozen bundle integration.
 - Acceptance: both boxes exchange durable authenticated messages; two disjoint tasks overlap without duplicate ownership on lost/duplicate delivery; exact heads receive checks and separate review; accepted work reaches verified bundle publication. Controller remains usable. No worker daemon, second queue, direct task merge or implied live authority switch.
+- Owner notification: tell the owner as soon as restricted database role, private API reachability, scoped credential and Cord round-trip checks make another laptop eligible for the manual pilot. Give the exact enrollment/start steps then. Managed automatic fleet admission still requires its separate fenced controls. Read-only Tailscale status from `Jeltz` at 2026-10-09 05:03 UTC showed `wonko` and `wowbagger` offline; recheck before dispatch.
 - Architecture: section 2. Plan: [manual worker pilot](implementation/manual_worker_pilot.md) in the pre-MVP parallel path.
 
 ## SKYBUILD-DAILY-DB-BACKUP — Commit a scheduled PostgreSQL dump daily
