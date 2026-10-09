@@ -1,6 +1,6 @@
 # SkyBuild current tasks
 
-Authority: Git-backed planning ledger, revision A36, 2026-10-09. API cutover has not occurred. See [architecture section 4](architecture.md#4-temporary-task-authority-and-transition) for the lifecycle. Order below is proposed priority. The owner authorizes repository implementation and isolated validation toward the parallel MVP; live authority cutover, unqualified inference, paid starts and deployment retain separate controls.
+Authority: Git-backed planning ledger, revision A37, 2026-10-09. API cutover has not occurred. See [architecture section 4](architecture.md#4-temporary-task-authority-and-transition) for the lifecycle. Order below is proposed priority. The owner authorizes repository implementation and isolated validation toward the parallel MVP; live authority cutover, unqualified inference, paid starts and deployment retain separate controls.
 
 Each task ID lives in exactly one ledger. Related ledgers: [deferred](deferred.md), [alreadydone](alreadydone.md). These are new SkyBuild project records, not updates to the old SkyKeep queue. Until claims/fencing exist, coordinate any later authorized execution manually and serially.
 
@@ -74,6 +74,8 @@ Each task ID lives in exactly one ledger. Related ledgers: [deferred](deferred.m
 - Brief: provide outstanding-task status/phase, next action, owner, blockers and journal; edit description/scope/definition of done/considerations, request rework/reassessment, split/merge, set dependencies and defer by date or milestone. Follow the explicit state-machine flowchart and guarded transitions. Bootstrap records manual journaled state; execution controls later enable automatic reassessment and qualified model planning scans.
 - Acceptance: every action has a known next state or explicit conflict; journal is append-only with no edit/delete path, including by ADR. Concurrent changes preserve task IDs, lineage, dependency correctness, prior evidence and budget history. Changed inputs invalidate affected readiness; live/unknown effects are reconciled before replacement work. Date/milestone triggers reassess without granting execution authority. Basic controls work with no model available. Multi-person approval chains remain deferred.
 - Architecture: sections 5, 9 and 13; [workflow](task_workflow.md). Plan: area 3a. ADR: [0031](../adr/tasks.md#adr-0031).
+
+The local Workbench preview uses an always-signed-in fake `user1` account and fake task records. Real user accounts, browser sessions and the human-to-API authentication design are deferred under [SKYBUILD-USER-LOGIN](deferred.md#skybuild-user-login). The demo credentials do not authorize API or database access.
 
 ## SKYBUILD-LEGACY-MIGRATION — Extract and port every legacy build API writer
 

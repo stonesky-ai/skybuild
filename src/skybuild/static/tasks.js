@@ -7,6 +7,7 @@
   const formCreate = byId("create-form");
   const formDefer = byId("defer-form");
   const formResume = byId("resume-form");
+  const previewMode = document.documentElement.dataset.skybuildPreview === "true";
   const fakeTimestamp = "2026-10-01T15:20:00Z";
   const fakeCommit = {
     fake: true, number: 1, sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", committed_at: "2026-10-01T15:00:00Z",
@@ -33,7 +34,7 @@
   ];
   const fakeTasks = [fakeTask];
 
-  let token = "", project = "", tasks = [], selectedTask = null, selectedHistory = [], cursor = null;
+  let token = previewMode ? "local-preview" : "", project = previewMode ? "skybuild" : "", tasks = [], selectedTask = null, selectedHistory = [], cursor = null;
   let historyOffset = 0, historyHasMore = false, busy = false, epoch = 0;
 
   function notify(message, error = false) {
@@ -58,6 +59,10 @@
 
   function controls() {
     const connected = Boolean(token);
+    if (previewMode) {
+      byId("preview-session").hidden = false;
+      formConnection.hidden = true;
+    }
     byId("project").disabled = connected || busy;
     byId("token").disabled = connected || busy;
     byId("connect").disabled = connected || busy;
@@ -65,7 +70,7 @@
     byId("refresh-tasks").disabled = !connected || busy;
     byId("first-tasks").disabled = !connected || busy || cursor === null;
     byId("next-tasks").disabled = !connected || busy || tasks.length < 100 || tasks.some(task => task.fake);
-    for (const field of formCreate.elements) field.disabled = !connected || busy;
+    for (const field of formCreate.elements) field.disabled = !connected || busy || previewMode;
     const chosen = byId("defer-task").value;
     const task = tasks.find(item => item.task_id === chosen);
     const actionable = connected && !busy && task && !task.fake;
@@ -81,6 +86,7 @@
   }
 
   async function request(suffix, options = {}) {
+    if (previewMode) throw new Error("Local preview does not connect to the SkyBuild API.");
     const session = epoch;
     const headers = {Authorization: `Bearer ${token}`};
     if (options.body !== undefined) {
@@ -179,8 +185,10 @@
       rows.append(row);
     });
     const fake = tasks.some(task => task.fake);
-    byId("task-count").textContent = !token ? "Not connected"
-      : `${tasks.length} task${tasks.length === 1 ? "" : "s"} loaded for ${project}${fake ? " · API returned no tasks; showing fake preview records" : ""}`;
+    byId("task-count").textContent = previewMode
+      ? `${tasks.length} fake task${tasks.length === 1 ? "" : "s"} loaded · signed in as user1`
+      : !token ? "Not connected"
+        : `${tasks.length} task${tasks.length === 1 ? "" : "s"} loaded for ${project}${fake ? " · API returned no tasks; showing fake preview records" : ""}`;
     renderTaskPicker();
     controls();
   }
@@ -207,6 +215,12 @@
   }
 
   async function loadTasks(afterTaskId = null) {
+    if (previewMode) {
+      cursor = null;
+      tasks = fakeTasks;
+      renderTasks();
+      return;
+    }
     const suffix = `tasks?limit=100&by_id=true${afterTaskId ? `&after_task_id=${encodeURIComponent(afterTaskId)}` : ""}`;
     const result = await request(suffix);
     cursor = afterTaskId;
@@ -462,6 +476,12 @@
   }
 
   for (const tab of tabs) tab.addEventListener("click", () => switchTab(tab.dataset.tab));
+  if (previewMode) {
+    tasks = fakeTasks;
+    renderTasks();
+    void selectTask(fakeTask.task_id);
+    notify("Local fake session active as user1. No database or API writes enabled.");
+  }
   switchTab("list");
   formConnection.addEventListener("submit", event => {
     event.preventDefault();

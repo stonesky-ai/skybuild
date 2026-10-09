@@ -1,6 +1,6 @@
 # SkyBuild deferred tasks
 
-Authority: Git-backed planning ledger, revision A35, 2026-10-08. API cutover has not occurred. Stable IDs occur in only one ledger. Deferral means deliberate postponement, not implementation failure. See [architecture](architecture.md) and [mastertodo](mastertodo.md).
+Authority: Git-backed planning ledger, revision A36, 2026-10-09. API cutover has not occurred. Stable IDs occur in only one ledger. Deferral means deliberate postponement, not implementation failure. See [architecture](architecture.md) and [mastertodo](mastertodo.md).
 
 ## SKYBUILD-MULTIPROJECT — Concurrent autonomous operation across products
 
@@ -109,6 +109,15 @@ Authority: Git-backed planning ledger, revision A35, 2026-10-08. API cutover has
 - Revisit: core SkyBuild is useful and stable, and the owner selects a real multi-person collaboration requirement.
 - Acceptance: qualify the chosen chain and delegation/expiry behavior; scope or definition changes invalidate affected approvals, concurrent responses cannot skip required stages, and historical decisions remain append-only. No approval silently raises budgets, renews authority or bypasses required gates.
 - Architecture: section 5 and [task workflow](task_workflow.md). Plan: future team collaboration, outside initial delivery. ADR: [0031](../adr/tasks.md#adr-0031).
+
+## SKYBUILD-USER-LOGIN — Design and implement real Workbench user accounts
+
+- Status: deferred. Area: identity and access.
+- Brief: replace the Workbench local-preview demo identity (`user1` / `abcd1234`) with real SkyBuild user accounts, password verification, browser sessions, logout/revocation and account recovery. Review the browser-to-API contract, including whether the current bearer-token API remains behind a server session or changes. Preserve project and operation scopes, derive journal actors from authenticated identity, and keep worker credentials separate from human accounts.
+- Reason: owner wants a fake always-signed-in account while building the Workbench. Real credential and session design is deferred until a dedicated design review. The demo credentials and local fake tasks grant no API or database access.
+- Revisit: owner starts design review or before Workbench connects to live task data for routine use.
+- Acceptance: design review records session, password storage/reset, CSRF, cookie, revocation, audit-actor and API-token compatibility decisions; implementation replaces the demo identity without weakening project scopes or enabling unauthenticated task access. Browser task reads and writes require the approved user session, and worker/service credentials remain separately scoped.
+- Architecture: sections 3–5. Plan: identity design review before live Workbench access.
 
 ## SKYBUILD-QUALITY-GATES — Configurable complexity and compactness review gates
 

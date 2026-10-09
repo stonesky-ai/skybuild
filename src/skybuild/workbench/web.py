@@ -64,6 +64,7 @@ def install_workbench(app: FastAPI, *, dev_reload: bool = False) -> None:
         body = (STATIC / "tasks.html").read_text(encoding="utf-8")
         body = body.replace("<!--WORKBENCH_NAV-->", navigation.sidebar("tasks"))
         if dev_reload:
+            body = body.replace('<html lang="en">', '<html lang="en" data-skybuild-preview="true">')
             body = body.replace("</body>", _dev_script(_revision()) + "</body>")
         return HTMLResponse(body, headers={
             **HEADERS,
