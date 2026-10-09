@@ -148,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--token-file", type=Path, required=True)
     parser.add_argument("--worker", required=True)
     parser.add_argument("--checkout", type=Path, required=True)
+    parser.add_argument("--ca-file", type=Path)
     commands = parser.add_subparsers(dest="command", required=True)
     receive = commands.add_parser("receive", help="Save one verified assignment before receipt")
     receive.add_argument("--dispatcher", required=True)
@@ -159,8 +160,9 @@ def main(argv: list[str] | None = None) -> int:
     report.add_argument("--worktree", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        probe_private_api(args.url, args.project, args.token_file, args.worker)
-        with Client(args.url, _token_from_file(args.token_file), retries=0, trust_env=False) as client:
+        probe_private_api(args.url, args.project, args.token_file, args.worker, ca_file=args.ca_file)
+        with Client(args.url, _token_from_file(args.token_file), retries=0, trust_env=False,
+                    ca_file=args.ca_file) as client:
             if args.command == "receive":
                 output = receive_assignment(client, args.project, args.checkout, worker=args.worker,
                                             dispatcher=args.dispatcher, message_id=args.message_id,
