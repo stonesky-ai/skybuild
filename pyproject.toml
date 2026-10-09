@@ -10,7 +10,12 @@ requires-python = ">=3.12"
 dependencies = ["fastapi>=0.115,<1", "psycopg[binary]>=3.2,<4", "httpx>=0.28,<1", "uvicorn>=0.34,<1"]
 
 [project.optional-dependencies]
-test = ["pytest>=8,<10"]
+test = [
+    "pytest>=8,<10",
+    "playwright>=1.47,<2",
+    "pytest-playwright>=0.5,<1",
+    "httpx2>=2.13.1",
+]
 
 [project.scripts]
 skybuild = "skybuild.__main__:main"

@@ -1,0 +1,356 @@
+/* Colour is state, never decoration: green moves, amber waits, red is stopped, blue is a fact, grey is
+   idle or unread. Each theme names the same tokens; the page follows the system's theme until the
+   viewer picks one (the header's theme button sets data-theme on the root). */
+:root { color-scheme: light dark;
+  --ink: #f2f4f7; --panel: #ffffff; --sunken: #f6f8fa; --line: #d3d9e1; --rail: #e9edf2; --hair: #e7ebf0;
+  --text: #17212b; --dim: #566372; --faint: #8793a1; --title: #1d4fbf; --handle: #b9c2cd;
+  --good: #14744a; --warn: #8f5600; --bad: #b3261c; --info: #1d4fbf; --idle: #6b7785;
+  --good-bg: #e0f3e8; --warn-bg: #fcefd2; --bad-bg: #fde4e1; --info-bg: #e2ebfb; --idle-bg: #e8ecf1;
+  --stripe: #0f1f3008; --code: #eef1f5; --shade: #0f1f3024;
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #4a3aa7;
+  --fs-title: 20px; --fs-body: 14px; --fs-heading: 15px; --fs-sub: 12.5px;
+  --sans: system-ui, -apple-system, "Segoe UI", "Noto Sans", Ubuntu, Cantarell, "Helvetica Neue", sans-serif;
+  --mono: ui-monospace, "JetBrains Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace;
+  --cell-y: 1px; --row-line: 1.3; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --ink: #0e141b; --panel: #17202b; --sunken: #121a23; --line: #2a3643; --rail: #0a1016; --hair: #1f2a36;
+  --text: #dee7ef; --dim: #93a2b2; --faint: #6b7a8b; --title: #9fc2e0; --handle: #3a4b61;
+  --good: #7ee2a0; --warn: #f3c65b; --bad: #ff9a9a; --info: #84c5ff; --idle: #9fb0c3;
+  --good-bg: #16361f; --warn-bg: #3b2f10; --bad-bg: #43171c; --info-bg: #102c46; --idle-bg: #243040;
+  --stripe: #ffffff06; --code: #0e141b; --shade: #00000088;
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #9085e9; } }
+:root[data-theme="dark"] { color-scheme: dark;
+  --ink: #0e141b; --panel: #17202b; --sunken: #121a23; --line: #2a3643; --rail: #0a1016; --hair: #1f2a36;
+  --text: #dee7ef; --dim: #93a2b2; --faint: #6b7a8b; --title: #9fc2e0; --handle: #3a4b61;
+  --good: #7ee2a0; --warn: #f3c65b; --bad: #ff9a9a; --info: #84c5ff; --idle: #9fb0c3;
+  --good-bg: #16361f; --warn-bg: #3b2f10; --bad-bg: #43171c; --info-bg: #102c46; --idle-bg: #243040;
+  --stripe: #ffffff06; --code: #0e141b; --shade: #00000088;
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #9085e9; }
+:root[data-theme="light"] { color-scheme: light; }
+body { margin: 0; background: var(--ink); color: var(--text); font: var(--fs-body)/1.45 var(--sans); }
+body.comfortable { --cell-y: 5px; --row-line: 1.5; }
+a { color: var(--info); }
+code, pre, .mono { font-family: var(--mono); font-size: 0.93em; }
+:focus-visible { outline: 2px solid var(--info); outline-offset: 1px; }
+/* The shell: a rail of views on the left, the view beside it. The page is laid out for a desktop
+   screen (a 4k one first); it has no phone layout. */
+.shell { display: flex; min-height: 100vh; }
+#rail { flex: 0 0 76px; background: var(--rail); border-right: 1px solid var(--line); padding: 10px 0;
+  display: flex; flex-direction: column; gap: 2px; position: sticky; top: 0; align-self: flex-start;
+  height: 100vh; box-sizing: border-box; overflow-y: auto; }
+.rail-link { display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 8px 4px;
+  color: var(--dim); text-decoration: none; font-size: 11px; line-height: 1.15; text-align: center;
+  border-left: 3px solid transparent; }
+.rail-link svg { display: block; }
+.rail-link:hover { color: var(--text); background: var(--panel); }
+.rail-link.current { color: var(--title); border-left-color: var(--title); background: var(--panel); font-weight: 600; }
+.view { flex: 1 1 auto; min-width: 0; }
+header { padding: 12px 20px 10px; border-bottom: 1px solid var(--line); background: var(--panel); }
+header .bar { display: flex; align-items: baseline; justify-content: space-between; gap: 6px 24px; flex-wrap: wrap;
+  margin-top: 10px; }
+header .headline { display: flex; align-items: baseline; gap: 4px 14px; flex-wrap: wrap; min-width: 0; }
+header .tools { display: flex; align-items: center; justify-content: flex-end; gap: 4px 6px; flex-wrap: wrap;
+  color: var(--dim); font-size: var(--fs-sub); }
+header .tools p { margin: 0; }
+header .tools .refresh { display: flex; align-items: center; gap: 4px 6px; flex-wrap: wrap; }
+h1 { font-size: var(--fs-title); line-height: 1.2; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+header p { margin: 0; color: var(--dim); }
+#asks { font-size: var(--fs-body); }
+#meta { font-size: var(--fs-sub); font-variant-numeric: tabular-nums; }
+#countdown { font-variant-numeric: tabular-nums; min-width: 9.5em; text-align: right; }
+#status:empty { display: none; }
+/* The health strip: one line on every view. The colour is the state and the words say why. */
+.health { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 6px;
+  border: 1px solid var(--line); background: var(--sunken); font-weight: 600; font-size: 15px; }
+.health .dot { width: 12px; height: 12px; border-radius: 50%; background: var(--idle); flex: none; }
+.health.green { border-color: var(--good); background: var(--good-bg); color: var(--good); }
+.health.green .dot { background: var(--good); }
+.health.amber { border-color: var(--warn); background: var(--warn-bg); color: var(--warn); }
+.health.amber .dot { background: var(--warn); }
+.health.red { border-color: var(--bad); background: var(--bad-bg); color: var(--bad); }
+.health.red .dot { background: var(--bad); }
+.health.unknown { color: var(--dim); font-weight: 400; }
+.changed { margin: 0; padding: 4px 20px; color: var(--warn); font-size: var(--fs-sub); }
+.changed:empty { display: none; }
+#loading { margin: 0; padding: 24px 20px; color: var(--dim); }
+/* The boxes: twelve tracks on a wide screen, and each section takes the span its view gives it
+   (page.py, PAGES); two columns from 1000px; one column in a window under 1000px. A box is as tall as
+   what it shows: no box scrolls inside the page. */
+main { display: grid; gap: 14px; padding: 16px 20px 48px; align-items: start;
+  grid-template-columns: repeat(12, minmax(0, 1fr)); }
+.box { box-sizing: border-box; grid-column: 1 / -1; min-width: 0; max-width: 100%; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px 14px; }
+@media (min-width: 1000px) {
+  .box.span-3, .box.span-4, .box.span-5, .box.span-6 { grid-column: span 6; } }
+@media (min-width: 1700px) {
+  .box.span-3 { grid-column: span 3; } .box.span-4 { grid-column: span 4; } .box.span-5 { grid-column: span 5; }
+  .box.span-6 { grid-column: span 6; } .box.span-7 { grid-column: span 7; } .box.span-8 { grid-column: span 8; }
+  .box.span-9 { grid-column: span 9; } }
+.body { min-width: 0; }
+h2 { font-size: var(--fs-heading); font-weight: 650; margin: 0 0 10px; color: var(--text); }
+h3 { font-size: var(--fs-sub); margin: 12px 0 4px; color: var(--dim); font-weight: 650; }
+pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
+dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 14px; margin: 0; }
+dl > .error { grid-column: 1 / -1; }
+dt { color: var(--dim); }
+dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+/* A wide table scrolls sideways inside its box; it never scrolls up and down there. */
+.scroll { overflow-x: auto; max-width: 100%; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; vertical-align: top; padding: var(--cell-y) 12px var(--cell-y) 0; line-height: var(--row-line); border-bottom: 1px solid var(--hair); }
+/* Compact tables: times, durations and numbers never wrap; a long text cell is cut with an ellipsis,
+   its full text in the tooltip and one click away. A long table shows its first rows and a button
+   for the rest (10_core.js, ROWS_SHOWN). */
+td.when, td.dur, td.num { white-space: nowrap; }
+td.when, td.dur { font-variant-numeric: tabular-nums; }
+td.clip { max-width: 38ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: zoom-in; }
+td.clip.open { max-width: none; white-space: normal; overflow-wrap: anywhere; cursor: zoom-out; }
+td { white-space: nowrap; word-break: normal; overflow-wrap: normal; }
+td > dl, td > ul, td > div { white-space: normal; }
+th { color: var(--dim); font-weight: 600; font-size: var(--fs-sub); white-space: nowrap; position: sticky; top: 0; background: var(--panel);
+  cursor: pointer; z-index: 1; }
+th.sorted-asc::after { content: " \25b4"; } th.sorted-desc::after { content: " \25be"; }
+tbody tr:nth-child(even) { background: var(--stripe); }
+th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+span.when { font-variant-numeric: tabular-nums; cursor: help; text-decoration: underline dotted; text-underline-offset: 2px; }
+.more { display: flex; align-items: center; gap: 10px; margin: 6px 0 2px; color: var(--dim); font-size: var(--fs-sub); }
+/* A section that folds: a minus when open, a plus when shut. What is done and what is still to come
+   start shut; what is happening now starts open; the viewer's own choice is kept in the browser. */
+details.fold { margin: 6px 0; }
+dl > details.fold { grid-column: 1 / -1; }
+details.fold > summary { cursor: pointer; list-style: none; font-weight: 650; font-size: var(--fs-sub); color: var(--dim);
+  padding: 4px 0; display: flex; align-items: baseline; gap: 8px; border-bottom: 1px solid var(--hair); }
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: "+"; flex: none; width: 16px; height: 16px; line-height: 15px; text-align: center;
+  font-family: var(--mono); font-weight: 700; border: 1px solid var(--handle); border-radius: 3px; color: var(--text); }
+details.fold[open] > summary::before { content: "\2212"; }
+details.fold[open] > summary { color: var(--text); }
+details.fold > summary:hover { color: var(--text); }
+details.fold > summary .muted { font-weight: 400; }
+details.fold > :not(summary) { margin-top: 6px; }
+.columns { display: grid; gap: 4px 28px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 560px), 1fr)); align-items: start; }
+.charts { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-start; }
+.charts figure { margin: 0; flex: 1 1 320px; max-width: 560px; }
+.charts svg { width: 100%; height: auto; color: var(--text); }
+.charts figcaption { color: var(--dim); font-size: var(--fs-sub); }
+details.fold > .charts figure { max-width: 900px; }
+/* A chart's marks wear the series tokens and its words the text tokens, so both read in either theme.
+   The four series colours are one set per theme, checked against that theme's panel for contrast and
+   for telling apart with a colour-vision deficiency; the legend names each, so none is told by colour
+   alone. The state colours (good, warn, bad) are never a series. */
+svg.chart text { font-family: var(--sans); }
+svg.chart .tick, svg.chart .axis-title { fill: var(--dim); }
+svg.chart .note { fill: var(--text); }
+svg.chart .axis { stroke: var(--faint); stroke-width: 1; }
+svg.chart .grid { stroke: var(--hair); stroke-width: 1; }
+svg.chart .series { stroke: var(--series-1); }
+svg.chart .dot { fill: var(--series-1); stroke: var(--panel); stroke-width: 1.5; }
+svg.chart .median { stroke: var(--dim); stroke-width: 1; }
+svg.chart .seg-merges { stroke: var(--series-1); } svg.chart .seg-unit { stroke: var(--series-2); }
+svg.chart .seg-gate { stroke: var(--series-3); } svg.chart .seg-idle { stroke: var(--series-4); }
+svg.chart .seg-unmeasured { stroke: var(--handle); }
+ul { margin: 0; padding-left: 18px; }
+.muted { color: var(--faint); }
+.calm { margin: 4px 0; color: var(--dim); }
+.unanswered { color: var(--warn); }
+.topbtns { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.tip { cursor: help; color: var(--info); text-decoration: underline dotted; }
+#runpop { position: fixed; z-index: 50; display: none; pointer-events: none; padding: 8px 12px;
+  background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 5px;
+  box-shadow: 0 4px 14px var(--shade); font: 12px/1.5 var(--mono); white-space: nowrap; min-width: 34em; }
+#runpop .head { color: var(--dim); margin-bottom: 4px; }
+#runpop .F { color: var(--bad); } #runpop .P { color: var(--good); }
+.strip .P { color: var(--good); } .strip .F { color: var(--bad); font-weight: 700; } .strip { font-family: var(--mono); letter-spacing: 1px; }
+td.st-RED, td.st-RUNNING, td.st-passed, td.st-pending { font-weight: 600; white-space: nowrap; }
+td.st-done { color: var(--good); } td.st-next { color: var(--faint); } td.st-sent-back, td.st-cut-off { color: var(--warn); } td.st-reworked { color: var(--info); }
+td.st-done, td.st-next, td.st-sent-back, td.st-cut-off, td.st-reworked { font-weight: 600; white-space: nowrap; }
+td.st-RED { color: var(--bad); } td.st-RUNNING { color: var(--warn); } td.st-passed { color: var(--good); } td.st-pending { color: var(--faint); }
+tr.substeps > td { padding: 2px 0 10px 24px; border-bottom: 1px solid var(--line); }
+table.suites { font-size: var(--fs-sub); }
+.nowbar { margin: 0 0 8px; padding: 8px 12px; border: 1px solid var(--warn); border-radius: 5px; color: var(--warn); background: var(--warn-bg); }
+.nowbar div { margin: 2px 0; }
+/* Integrator now, the top: the status lines, and to their right the seams of the batch as a list.
+   In a box too slim for both (the half-width box between 1000px and 1700px) the list goes under the lines. */
+.now-top { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: flex-start; }
+.now-lines { flex: 1 1 420px; min-width: 0; }
+.now-lines > p { margin: 0 0 6px; }
+.batch-now { flex: 0 1 600px; max-width: 100%; box-sizing: border-box; padding: 8px 12px 10px;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--sunken); }
+.batch-now h3 { margin: 0 0 2px; font-size: var(--fs-heading); color: var(--text); }
+.batch-now p { margin: 0 0 4px; font-size: var(--fs-sub); }
+.batch-now p.label { color: var(--dim); font-weight: 600; }
+.batch-now ul { font-family: var(--mono); font-size: 0.9em; line-height: 1.5; overflow-wrap: anywhere; }
+.batch-now ul .muted { font-family: var(--sans); }
+.batch-now button { margin-top: 6px; }
+td.explained { cursor: help; }
+ul.meanings li { margin: 3px 0; max-width: 110ch; }
+/* The run plan: every step of one integration, its server tag, and a ticking ETA beside a running step. */
+.plan-view p.plan-head { margin: 0 0 4px; font-weight: 600; }
+table.plan td.srv { white-space: nowrap; }
+/* The step's name and its usual time wrap, so the table fits its box and the detail stays in view. */
+table.plan td.step { white-space: normal; min-width: 14em; }
+table.plan td.hist { white-space: normal; min-width: 12em; max-width: 24em; color: var(--dim); }
+span.srv-tag { font: 600 11px/1.6 var(--mono); padding: 0 5px; border-radius: 3px; color: var(--info);
+  background: var(--info-bg); text-transform: lowercase; }
+span.eta { margin-left: 4px; font: 600 12px/1 var(--mono); font-variant-numeric: tabular-nums; color: var(--info);
+  white-space: nowrap; }
+span.eta.overdue { color: var(--bad); }
+td.st-skipped, td.st-no-record, td.st-none { color: var(--faint); font-style: italic; white-space: nowrap; }
+td.st-left, td.st-blocked { color: var(--warn); font-weight: 600; white-space: nowrap; }
+ul.plan-items { margin: 2px 0; padding-left: 18px; font-size: var(--fs-sub); columns: 2 36em; }
+ul.plan-items li { margin: 1px 0; break-inside: avoid; white-space: normal; overflow-wrap: anywhere; }
+ul.plan-items span[class^="st-"] { font-weight: 600; }
+ul.plan-items .st-done { color: var(--good); } ul.plan-items .st-RED { color: var(--bad); }
+ul.plan-items .st-RUNNING { color: var(--warn); } ul.plan-items .st-next { color: var(--faint); }
+/* A button that reads as a link inside a line of text: the way in to a list. */
+button.linkish { padding: 0; margin: 0; border: 0; background: none; color: var(--bad); font-weight: 700;
+  text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+button.linkish:hover:not(:disabled) { color: var(--text); }
+/* The failed tests of a red run, over the page. */
+dialog.failpop { width: min(980px, 92vw); max-height: 86vh; box-sizing: border-box; overflow: auto; padding: 16px 20px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text);
+  box-shadow: 0 12px 40px var(--shade); white-space: normal; }
+dialog.failpop::backdrop { background: var(--shade); }
+dialog.failpop h3 { margin: 0 0 4px; font-size: var(--fs-title); color: var(--bad); }
+dialog.failpop ol.failures { margin: 8px 0 12px; padding-left: 28px; }
+dialog.failpop ol.failures li { margin: 0 0 8px; }
+dialog.failpop ol.failures code { overflow-wrap: anywhere; font-weight: 600; }
+dialog.failpop .reason { color: var(--dim); overflow-wrap: anywhere; }
+dialog.failpop .reason.muted { color: var(--faint); font-style: italic; }
+dialog.failpop .acts { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+dialog.failpop textarea.brief { display: block; width: 100%; box-sizing: border-box; margin-top: 10px; font: 12px/1.45 var(--mono);
+  color: var(--text); background: var(--sunken); border: 1px solid var(--line); border-radius: 4px; }
+.error { color: var(--bad); }
+.badge { border-radius: 3px; font-weight: 600; padding: 0 5px; font-size: var(--fs-sub); white-space: nowrap; }
+.badge-running, .badge-ok { background: var(--good-bg); color: var(--good); }
+.badge-ready, .badge-info { background: var(--info-bg); color: var(--info); }
+.badge-idle, .badge-unknown { background: var(--idle-bg); color: var(--idle); }
+.badge-quiet, .badge-blocked, .badge-warn { background: var(--warn-bg); color: var(--warn); }
+.badge-stuck, .badge-stopped, .badge-bad { background: var(--bad-bg); color: var(--bad); }
+button { font: inherit; color: var(--text); background: var(--sunken); border: 1px solid var(--handle);
+  border-radius: 4px; padding: 2px 10px; margin: 4px 0; cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--text); }
+button:disabled { opacity: 0.55; cursor: default; }
+button.small, .snapbtn { padding: 1px 9px; margin: 0; font-size: var(--fs-sub); line-height: 1.6; }
+.snapbtn:disabled { cursor: wait; }
+button.danger { background: var(--bad-bg); color: var(--bad); border-color: var(--bad); }
+.note { margin: 2px 0 10px; }
+.plan li { margin: 4px 0; }
+.plan label { cursor: pointer; }
+/* The build line: six stations on one track, in the order a row travels them. A station's ring is
+   its level; the station where work piles up is filled, tinted, and explained in the sentence below. */
+.line { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.stage { position: relative; min-width: 0; }
+.stage::before { content: ""; position: absolute; top: 14px; left: 0; right: 0; height: 2px; background: var(--line); }
+.stage:last-child::before { right: auto; width: 16px; }
+.stage-link { position: relative; display: block; padding: 34px 14px 10px 8px; color: inherit; text-decoration: none;
+  border-radius: 6px; min-width: 0; }
+.stage-link:hover { background: var(--sunken); }
+.stage-link::before { content: ""; position: absolute; top: 7px; left: 8px; width: 16px; height: 16px; box-sizing: border-box;
+  border-radius: 50%; background: var(--panel); border: 3px solid var(--idle); }
+.stage.lvl-ok .stage-link::before { border-color: var(--good); }
+.stage.lvl-amber .stage-link::before { border-color: var(--warn); background: var(--warn); }
+.stage.lvl-red .stage-link::before { border-color: var(--bad); background: var(--bad); }
+.stage-name { display: block; font-size: var(--fs-sub); font-weight: 650; color: var(--dim); }
+.stage-count { display: block; font-size: 38px; line-height: 1.1; font-weight: 650; letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums; }
+.stage-count.word { font-size: 24px; line-height: 1.75; letter-spacing: -0.01em; }
+.stage.lvl-amber .stage-count { color: var(--warn); } .stage.lvl-red .stage-count { color: var(--bad); }
+.stage.lvl-unknown .stage-count { color: var(--faint); }
+.stage-facts { list-style: none; padding: 0; margin: 2px 0 0; color: var(--dim); font-size: var(--fs-sub); }
+.stage-facts li { overflow-wrap: anywhere; }
+.stage.pile.lvl-amber .stage-link { background: var(--warn-bg); }
+.stage.pile.lvl-red .stage-link { background: var(--bad-bg); }
+.stage svg.bar { display: block; width: 100%; max-width: 150px; height: 22px; margin-top: 4px; }
+.pile-note { margin: 10px 0 0; padding: 6px 12px; border-left: 4px solid var(--warn); background: var(--sunken); border-radius: 0 6px 6px 0;
+  display: flex; flex-wrap: wrap; gap: 2px 16px; align-items: baseline; }
+.pile-note strong { color: var(--warn); }
+.pile-note.lvl-red { border-left-color: var(--bad); } .pile-note.lvl-red strong { color: var(--bad); }
+.pile-note.lvl-ok { border-left-color: var(--good); color: var(--good); font-weight: 600; }
+/* The boxes under the line: one tile per box, a square per row it holds. */
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap: 10px; margin-top: 14px; }
+.tile { border: 1px solid var(--line); border-left: 4px solid var(--idle); border-radius: 6px; padding: 8px 12px 10px;
+  background: var(--sunken); min-width: 0; }
+.tile.lvl-ok { border-left-color: var(--good); } .tile.lvl-amber { border-left-color: var(--warn); }
+.tile.lvl-red { border-left-color: var(--bad); }
+.tile-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.tile-name { font-weight: 650; font-size: 15px; }
+.pips { display: flex; flex-wrap: wrap; gap: 3px; margin: 6px 0 4px; min-height: 14px; }
+.pip { width: 14px; height: 14px; border-radius: 3px; background: var(--good); cursor: help; }
+.pip.stale { background: var(--bad); }
+.tile ul { list-style: none; padding: 0; margin: 0; color: var(--dim); font-size: var(--fs-sub); }
+.tile li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tile li.held { color: var(--text); }
+.tile .tile-note { white-space: normal; overflow-wrap: anywhere; }
+.tile.lvl-amber .tile-note { color: var(--warn); } .tile.lvl-red .tile-note { color: var(--bad); }
+/* Health flags: one block per flag, the colour its level, then the cause, the fix and the command. */
+.flag { margin: 0 0 8px; padding: 6px 10px; border-left: 3px solid var(--warn); background: var(--sunken); border-radius: 0 5px 5px 0; }
+.flag.red { border-left-color: var(--bad); }
+.flag strong { display: block; }
+.flag .cause { color: var(--dim); overflow-wrap: anywhere; }
+.flag .fix { color: var(--text); }
+.command { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+.command code { background: var(--code); border: 1px solid var(--hair); padding: 1px 6px; border-radius: 3px; overflow-wrap: anywhere; }
+table.alarms td { vertical-align: middle; }
+/* Barriers: one line each, the state first. */
+.barriers { list-style: none; padding: 0; margin: 0; }
+.barriers li { display: grid; grid-template-columns: 5.5em minmax(0, 1fr); gap: 2px 10px; padding: 3px 0; border-bottom: 1px solid var(--hair); }
+.barriers li:last-child { border-bottom: 0; }
+.barriers .what { font-weight: 600; margin-right: 10px; }
+.barriers .detail { color: var(--dim); font-size: var(--fs-sub); overflow-wrap: anywhere; }
+.usage-row { margin: 0 0 8px; }
+.usage-row svg.bar { display: block; width: 100%; max-width: 480px; height: 12px; }
+svg.bar.landing { display: block; width: 100%; max-width: 560px; height: 84px; }
+svg.bar .track { stroke: var(--line); } svg.bar .fill-good { stroke: var(--good); } svg.bar .fill-warn { stroke: var(--warn); }
+svg.bar .fill-bad { stroke: var(--bad); } svg.bar .mark { stroke: var(--text); }
+.landing-days { columns: 2 12em; list-style: none; padding: 0; color: var(--dim); font-size: var(--fs-sub);
+  font-variant-numeric: tabular-nums; }
+/* The jump list: "/" opens it over the page. */
+.palette { position: fixed; top: 12vh; left: 50%; transform: translateX(-50%); width: min(560px, 92vw); z-index: 60;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 30px var(--shade); padding: 8px; }
+.palette[hidden] { display: none; }
+.palette input { width: 100%; box-sizing: border-box; font: inherit; padding: 6px 8px; color: var(--text);
+  background: var(--ink); border: 1px solid var(--line); border-radius: 4px; }
+.palette ul { list-style: none; padding: 0; margin: 6px 0 0; }
+.palette li { padding: 4px 8px; border-radius: 4px; cursor: pointer; }
+.palette li.chosen, .palette li:hover { background: var(--sunken); }
+/* The metered-endpoint banner. Armed, it is a quiet line; firing, it is the
+   first thing on the page and it flashes, because its whole job is to be seen
+   from across a room by someone who is paying by the hour. The integrator's
+   lease is one line beside it: the health strip already says when it is stale. */
+#alarm:empty { display: none; }
+#alarm { padding: 8px 20px; border-bottom: 1px solid var(--line); }
+#alarm .integrator-lease { margin: 0; font-size: var(--fs-sub); display: flex; gap: 4px 12px; flex-wrap: wrap; }
+#alarm .integrator-lease.fresh { color: var(--good); }
+#alarm .integrator-lease.stale { color: var(--warn); }
+#alarm .integrator-lease.absent, #alarm .integrator-lease.unreadable { color: var(--bad); }
+#alarm .integrator-lease span { color: var(--dim); }
+#alarm .armed { color: var(--dim); margin: 0; font-size: var(--fs-sub); }
+#alarm .fire { margin: 6px 0; padding: 18px 16px; border-radius: 8px; text-align: center;
+  background: #43171c; border: 3px solid #ff6b6b; animation: alarmflash 1s steps(1) infinite; }
+#alarm .fire .headline { display: block; font-size: 40px; line-height: 1.1; font-weight: 700;
+  letter-spacing: 1px; color: #fff; }
+#alarm .fire .why { display: block; margin-top: 8px; font-size: 15px; color: #ffd9d9; }
+@keyframes alarmflash {
+  0%   { background: #43171c; border-color: #ff6b6b; }
+  50%  { background: #b3121f; border-color: #fff0f0; }
+  100% { background: #43171c; border-color: #ff6b6b; }
+}
+@media (prefers-reduced-motion: reduce) { #alarm .fire { animation: none; } }
+/* The todo service's warnings: the first thing on the page, one red block per
+   problem, each naming what to change. No warning, no block, nothing shown. */
+#todo-warnings:empty { display: none; }
+#todo-warnings { padding: 10px 20px; border-bottom: 1px solid var(--line); }
+#todo-warnings .todo-warning { margin: 0 0 8px; padding: 10px 14px; border-radius: 6px;
+  background: #43171c; border: 2px solid #ff6b6b; color: #ffd9d9; }
+#todo-warnings .todo-warning:last-child { margin-bottom: 0; }
+#todo-warnings .todo-warning strong { display: block; font-size: 16px; color: #fff; }
+/* Print view (the button, and the printer): no rail, no buttons, every box one column wide, light. */
+body.print #rail, body.print .tools, body.print .changed, body.print .more button { display: none; }
+body.print .box { grid-column: 1 / -1; break-inside: avoid; }
+@media print {
+  #rail, .tools, .changed, .palette, .more button { display: none !important; }
+  body { background: #fff; color: #000; }
+  .box { grid-column: 1 / -1 !important; border-color: #999; background: #fff; break-inside: avoid; }
+  th { background: #fff; position: static; }
+}

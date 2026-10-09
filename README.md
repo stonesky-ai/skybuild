@@ -34,8 +34,13 @@ Use Python 3.12 or later and `uv`:
 
 ```sh
 uv sync --extra test
+uv run playwright install chromium
 uv run python -m pytest
 ```
+
+On Linux, install Chromium's system libraries too if the browser does not start:
+`uv run playwright install --with-deps chromium`.
+Node.js is optional; it enables the separate workbench JavaScript harness test, which skips when Node is absent.
 
 PostgreSQL tests require explicit disposable targets. Without these variables, database integration tests skip:
 

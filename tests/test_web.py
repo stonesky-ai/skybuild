@@ -55,6 +55,36 @@ def test_public_page_contains_no_private_tasks_and_assets_cannot_be_overridden()
             assert client.get(path).status_code == 404
 
 
+def test_ideas_page_and_fixed_assets_are_read_only_and_have_safe_headers():
+    with workbench() as client:
+        page = client.get("/ideas")
+        assert page.status_code == 200
+        assert page.headers["content-type"].startswith("text/html")
+        assert 'href="/workbench"' in page.text
+        assert 'href="/ideas"' in page.text
+        assert 'href="/ideas/assets/workbench-shell.css"' in page.text
+        policy = page.headers["content-security-policy"]
+        assert "connect-src 'self'" in policy
+        assert "style-src 'self'" in policy
+        assert "unsafe-inline" not in policy
+
+        state = client.get("/ideas/api/state")
+        assert state.status_code == 200
+        assert state.json()["sections"]["preview"]["status"] == "SkyKeep tools page copied into SkyBuild"
+        assert client.get("/ideas/view/all").status_code == 200
+        assert client.get("/ideas/queue.html").status_code == 200
+        assert client.get("/ideas/assets/workbench_source/page.py").status_code == 404
+
+
+@pytest.mark.parametrize("path", [
+    "/ideas/api/alarms/ack", "/ideas/api/summary",
+    "/ideas/api/cleanup/plan", "/ideas/api/cleanup/run",
+])
+def test_ideas_mutation_routes_are_not_mounted(path):
+    with workbench() as client:
+        assert client.post(path, json={}).status_code == 404
+
+
 def test_browser_source_excludes_persistent_token_storage_and_html_injection_sinks():
     with workbench() as client:
         script = client.get("/workbench/assets/workbench.js").text
