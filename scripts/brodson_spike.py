@@ -680,8 +680,10 @@ def run_fake_http(manifest, recordings, transport, journal_root, *, authority,
     import httpx
     if type(deadline_seconds) not in (float, int) or not 0 < deadline_seconds <= 60:
         raise SpikeError("invalid_total_wall_deadline")
-    run_deadline_unix = time.time() + deadline_seconds
-    run_deadline_mono = time.monotonic() + deadline_seconds
+    started_wall = time.time()
+    started_mono = time.monotonic()
+    run_deadline_unix = started_wall + deadline_seconds
+    run_deadline_mono = started_mono + deadline_seconds
     if type(transport) is not httpx.MockTransport:
         raise SpikeError("only_explicit_fake_transport_allowed")
     validate_manifest(manifest, recordings)
@@ -694,11 +696,11 @@ def run_fake_http(manifest, recordings, transport, journal_root, *, authority,
     if not callable(count_tokens):
         raise SpikeError("tokenization_unknown")
     run_deadline_unix = min(run_deadline_unix, authority["expires_at"])
+    run_deadline_mono = min(run_deadline_mono,
+                            started_mono + max(0, authority["expires_at"] - started_wall))
     boot_id = _boot_id()
     identity = authority | {"run_deadline_unix": run_deadline_unix,
-                            "run_deadline_monotonic": min(
-                                run_deadline_mono,
-                                time.monotonic() + max(0, authority["expires_at"] - time.time())),
+                            "run_deadline_monotonic": run_deadline_mono,
                             "run_deadline_boot_id": boot_id,
                             "manifest_sha256": digest(canonical(manifest)), "origin": HTTP_ORIGIN,
                             "model": HTTP_MODEL, "limits": LIMITS,

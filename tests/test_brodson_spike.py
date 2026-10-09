@@ -700,3 +700,26 @@ def test_fake_http_rejects_journal_from_another_boot(http_setup, monkeypatch):
     monkeypatch.setattr(spike, "_boot_id", lambda: "f" * 36)
     with pytest.raises(spike.SpikeError, match="journal_boot_changed"):
         run_http(http_setup)
+
+
+def test_fake_http_preflight_wall_rollback_does_not_extend_authority(http_setup, monkeypatch):
+    import time
+    from types import SimpleNamespace
+    wall = [time.time()]
+    monotonic_start = time.monotonic()
+    http_setup[3]["expires_at"] = wall[0] + 5
+    fake_clock = SimpleNamespace(time=lambda: wall[0], monotonic=time.monotonic)
+    monkeypatch.setattr(spike, "time", fake_clock)
+    validate = spike.validate_manifest
+
+    def validation_with_wall_rollback(manifest, recordings):
+        result = validate(manifest, recordings)
+        wall[0] -= 10000
+        return result
+
+    monkeypatch.setattr(spike, "validate_manifest", validation_with_wall_rollback)
+    result = run_http(http_setup, deadline_seconds=60)
+    assert result["status"] == "prepared"
+    identity = json.loads((http_setup[2] / "attempts.json").read_text())["identity"]
+    assert monotonic_start < identity["run_deadline_monotonic"] <= monotonic_start + 5.1
+    assert identity["run_deadline_unix"] == http_setup[3]["expires_at"]
