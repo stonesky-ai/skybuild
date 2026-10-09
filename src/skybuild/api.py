@@ -89,6 +89,16 @@ class TaskAction(Input):
     milestone_task_id: Identifier | None = None
 
 
+class CPULocalControl(Input):
+    enabled: StrictBool
+    expected_generation: Annotated[StrictInt, Field(ge=0, lt=2**63)]
+    reason: Annotated[str, StringConstraints(min_length=1, max_length=4096)]
+
+
+class CPUCentralControl(CPULocalControl):
+    capacity: Annotated[StrictInt, Field(ge=0, lt=2**31)]
+
+
 class ClaimLease(Input):
     lease_seconds: Annotated[StrictInt, Field(ge=1, le=300)] = 60
 
@@ -287,6 +297,20 @@ def create_app(store: Any) -> FastAPI:
         """Expose only the caller's identity and grants for scoped access checks."""
         return {"principal_id": actor.principal_id, "is_admin": actor.is_admin,
                 "grants": {project: sorted(operations) for project, operations in actor.grants.items()}}
+
+    @app.get(base + "/cpu-controls")
+    def cpu_control_status(project_id: ProjectPath, actor: Actor) -> dict:
+        return store.cpu_control_status(actor, project_id)
+
+    @app.post(base + "/cpu-controls/central")
+    def configure_cpu_pool(project_id: ProjectPath, body: CPUCentralControl, actor: Actor, idem: Key) -> dict:
+        return store.configure_cpu_pool(actor, project_id, body.capacity, body.enabled,
+                                        body.expected_generation, idem, reason=body.reason)
+
+    @app.post(base + "/cpu-controls/local")
+    def set_cpu_local_control(project_id: ProjectPath, body: CPULocalControl, actor: Actor, idem: Key) -> dict:
+        return store.set_cpu_local_control(actor, project_id, body.enabled,
+                                           body.expected_generation, idem, reason=body.reason)
 
     @app.post(base + "/tasks", status_code=201)
     def create_task(project_id: ProjectPath, body: TaskCreate, actor: Actor, idem: Key) -> dict:

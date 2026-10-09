@@ -75,6 +75,19 @@ def main(argv: list[str] | None = None) -> int:
     execution.add_argument("project_id")
     execution.add_argument("task_id")
     execution.add_argument("--limit", type=int, default=20)
+    for command in ("cpu-control-get", "cpu-control-set", "cpu-local-control-set"):
+        control = commands.add_parser(command, help="Inspect or update owner CPU restrictions; never launch work")
+        control.add_argument("--ca-file", type=Path, default=argparse.SUPPRESS)
+        control.add_argument("project_id")
+        if command != "cpu-control-get":
+            enabled = control.add_mutually_exclusive_group(required=True)
+            enabled.add_argument("--enable", dest="enabled", action="store_true")
+            enabled.add_argument("--disable", dest="enabled", action="store_false")
+            control.add_argument("--expected-generation", type=int, required=True)
+            control.add_argument("--reason", required=True)
+            control.add_argument("--idempotency-key")
+            if command == "cpu-control-set":
+                control.add_argument("--capacity", type=int, required=True)
     inbox = commands.add_parser("cord-inbox", help="Read pending Cord messages for this credential")
     inbox.add_argument("--ca-file", type=Path, default=argparse.SUPPRESS)
     inbox.add_argument("project_id")
@@ -153,6 +166,19 @@ def main(argv: list[str] | None = None) -> int:
                     result = client.task_history(args.project_id, args.task_id, limit=args.limit, offset=args.offset)
                 else:
                     result = client.list_tasks(args.project_id, limit=args.limit, offset=args.offset)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+        if args.command in {"cpu-control-get", "cpu-control-set", "cpu-local-control-set"}:
+            with Client(_environment("SKYBUILD_API_URL"), _environment("SKYBUILD_TOKEN"), ca_file=args.ca_file) as client:
+                if args.command == "cpu-control-get":
+                    result = client.cpu_control_status(args.project_id)
+                elif args.command == "cpu-control-set":
+                    result = client.configure_cpu_pool(args.project_id, args.capacity, args.enabled,
+                                                       args.expected_generation, reason=args.reason,
+                                                       idempotency_key=args.idempotency_key)
+                else:
+                    result = client.set_cpu_local_control(args.project_id, args.enabled, args.expected_generation,
+                                                          reason=args.reason, idempotency_key=args.idempotency_key)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
         if args.command.startswith("cord-"):

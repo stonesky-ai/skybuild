@@ -1,0 +1,25 @@
+# Owner CPU control API handoff
+
+Task: `SKYBUILD-EXECUTION-CONTROLS`. Owner: main SkyBuild session. Phase: awaiting independent exact-head review and combined validation. Branch: `task/cpu-control-api`. Source base: published `9e41ac131afe3e4f44b85a99f9acd8f4d04178f7`.
+
+Architecture section 8 requires central and local restrictive controls to compose, preserve generations and survive restart. Implementation-plan area 5 requires CLI inspection before execution. This slice exposes the already implemented Store controls; it creates no execution protocol, launcher, reservation/dispatch/settlement endpoint, authority cutover, or deployment action.
+
+## Existing semantics and bounded interface
+
+The governing source at the base is `src/skybuild/admission.py`, `CPUAdmission.configure_cpu_pool`, `set_cpu_local_control`, and `_cpu_control`; `claims.py:_require_api_authority`; and migration 008's pool/reservation/journal tables. Mutations keep the existing current `tasks:write` authorization, owner/admin requirement, Markdown authority fence, project lock, generation CAS, capacity floor and idempotent journal transaction unchanged.
+
+`POST /api/v1/projects/{project_id}/cpu-controls/central` takes exactly `capacity`, `enabled`, `expected_generation`, and `reason`. `POST .../cpu-controls/local` takes exactly `enabled`, `expected_generation`, and `reason`. Both require the existing bounded `Idempotency-Key` header. Boolean and integer inputs are strict, capacity is 0 through `2**31 - 1`, expected generation is 0 through `2**63 - 1`, and reason is nonempty text of at most 4096 characters. Store validation rejects whitespace-only reasons and invalid Unicode/null content. Reason bytes are preserved rather than stripped; changing whitespace changes idempotent intent. Central creation uses expected generation 0. Local mutation cannot create a pool and still requires its recorded local generation. Returned pool records retain existing mutation semantics, including historical idempotent responses.
+
+`GET .../cpu-controls` rechecks current `tasks:read` authorization and requires owner/admin. It returns `project_id`, `pool`, and `held_units`. Pool fields are explicitly allowlisted: project ID, capacity, central enabled/generation, and local enabled/generation. Missing pool is explicit `null`; held units sum only this project's recorded `reserved` rows. A single SQL statement supplies a coherent pool/held-unit snapshot. No attempts, task details, journals, arbitrary JSON, other-project totals, physical-stop assertion or eligibility verdict are returned. Inspection does not require or perform an authority switch.
+
+Client methods are `cpu_control_status`, `configure_cpu_pool`, and `set_cpu_local_control`. The existing Client transport preserves mutation body/key across bounded retries and TLS CA configuration. CLI commands are `cpu-control-get PROJECT`, `cpu-control-set PROJECT --capacity N --enable|--disable --expected-generation N --reason TEXT`, and `cpu-local-control-set PROJECT --enable|--disable --expected-generation N --reason TEXT`. Mutations require explicit enable/disable intent. They accept `--idempotency-key` for cross-process retry identity. All commands accept installation `--ca-file`, including the existing global form. No defaults silently enable controls.
+
+These controls are recorded restrictions, not physical stop acknowledgments. Central enable does not clear local disablement. Read/mutation replies cannot release held reservations, stop processes, renew authority, or enable an unqualified launcher. The current pilot's Markdown authority fence remains effective; this task makes no live control writes.
+
+## Validation and next action
+
+The focused guarded disposable PostgreSQL gate ran `tests/test_cpu_control_api.py tests/test_admission.py tests/test_client.py tests/test_client_tls.py`: **84 passed, no skips, one existing deprecation warning**. Gate used a 10 GiB minimum available-memory guard and 180-second deadline. Cleanup was confirmed, and the exact disposable container was absent afterward. Log: `/home/kevin/my_code/skybuild-gate-tmp/skybuild-gate-a6b8f1369ee53b23-33hsfwqk.log`.
+
+The new tests execute 18 database cases through a restricted runtime role. They cover unauthenticated/non-admin/project denial, rechecked removed admin rights, missing idempotency keys, Markdown authority refusal, strict bounds/types/extras, exact reason/body replay after an accepted-but-lost response, one journal/generation, conflicting intent, stale CAS, central/local intersection, held-capacity floor, persisted disablement, scoped allowlisted inspection, and coherent read during an atomic pool/reservation update. Client/CLI tests verify explicit intent, scoped paths, stable identity, exact forwarding and CA propagation. Tests assert the imported package belongs to this task checkout.
+
+Next: independent exact-head review, frozen combined gate with the parent-selected membership, fixes/re-review if needed, and verified bundle integration. No PR or deployment is performed by the author.
