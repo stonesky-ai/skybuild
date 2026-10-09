@@ -18,6 +18,8 @@ HTTP endpoints live beneath `/api/v1/projects/{project_id}/tasks/{task_id}/claim
 
 ## Evidence and limits
 
+Each accepted claim transition increments a per-task `claim_revision` in the same transaction as its journal event. History uses that sequence, not wall-clock timestamps or UUID ordering. Renewal events belong to this ownership journal; they do not manufacture task definition revisions.
+
 Disposable PostgreSQL targeted tests cover simultaneous claimers, claim versus edit, renewal versus release, expired holders, stale fences, exact replay, project/grant checks, Markdown authority, immutable journal/fence records, effect fencing, uncertain exposure and HTTP validation. Full-suite evidence is recorded in the PR after the final candidate checks.
 
 `Claims.tla` models two workers and fences 0–3, atomic graph-locked transitions, lease expiry, delayed writes and conservative reconciliation. SANY parsed successfully. TLC with deadlock checking disabled explored 79 generated states, 46 distinct states and depth 8 without invariant violations. Parking on unresolved exposure is intentional, so the model makes no liveness claim. `Claims-broken.cfg` deliberately clears ownership/exposure at expiry; TLC reports `ExposureRetained` violated at depth 4 (11 generated states, 8 distinct states). This confirms the exposure invariant is exercised.

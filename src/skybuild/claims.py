@@ -73,6 +73,7 @@ class Claims:
                     connection.execute('INSERT INTO task_claims (project_id, task_id, fence, holder, task_revision, lease_until) '
                                        "VALUES (%s, %s, 1, %s, %s, clock_timestamp() + %s * interval '1 second') "
                                        'ON CONFLICT (project_id, task_id) DO UPDATE SET fence = task_claims.fence + 1, '
+                                       'claim_revision = task_claims.claim_revision + 1, '
                                        'holder = EXCLUDED.holder, task_revision = EXCLUDED.task_revision, '
                                        'lease_until = EXCLUDED.lease_until, held = true',
                                        (project_id, task_id, principal.principal_id, expected_revision, lease_seconds))
@@ -83,10 +84,12 @@ class Claims:
                         raise DomainError('claim_conflict', 'Ownership holder or lease is not current', 409)
                     if action != 'renew':
                         self._require_no_external_exposure(connection, project_id, task_id)
-                        connection.execute('UPDATE task_claims SET held = false WHERE project_id = %s AND task_id = %s',
+                        connection.execute('UPDATE task_claims SET held = false, claim_revision = claim_revision + 1 '
+                                           'WHERE project_id = %s AND task_id = %s',
                                            (project_id, task_id))
                     else:
                         renewed = connection.execute("UPDATE task_claims SET lease_until = clock_timestamp() + %s * interval '1 second' "
+                                                     ', claim_revision = claim_revision + 1 '
                                                      'WHERE project_id = %s AND task_id = %s AND held '
                                                      'AND holder = %s AND fence = %s AND lease_until > clock_timestamp()',
                                                      (lease_seconds, project_id, task_id, principal.principal_id, fence))
@@ -96,9 +99,9 @@ class Claims:
                                                    (project_id, task_id)).fetchone())
                 if before:
                     before.pop('live')
-                connection.execute('INSERT INTO claim_journal (event_id, project_id, task_id, actor, action, reason, '
-                                   'before_state, after_state) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)',
-                                   (uuid4(), project_id, task_id, principal.principal_id, action, reason,
+                connection.execute('INSERT INTO claim_journal (event_id, project_id, task_id, actor, action, claim_revision, reason, '
+                                   'before_state, after_state) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)',
+                                   (uuid4(), project_id, task_id, principal.principal_id, action, after['claim_revision'], reason,
                                     Jsonb(_public(before)) if before else None, Jsonb(after)))
                 return after
             return self._idempotent(connection, principal, project_id, 'claim.' + action, key, payload, mutation)
@@ -122,5 +125,5 @@ class Claims:
             self._authorize(connection, principal, project_id, 'tasks:read')
             self._task(connection, project_id, task_id)
             return _public(connection.execute('SELECT * FROM claim_journal WHERE project_id = %s AND task_id = %s '
-                                              'ORDER BY created_at, event_id LIMIT %s OFFSET %s',
+                                              'ORDER BY claim_revision LIMIT %s OFFSET %s',
                                               (project_id, task_id, limit, offset)).fetchall())

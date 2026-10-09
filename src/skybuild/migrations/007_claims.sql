@@ -5,6 +5,7 @@ CREATE TABLE task_claims (
     project_id text NOT NULL,
     task_id text NOT NULL,
     fence bigint NOT NULL CHECK (fence > 0),
+    claim_revision bigint NOT NULL DEFAULT 1 CHECK (claim_revision > 0),
     holder text NOT NULL REFERENCES principals(principal_id),
     task_revision bigint NOT NULL CHECK (task_revision > 0),
     lease_until timestamptz NOT NULL,
@@ -18,11 +19,13 @@ CREATE TABLE claim_journal (
     task_id text NOT NULL,
     actor text NOT NULL REFERENCES principals(principal_id),
     action text NOT NULL CHECK (action IN ('claim', 'renew', 'release', 'reconcile')),
+    claim_revision bigint NOT NULL CHECK (claim_revision > 0),
     reason text NOT NULL,
     before_state jsonb,
     after_state jsonb NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
-    FOREIGN KEY (project_id, task_id) REFERENCES tasks(project_id, task_id)
+    FOREIGN KEY (project_id, task_id) REFERENCES tasks(project_id, task_id),
+    UNIQUE (project_id, task_id, claim_revision)
 );
 CREATE TRIGGER claim_journal_immutable BEFORE UPDATE OR DELETE OR TRUNCATE ON claim_journal
     FOR EACH STATEMENT EXECUTE FUNCTION refuse_journal_mutation();
@@ -32,6 +35,7 @@ BEGIN
         RAISE EXCEPTION 'Claim fence records cannot be deleted or truncated';
     END IF;
     IF NEW.project_id <> OLD.project_id OR NEW.task_id <> OLD.task_id OR
+       NEW.claim_revision <> OLD.claim_revision + 1 OR
        NOT ((OLD.held AND NEW.fence = OLD.fence AND NEW.holder = OLD.holder AND
              NEW.task_revision = OLD.task_revision) OR
             (NOT OLD.held AND NEW.held AND NEW.fence = OLD.fence + 1)) THEN

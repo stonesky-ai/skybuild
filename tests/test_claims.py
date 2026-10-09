@@ -19,7 +19,7 @@ def ready(store, people, project, task_id='claim-task'):
 
 def expire(store, project, task_id):
     with store._connection() as connection:
-        connection.execute("UPDATE task_claims SET lease_until = clock_timestamp() - interval '1 second' "
+        connection.execute("UPDATE task_claims SET lease_until = clock_timestamp() - interval '1 second', claim_revision = claim_revision + 1 "
                            'WHERE project_id = %s AND task_id = %s', (project, task_id))
 
 
@@ -91,6 +91,7 @@ def test_renew_release_scope_revision_and_grant(store, actors):
     assert not released['held']
     assert store.release_claim(people['worker'], project, task['task_id'], 1, 2, 'release', reason='Never launched') == released
     assert store.get_task(people['owner'], project, task['task_id']) == task
+    assert [event['claim_revision'] for event in store.claim_history(people['owner'], project, task['task_id'])] == [1, 2, 3]
 
 
 def test_effect_writes_require_current_claim_fence_and_uncertainty_blocks_release(store, actors):
