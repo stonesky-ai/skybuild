@@ -81,7 +81,7 @@ SECTION_TITLES: dict[str, str] = {
     "usage": "Claude usage",
     "landing": "Landed per day (todo service)",
     "critical_path": "Critical path",
-    "sessionview": "sessionview panels",
+    "sessionview": "Workbench panels",
     "help": "Settings and help",
 }
 
@@ -151,7 +151,7 @@ def _rail() -> str:
     links = []
     for p in PAGES:
         links.append(
-            f'<a class="rail-link" href="/ideas/view/{p["key"]}" data-page="{p["key"]}" title="{html.escape(p["asks"])}">'
+            f'<a class="rail-link" href="/workbench/views/{p["key"]}" data-page="{p["key"]}" title="{html.escape(p["asks"])}">'
             f'<svg viewBox="0 0 18 18" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" '
             f'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">{_ICONS[p["key"]]}</svg>'
             f'<span>{html.escape(p["title"])}</span></a>')
@@ -189,15 +189,13 @@ PAGE_HTML = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Build status</title>
 <style>{PAGE_STYLE}</style>
 </head>
 <body>
-<link rel="stylesheet" href="/ideas/assets/workbench-shell.css">
-<nav class="workbench-shell-nav" aria-label="SkyBuild sections">
-<a href="/workbench" title="Home workbench" aria-label="Home workbench"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m3 11 9-8 9 8"/><path d="M5.5 10v10h13V10M9 20v-6h6v6"/></svg><span class="workbench-nav-label">Home workbench</span></a>
-<a href="/ideas" title="Ideas · SkyKeep tools" aria-label="Ideas · SkyKeep tools" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 18h8M9 21h6M8.5 14.5a7 7 0 1 1 7 0c-.8.6-1.2 1.4-1.3 2.5h-4.4c-.1-1.1-.5-1.9-1.3-2.5Z"/><path d="M12 4v2"/></svg><span class="workbench-nav-label">Ideas · SkyKeep tools</span></a>
-</nav>
+<link rel="stylesheet" href="/workbench/assets/workbench-shell.css">
+<!--WORKBENCH_NAV-->
 <div id="todo-warnings"></div>
 <div class="shell">
 <nav id="rail" aria-label="Views">
@@ -218,7 +216,7 @@ PAGE_HTML = f"""<!DOCTYPE html>
 <button type="button" id="theme" class="small">theme: system</button>
 <button type="button" id="print" class="small">print view</button>
 <span id="snapshot-slot" class="topbtns"></span>
-<a href="/ideas/queue.html">Todo queue</a></p>
+<a href="/workbench/queue.html">Todo queue</a></p>
 <p id="status"></p>
 </div>
 </div>

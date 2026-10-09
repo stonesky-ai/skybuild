@@ -1,11 +1,11 @@
-"""Install the public workbench and its Ideas page without accessing the Store."""
+"""Install public Workbench pages without accessing the Store."""
 
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 
-from .ideas.workbench import install_ideas_workbench
+from .workbench.web import install_workbench as install_workbench_pages
 
 
 HEADERS = {
@@ -17,20 +17,17 @@ HEADERS = {
 
 
 def _asset(path: Path, media_type: str):
-    def handler() -> FileResponse:
-        return FileResponse(path, media_type=media_type, headers=HEADERS)
+    def handler() -> Response:
+        return Response(path.read_bytes(), media_type=media_type, headers=HEADERS)
 
     return handler
 
 
-def install_workbench(app: FastAPI) -> None:
-    """Expose fixed public assets and the Ideas preview; the task UI uses the existing API."""
+def install_workbench(app: FastAPI, *, dev_reload: bool = False) -> None:
+    """Expose public task UI and copied status views without database access."""
     directory = Path(__file__).with_name("static")
-    for route, filename, media_type in (
-        ("/workbench", "workbench.html", "text/html"),
-        ("/workbench/assets/workbench.js", "workbench.js", "text/javascript"),
-        ("/workbench/assets/workbench.css", "workbench.css", "text/css"),
-        ("/ideas/assets/workbench-shell.css", "workbench-shell.css", "text/css"),
-    ):
+    for route, filename, media_type in (("/workbench/assets/workbench.js", "workbench.js", "text/javascript"),
+                                        ("/workbench/assets/workbench.css", "workbench.css", "text/css"),
+                                        ("/workbench/assets/workbench-shell.css", "workbench-shell.css", "text/css")):
         app.add_api_route(route, _asset(directory / filename, media_type), methods=["GET"], include_in_schema=False)
-    install_ideas_workbench(app)
+    install_workbench_pages(app, dev_reload=dev_reload)

@@ -137,7 +137,7 @@ function drawFlow(value) {
     const item = el("li", "stage lvl-" + levelOf(stage.level) + (pile && pile.stage === stage.key ? " pile" : ""));
     const link = el("a", "stage-link");
     const view = pageByKey.has(stage.view) ? stage.view : DEFAULT_PAGE;
-    link.setAttribute("href", "/ideas/view/" + view);
+    link.setAttribute("href", "/workbench/views/" + view);
     link.title = stage.flag ? scalarText(stage.flag) : "Open the " + pageByKey.get(view).title + " view";
     if (typeof link.addEventListener === "function") link.addEventListener("click", ev => {
       if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey || ev.button) return;
@@ -312,7 +312,7 @@ async function ackAlarm(id, ack, note) {
   note.className = "muted";
   note.textContent = " sending";
   try {
-    const sent = await post("/ideas/api/alarms/ack", {id: id});
+    const sent = await post("/workbench/api/alarms/ack", {id: id});
     if (!sent.ok) {
       ack.disabled = false;
       note.className = "error";
@@ -1157,7 +1157,7 @@ async function askSummary(topic, ask, note) {
   ask.disabled = true;
   ask.textContent = "Asking...";
   try {
-    const sent = await post("/ideas/api/summary", {topic: topic});
+    const sent = await post("/workbench/api/summary", {topic: topic});
     if (!sent.ok) {
       ask.disabled = false;
       note.className = "error note";
@@ -1191,7 +1191,7 @@ async function previewCleanup(preview, out) {
   preview.disabled = true;
   out.replaceChildren(el("p", "muted", "asking for a plan; a preview deletes nothing"));
   try {
-    const sent = await post("/ideas/api/cleanup/plan", {});
+    const sent = await post("/workbench/api/cleanup/plan", {});
     out.replaceChildren(sent.ok ? planView(sent.answer, out) : el("p", "error", refusal(sent)));
   } catch (err) {
     out.replaceChildren(el("p", "error", "the plan could not be fetched"));
@@ -1253,7 +1253,7 @@ async function runCleanup(planId, chosen, out) {
   if (typeof window.confirm !== "function" || !window.confirm(question)) return;
   out.replaceChildren(el("p", "muted", "deleting"));
   try {
-    const sent = await post("/ideas/api/cleanup/run", {plan: planId, items: chosen.map(i => String(i.id))});
+    const sent = await post("/workbench/api/cleanup/run", {plan: planId, items: chosen.map(i => String(i.id))});
     out.replaceChildren(runView(sent));
   } catch (err) {
     out.replaceChildren(el("p", "error", "the run could not be sent; preview again"));

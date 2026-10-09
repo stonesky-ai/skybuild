@@ -8,6 +8,11 @@
   const action = byId("action-form");
   const structure = byId("structure-form");
   let token = "", project = "", selected = null, busy = false, stale = false, epoch = 0, controller = null, reconcileCursor = null, structuralPlan = null, historyOffset = 0, historyHasMore = false, taskCursor = null, taskHasMore = false;
+  const fakePreviewTasks = [{
+    task_id: "FAKE-SKYBUILD-TASK-WORKBENCH", title: "Add remaining task workbench operations",
+    status: "in-progress", phase: "reviewed basic UI", blocker: "",
+    next_action: "Add guarded workflow and reassessment operations.", responsible: "lead", fake: true,
+  }];
 
   class ApiError extends Error {
     constructor(status) { super(`Request failed (${status})`); this.status = status; }
@@ -37,7 +42,7 @@
     for (const field of action.elements) field.disabled = !connected || busy || !selected || stale;
     for (const field of structure.elements) field.disabled = !connected || busy || !selected || stale;
     byId("apply-structure").disabled = !connected || busy || !selected || stale || !structuralPlan;
-    for (const button of byId("task-list").querySelectorAll("button")) button.disabled = busy || !connected;
+    for (const button of byId("task-list").querySelectorAll("button")) button.disabled = busy || !connected || button.dataset.fake === "true";
   }
 
   function disconnect() {
@@ -109,7 +114,8 @@
   }
 
   async function loadTasks(afterTaskId = null) {
-    const tasks = await request(`tasks?limit=100&by_id=true${afterTaskId === null ? "" : `&after_task_id=${encodeURIComponent(afterTaskId)}`}`);
+    const result = await request(`tasks?limit=100&by_id=true${afterTaskId === null ? "" : `&after_task_id=${encodeURIComponent(afterTaskId)}`}`);
+    const tasks = afterTaskId === null && result.length === 0 ? fakePreviewTasks : result;
     if (afterTaskId !== null && tasks.length === 0) {
       taskHasMore = false;
       return false;
@@ -119,14 +125,17 @@
       const item = document.createElement("li"), button = document.createElement("button");
       button.type = "button";
       button.dataset.taskId = task.task_id;
-      button.textContent = `${task.task_id}: ${task.title} (${task.status} · ${task.phase})\n${task.blocker || task.next_action || "No next action"} · ${task.responsible}`;
+      button.dataset.fake = String(Boolean(task.fake));
+      button.textContent = `${task.fake ? "[FAKE PREVIEW] " : ""}${task.task_id}: ${task.title} (${task.status} · ${task.phase})\n${task.blocker || task.next_action || "No next action"} · ${task.responsible}`;
       button.setAttribute("aria-current", String(selected?.task_id === task.task_id));
-      button.addEventListener("click", () => perform(async () => { await selectTask(task.task_id); notice("Task loaded."); }));
+      button.disabled = Boolean(task.fake);
+      if (!task.fake) button.addEventListener("click", () => perform(async () => { await selectTask(task.task_id); notice("Task loaded."); }));
       item.append(button); list.append(item);
     }
     taskCursor = afterTaskId;
     taskHasMore = tasks.length === 100;
     byId("task-count").textContent = `${tasks.length} tasks shown for ${project}${afterTaskId === null ? "" : ` after ${afterTaskId}`}`;
+    if (tasks.some((task) => task.fake)) byId("task-count").textContent += " · API returned no tasks; showing local fake preview data";
     return true;
   }
 
@@ -182,6 +191,15 @@
   });
   byId("logout").addEventListener("click", () => { disconnect(); notice("Logged out. Private task data and token cleared."); });
   byId("refresh-tasks").addEventListener("click", () => perform(async () => { await loadTasks(); notice("Task list refreshed."); }));
+  if (typeof window !== "undefined" && typeof window.setInterval === "function") {
+    window.setInterval(async () => {
+      if (!token || busy) return;
+      const session = epoch;
+      try { await loadTasks(); } catch (error) {
+        if (session === epoch && error.name !== "AbortError") byId("task-count").textContent = "Task refresh failed; retrying automatically.";
+      }
+    }, 15000);
+  }
   byId("first-tasks").addEventListener("click", () => perform(async () => { await loadTasks(); notice("First task page loaded."); }));
   byId("next-tasks").addEventListener("click", () => perform(async () => {
     if (!taskHasMore) return;

@@ -12,7 +12,7 @@ let currentPage = pageFromPath();
 function pageFromPath() {
   if (typeof window.__PAGE__ === "string") return pageByKey.has(window.__PAGE__) ? window.__PAGE__ : DEFAULT_PAGE;
   if (typeof location === "undefined" || !location || typeof location.pathname !== "string") return "all";
-  const named = /^\/ideas\/view\/([a-z]+)$/.exec(location.pathname);
+  const named = /^\/workbench\/views\/([a-z]+)$/.exec(location.pathname);
   if (named) return pageByKey.has(named[1]) ? named[1] : DEFAULT_PAGE;
   let remembered = null;
   try { remembered = window.localStorage.getItem(PAGE_KEY); } catch (err) {}
@@ -37,7 +37,7 @@ function showPage(key, push) {
   currentPage = key;
   try { window.localStorage.setItem(PAGE_KEY, key); } catch (err) {}
   if (push && typeof history !== "undefined" && history && typeof history.pushState === "function") {
-    try { history.pushState({page: key}, "", "/ideas/view/" + key); } catch (err) {}
+    try { history.pushState({page: key}, "", "/workbench/views/" + key); } catch (err) {}
   }
   paintRail();
   if (lastState) paint(lastState);

@@ -4,6 +4,7 @@ import subprocess
 
 import pytest
 from fastapi.testclient import TestClient
+from fastapi import FastAPI
 
 from skybuild.api import create_app
 
@@ -55,32 +56,56 @@ def test_public_page_contains_no_private_tasks_and_assets_cannot_be_overridden()
             assert client.get(path).status_code == 404
 
 
-def test_ideas_page_and_fixed_assets_are_read_only_and_have_safe_headers():
+def test_copied_status_views_are_inside_workbench_and_have_safe_headers():
     with workbench() as client:
-        page = client.get("/ideas")
+        page = client.get("/workbench/views/all")
         assert page.status_code == 200
         assert page.headers["content-type"].startswith("text/html")
         assert 'href="/workbench"' in page.text
-        assert 'href="/ideas"' in page.text
-        assert 'href="/ideas/assets/workbench-shell.css"' in page.text
+        assert 'href="/workbench#create-title"' in page.text
+        assert 'href="/workbench#history-title"' in page.text
+        assert "Ideas" not in page.text
+        assert "/ideas" not in page.text
+        assert 'href="/workbench/assets/workbench-shell.css"' in page.text
+        assert 'href="/workbench/views/queue#section-queue"' in page.text
+        assert 'href="/workbench/views/all#section-flow"' in page.text
         policy = page.headers["content-security-policy"]
         assert "connect-src 'self'" in policy
         assert "style-src 'self'" in policy
         assert "unsafe-inline" not in policy
 
-        state = client.get("/ideas/api/state")
+        state = client.get("/workbench/api/state")
         assert state.status_code == 200
         assert state.json()["sections"]["preview"]["status"] == "SkyKeep tools page copied into SkyBuild"
-        assert client.get("/ideas/view/all").status_code == 200
-        assert client.get("/ideas/queue.html").status_code == 200
-        assert client.get("/ideas/assets/workbench_source/page.py").status_code == 404
+        assert client.get("/workbench/views/queue").status_code == 200
+        assert client.get("/workbench/queue.html").status_code == 200
+        assert client.get("/workbench/assets/source/page.py").status_code == 404
+        assert client.get("/ideas").status_code == 404
+
+
+def test_development_preview_exposes_browser_reload_revision():
+    from skybuild.web import install_workbench
+
+    app = FastAPI()
+    install_workbench(app, dev_reload=True)
+    with TestClient(app) as client:
+        page = client.get("/workbench")
+        assert page.status_code == 200
+        assert "/workbench/dev/reload.js?revision=" in page.text
+        revision = client.get("/workbench/dev/revision")
+        assert revision.status_code == 200
+        assert len(revision.json()["revision"]) == 16
+        script = client.get("/workbench/dev/reload.js", params={"revision": revision.json()["revision"]})
+        assert script.status_code == 200
+        assert "location.reload()" in script.text
+        assert script.headers["content-type"].startswith("text/javascript")
 
 
 @pytest.mark.parametrize("path", [
-    "/ideas/api/alarms/ack", "/ideas/api/summary",
-    "/ideas/api/cleanup/plan", "/ideas/api/cleanup/run",
+    "/workbench/api/alarms/ack", "/workbench/api/summary",
+    "/workbench/api/cleanup/plan", "/workbench/api/cleanup/run",
 ])
-def test_ideas_mutation_routes_are_not_mounted(path):
+def test_status_view_mutation_routes_are_not_mounted(path):
     with workbench() as client:
         assert client.post(path, json={}).status_code == 404
 

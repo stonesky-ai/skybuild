@@ -15,6 +15,7 @@ test = [
     "playwright>=1.47,<2",
     "pytest-playwright>=0.5,<1",
     "httpx2>=2.13.1",
+    "watchfiles>=0.21,<2",
 ]
 
 [project.scripts]

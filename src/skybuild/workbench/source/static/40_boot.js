@@ -13,6 +13,7 @@ function boxFor(key) {
   let entry = boxes.get(key);
   if (entry) return entry;
   const box = el("section", "box");
+  box.id = "section-" + key;
   box.appendChild(el("h2", "", titleOf(key)));
   const body = el("div", "body");
   box.appendChild(body);
@@ -145,7 +146,7 @@ function paint(state) {
 // One read of the state, painted. Never throws: a failure is said on the page.
 async function load() {
   try {
-    const response = await fetch("/ideas/api/state", {cache: "no-store", credentials: "same-origin"});
+    const response = await fetch("/workbench/api/state", {cache: "no-store", credentials: "same-origin"});
     if (!response.ok) throw new Error("HTTP " + response.status);
     const state = await response.json();
     if (isScalar(state) || Array.isArray(state)) throw new Error("not a state document");
@@ -187,7 +188,7 @@ function snapshotStub(state, taken) {
     + "window.__PAGE__ = " + JSON.stringify(currentPage) + ";\n"
     + "window.fetch = async function (url, opts) {\n"
     + "  const method = ((opts && opts.method) || 'GET').toUpperCase();\n"
-    + "  if (method !== 'GET' || !String(url).includes('/ideas/api/state'))\n"
+    + "  if (method !== 'GET' || !String(url).includes('/workbench/api/state'))\n"
     + "    return new Response(JSON.stringify({refused: 'this is a saved snapshot: buttons do nothing'}), {status: 405});\n"
     + "  return new Response(JSON.stringify(window.__SNAPSHOT__), {status: 200, headers: {'Content-Type': 'application/json'}});\n"
     + "};\n"
@@ -206,8 +207,8 @@ async function saveSnapshot(button) {
   status.textContent = "building the snapshot...";
   try {
     const [pageResp, stateResp] = await Promise.all([
-      fetch("/ideas", {cache: "no-store", credentials: "same-origin"}),
-      fetch("/ideas/api/state", {cache: "no-store", credentials: "same-origin"})]);
+      fetch("/workbench", {cache: "no-store", credentials: "same-origin"}),
+      fetch("/workbench/api/state", {cache: "no-store", credentials: "same-origin"})]);
     if (!pageResp.ok || !stateResp.ok) throw new Error("HTTP " + pageResp.status + " / " + stateResp.status);
     const html = await pageResp.text();
     const state = await stateResp.json();

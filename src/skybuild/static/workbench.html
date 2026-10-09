@@ -5,14 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SkyBuild task workbench</title>
   <link rel="stylesheet" href="/workbench/assets/workbench.css">
-  <link rel="stylesheet" href="/ideas/assets/workbench-shell.css">
+  <link rel="stylesheet" href="/workbench/assets/workbench-shell.css">
   <script src="/workbench/assets/workbench.js" defer></script>
 </head>
 <body>
-  <nav class="workbench-shell-nav" aria-label="SkyBuild sections">
-    <a href="/workbench" title="Home workbench" aria-label="Home workbench" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m3 11 9-8 9 8"/><path d="M5.5 10v10h13V10M9 20v-6h6v6"/></svg><span class="workbench-nav-label">Home workbench</span></a>
-    <a href="/ideas" title="Ideas · SkyKeep tools" aria-label="Ideas · SkyKeep tools"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 18h8M9 21h6M8.5 14.5a7 7 0 1 1 7 0c-.8.6-1.2 1.4-1.3 2.5h-4.4c-.1-1.1-.5-1.9-1.3-2.5Z"/><path d="M12 4v2"/></svg><span class="workbench-nav-label">Ideas · SkyKeep tools</span></a>
-  </nav>
+  <!--WORKBENCH_NAV-->
   <header>
     <p class="eyebrow">SkyBuild · Launch-free bootstrap</p>
     <h1>Task workbench</h1>
@@ -93,9 +90,9 @@
           <div class="actions"><button id="preview-structure" type="button" disabled>Preview mapping</button><button id="apply-structure" type="submit" disabled>Apply reviewed mapping</button></div>
           <pre id="structure-preview" aria-live="polite">No plan previewed.</pre>
         </form>
-        <h3>Structural lineage</h3>
+        <h3 id="lineage-title">Structural lineage</h3>
         <ul id="lineage" class="lineage"><li>No task selected.</li></ul>
-        <h3>History</h3>
+        <h3 id="history-title">History</h3>
         <ol id="history" class="history"></ol>
         <button id="load-more-history" type="button" disabled>Load more history</button>
       </section>
