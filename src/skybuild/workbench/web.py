@@ -9,9 +9,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from . import navigation
+from ..ledger import build_manifest
 from .source import page
 
 ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = ROOT.parents[1]
 STATIC = ROOT / "static"
 HEADERS = {
     "Referrer-Policy": "no-referrer",
@@ -109,6 +111,26 @@ def install_workbench(app: FastAPI, *, dev_reload: bool = False) -> None:
         )
 
     if dev_reload:
+        @app.get("/workbench/dev/tasks-preview.json", include_in_schema=False)
+        def preview_tasks() -> JSONResponse:
+            manifest = build_manifest([PROJECT_ROOT / "docs" / "design" / "mastertodo.md"])
+            tasks = []
+            for priority, record in enumerate(manifest["tasks"]):
+                heading = re.match(r"^##\s+\S+\s+[—–-]\s+(.+?)\s*$", record["raw"].splitlines()[0])
+                if not heading:
+                    continue
+                tasks.append({
+                    "task_id": record["task_id"], "title": heading.group(1),
+                    "description": record["raw"], "status": record["status"],
+                    "phase": "mastertodo preview", "priority": priority,
+                    "next_action": "Read-only preview from mastertodo.md; no live task action.",
+                    "blocker": "", "responsible": "fake-preview", "assignee": None,
+                    "dependencies": [], "acceptance_criteria": [], "architecture_refs": [],
+                    "revision": 1, "created_at": "mastertodo.md", "updated_at": "mastertodo.md",
+                    "metadata": {"fake": True, "source": "docs/design/mastertodo.md"}, "fake": True,
+                })
+            return JSONResponse(tasks, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
         @app.get("/workbench/dev/revision", include_in_schema=False)
         def dev_revision() -> JSONResponse:
             return JSONResponse({"revision": _revision()}, headers={"Cache-Control": "no-store"})

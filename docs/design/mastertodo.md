@@ -75,7 +75,7 @@ Each task ID lives in exactly one ledger. Related ledgers: [deferred](deferred.m
 - Acceptance: every action has a known next state or explicit conflict; journal is append-only with no edit/delete path, including by ADR. Concurrent changes preserve task IDs, lineage, dependency correctness, prior evidence and budget history. Changed inputs invalidate affected readiness; live/unknown effects are reconciled before replacement work. Date/milestone triggers reassess without granting execution authority. Basic controls work with no model available. Multi-person approval chains remain deferred.
 - Architecture: sections 5, 9 and 13; [workflow](task_workflow.md). Plan: area 3a. ADR: [0031](../adr/tasks.md#adr-0031).
 
-The local Workbench preview uses an always-signed-in fake `user1` account and fake task records. Real user accounts, browser sessions and the human-to-API authentication design are deferred under [SKYBUILD-USER-LOGIN](deferred.md#skybuild-user-login). The demo credentials do not authorize API or database access.
+The local Workbench preview uses an always-signed-in fake `user1` account and read-only task records parsed from this ledger. Each preview record is marked fake and has no live journal or write path. Real user accounts, browser sessions and the human-to-API authentication design are deferred under [SKYBUILD-USER-LOGIN](deferred.md#skybuild-user-login). The demo credentials do not authorize API or database access.
 
 ## SKYBUILD-LEGACY-MIGRATION — Extract and port every legacy build API writer
 

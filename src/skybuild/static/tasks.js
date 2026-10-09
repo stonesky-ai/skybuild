@@ -216,8 +216,11 @@
 
   async function loadTasks(afterTaskId = null) {
     if (previewMode) {
+      const response = await fetch("/workbench/dev/tasks-preview.json", {credentials: "omit", cache: "no-store"});
+      if (!response.ok) throw new Error("Local preview task list is unavailable.");
+      const ledgerTasks = await response.json();
       cursor = null;
-      tasks = fakeTasks;
+      tasks = [...fakeTasks, ...ledgerTasks];
       renderTasks();
       return;
     }
@@ -434,7 +437,12 @@
     const listed = tasks.find(item => item.task_id === taskId);
     if (listed?.fake) {
       task = listed;
-      history = fakeHistory.map(event => ({...event, after_state: {...event.after_state, ...task}}));
+      history = task.task_id === fakeTask.task_id
+        ? fakeHistory.map(event => ({...event, after_state: {...event.after_state, ...task}}))
+        : [{event_id: `FAKE-${task.task_id}-SNAPSHOT`, task_id: task.task_id, actor: "fake-preview",
+          operation: "previewed", revision: task.revision, created_at: "mastertodo.md snapshot",
+          reason: "FAKE: Read-only task record parsed from mastertodo.md. This is not API journal history.",
+          after_state: task, fake: true}];
     } else {
       task = await request(`tasks/${encodeURIComponent(taskId)}`);
       history = await request(`tasks/${encodeURIComponent(taskId)}/history?limit=100&offset=0`);
@@ -477,10 +485,9 @@
 
   for (const tab of tabs) tab.addEventListener("click", () => switchTab(tab.dataset.tab));
   if (previewMode) {
-    tasks = fakeTasks;
-    renderTasks();
-    void selectTask(fakeTask.task_id);
-    notify("Local fake session active as user1. No database or API writes enabled.");
+    void loadTasks().then(() => selectTask(fakeTask.task_id)).then(() => {
+      notify("Local fake session active as user1. mastertodo queue shown as fake, read-only data.");
+    }).catch(() => notify("Local preview task list is unavailable. No API or database connection was made.", true));
   }
   switchTab("list");
   formConnection.addEventListener("submit", event => {
