@@ -80,6 +80,9 @@ class Client:
     def create_task(self, project_id: str, body: dict, *, idempotency_key: str | None = None) -> dict:
         return self.request("POST", self._path(project_id, "tasks"), body=body, idempotency_key=idempotency_key)
 
+    def whoami(self) -> dict:
+        return self.request("GET", "api/v1/me")
+
     def list_tasks(self, project_id: str, *, limit: int = 100, offset: int = 0,
                    after_task_id: str | None = None, by_id: bool = False) -> list:
         if after_task_id is not None and not valid_identifier(after_task_id):

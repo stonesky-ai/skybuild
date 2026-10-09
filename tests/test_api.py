@@ -59,6 +59,16 @@ def test_health_import_and_factory_have_no_store_side_effects(api):
     assert not store.calls
 
 
+def test_whoami_reports_only_authenticated_identity_and_grants(api):
+    client, store = api
+    assert client.get("/api/v1/me").json() == {
+        "principal_id": "worker", "is_admin": False,
+        "grants": {"project": ["tasks:read", "tasks:write"]},
+    }
+    assert not store.calls
+    assert client.get("/api/v1/me", headers={"Authorization": "Bearer bad-token"}).status_code == 401
+
+
 @pytest.mark.parametrize("authorization", [None, "Basic valid-token", "Bearer bad-token", "Bearer one two"])
 def test_auth_failures_are_generic(api, authorization):
     client, store = api

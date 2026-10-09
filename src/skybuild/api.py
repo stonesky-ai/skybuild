@@ -280,6 +280,12 @@ def create_app(store: Any) -> FastAPI:
             available = False
         return JSONResponse({"status": "ready" if available else "unavailable"}, status_code=200 if available else 503)
 
+    @app.get("/api/v1/me")
+    def me(actor: Actor) -> dict:
+        """Expose only the caller's identity and grants for scoped access checks."""
+        return {"principal_id": actor.principal_id, "is_admin": actor.is_admin,
+                "grants": {project: sorted(operations) for project, operations in actor.grants.items()}}
+
     @app.post(base + "/tasks", status_code=201)
     def create_task(project_id: ProjectPath, body: TaskCreate, actor: Actor, idem: Key) -> dict:
         return store.create_task(actor, project_id, body.model_dump(mode="json", exclude_unset=True), idem)
