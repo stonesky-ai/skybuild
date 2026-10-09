@@ -1,0 +1,495 @@
+"""PostgreSQL behavior tests. Set SKYBUILD_TEST_DSN to an owned disposable database."""
+
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import os
+from pathlib import Path
+import secrets
+from threading import Barrier
+from uuid import uuid4
+
+import psycopg
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
+import pytest
+
+from skybuild.contracts import DomainError, Principal
+from skybuild.store import OPERATIONS, Store
+
+
+@pytest.fixture(scope='module')
+def store():
+    dsn = os.environ.get('SKYBUILD_TEST_DSN')
+    if not dsn:
+        pytest.skip('SKYBUILD_TEST_DSN must select a task-owned disposable PostgreSQL database')
+    expected = conninfo_to_dict(dsn).get('dbname')
+    if not expected or not expected.startswith('skybuild_test'):
+        pytest.fail('Store tests require an explicitly named skybuild_test disposable database')
+    result = Store(dsn, expected)
+    result.migrate()
+    return result
+
+
+@pytest.fixture
+def actors(store):
+    project = 'test-' + uuid4().hex
+    identities = {}
+    for name in ('owner', 'worker', 'peer', 'outsider'):
+        principal_id, token = name + '-' + uuid4().hex, secrets.token_urlsafe(32)
+        store.provision_principal(principal_id, token, is_admin=name == 'owner', grants={project: OPERATIONS} if name != 'outsider' else {})
+        identities[name] = store.authenticate(token)
+        identities[name + '_token'] = token
+    return project, identities
+
+
+def create(store, principal, project, task_id='T1', **fields):
+    return store.create_task(principal, project, {'task_id': task_id, 'title': 'Test task', 'description': 'Full brief', **fields}, 'create-' + task_id)
+
+
+def error(code, call):
+    with pytest.raises(DomainError) as caught:
+        call()
+    assert caught.value.code == code
+    return caught.value
+
+
+def test_identity_guard_and_readiness(store):
+    wrong = Store(store.dsn, 'skybuild_wrong_database')
+    assert error('database_identity', wrong.migrate).status_code == 503
+    error('database_identity', wrong.readiness)
+    store.migrate()
+    assert store.readiness() == {'ready': True, 'schema_version': 2}
+
+
+def test_upgrade_001_to_002_preserves_existing_records_and_is_repeatable(store):
+    database = 'skybuild_test_upgrade_' + uuid4().hex
+    with psycopg.connect(store.dsn, autocommit=True) as connection:
+        connection.execute(psycopg.sql.SQL('CREATE DATABASE {}').format(psycopg.sql.Identifier(database)))
+    try:
+        upgraded = Store(make_conninfo(store.dsn, dbname=database), database)
+        source = (Path(__file__).parents[1] / 'src/skybuild/migrations/001_bootstrap.sql').read_text()
+        message_id = uuid4()
+        with upgraded._connection() as connection:
+            connection.execute('CREATE SCHEMA skybuild')
+            connection.execute('CREATE TABLE schema_migrations (version integer PRIMARY KEY, digest text NOT NULL)')
+            connection.execute(source)
+            connection.execute('INSERT INTO schema_migrations VALUES (1, %s)', (hashlib.sha256(source.encode()).hexdigest(),))
+            connection.execute("INSERT INTO principals VALUES ('legacy-owner', 'legacy-verifier', true)")
+            connection.execute("INSERT INTO tasks (project_id, task_id, title, description, status, phase, responsible, next_action) VALUES ('upgrade', 'T1', 'Existing task', 'Existing brief', 'proposed', 'triage', 'owner', 'Review')")
+            connection.execute("INSERT INTO messages (message_id, project_id, sender, recipient, subject, body, category, urgency) VALUES (%s, 'upgrade', 'legacy-owner', 'legacy-owner', 'Existing message', 'Content', 'misc', 'normal')", (message_id,))
+            task_before = connection.execute('SELECT * FROM tasks').fetchone()
+            message_before = connection.execute('SELECT * FROM messages').fetchone()
+        error('schema_mismatch', upgraded.readiness)
+        upgraded.migrate()
+        upgraded.migrate()
+        assert upgraded.readiness() == {'ready': True, 'schema_version': 2}
+        with upgraded._connection() as connection:
+            assert connection.execute('SELECT * FROM tasks').fetchone() == task_before
+            assert connection.execute('SELECT * FROM messages').fetchone() == message_before
+            assert connection.execute('SELECT count(*) AS count FROM cord_journal').fetchone()['count'] == 0
+    finally:
+        with psycopg.connect(store.dsn, autocommit=True) as connection:
+            connection.execute(psycopg.sql.SQL('DROP DATABASE {} WITH (FORCE)').format(psycopg.sql.Identifier(database)))
+
+
+def test_credential_replacement_preserves_identity_history_and_verifier(store, actors):
+    project, people = actors
+    worker = people['worker']
+    task = create(store, worker, project)
+    replacement = secrets.token_urlsafe(32)
+    store.provision_principal(worker.principal_id, replacement, grants={project: OPERATIONS})
+    error('authentication', lambda: store.authenticate(people['worker_token']))
+    current = store.authenticate(replacement)
+    assert current == worker
+    assert store.get_task(current, project, 'T1') == task
+    assert store.task_history(current, project, 'T1')[0]['actor'] == worker.principal_id
+    with psycopg.connect(store.dsn) as connection:
+        verifier = connection.execute('SELECT token_verifier FROM skybuild.principals WHERE principal_id = %s', (worker.principal_id,)).fetchone()[0]
+    assert verifier == hashlib.sha256(replacement.encode()).hexdigest()
+    assert verifier != replacement
+    error('validation', lambda: store.provision_principal('short', 'weak'))
+
+
+def test_project_and_operation_authorization_reload_database_grants(store, actors):
+    project, people = actors
+    worker = people['worker']
+    create(store, worker, project)
+    error('authorization', lambda: store.get_task(worker, project + '-other', 'T1'))
+    error('authorization', lambda: store.list_tasks(people['outsider'], project))
+    spoofed = Principal(people['outsider'].principal_id, True, {project: OPERATIONS})
+    error('authorization', lambda: store.list_tasks(spoofed, project))
+    store.provision_principal(worker.principal_id, people['worker_token'], grants={project: {'tasks:read'}})
+    error('authorization', lambda: store.update_task(worker, project, 'T1', {'title': 'Denied'}, 1, 'denied'))
+    assert store.get_task(worker, project, 'T1')['title'] == 'Test task'
+    assert store.list_tasks(people['owner'], project)
+
+
+def test_revision_history_restart_and_idempotency(store, actors):
+    project, people = actors
+    worker = people['worker']
+    body = {'task_id': 'T1', 'title': 'Unicode: café λ', 'description': 'Complete description', 'metadata': {'resume': 'handoff'}}
+    first = store.create_task(worker, project, body, 'same-key')
+    assert store.create_task(worker, project, dict(reversed(list(body.items()))), 'same-key') == first
+    error('idempotency_conflict', lambda: store.create_task(worker, project, {**body, 'title': 'Different'}, 'same-key'))
+    changed = store.update_task(worker, project, 'T1', {'status': 'blocked', 'blocker': 'Needs decision'}, 1, 'change')
+    assert changed['revision'] == 2
+    assert store.update_task(worker, project, 'T1', {'status': 'blocked', 'blocker': 'Needs decision'}, 1, 'change') == changed
+    error('stale_revision', lambda: store.update_task(worker, project, 'T1', {'title': 'Stale'}, 1, 'stale'))
+    error('idempotency_conflict', lambda: store.update_task(worker, project, 'T1', {'title': 'Different'}, 2, 'change'))
+    restarted = Store(store.dsn, store.expected_database)
+    assert restarted.get_task(worker, project, 'T1') == changed
+    history = restarted.task_history(worker, project, 'T1')
+    assert [event['revision'] for event in history] == [1, 2]
+    assert history[0]['before_state'] is None
+    assert history[1]['before_state'] == first
+    assert history[1]['after_state'] == changed
+    assert {event['actor'] for event in history} == {worker.principal_id}
+
+
+def test_idempotency_scope_includes_actor_project_and_operation(store, actors):
+    project, people = actors
+    body = {'task_id': 'T1', 'title': 'One', 'description': 'Brief'}
+    first = store.create_task(people['worker'], project, body, 'shared')
+    second = store.create_task(people['peer'], project, {**body, 'task_id': 'T2'}, 'shared')
+    third = store.create_task(people['owner'], project + '-other', body, 'shared')
+    updated = store.update_task(people['worker'], project, 'T1', {'title': 'Changed'}, 1, 'shared')
+    assert first['task_id'] != second['task_id']
+    assert third['project_id'] != first['project_id']
+    assert updated['revision'] == 2
+
+
+def test_dependency_validation_rolls_back_task_and_history(store, actors):
+    project, people = actors
+    worker = people['worker']
+    create(store, worker, project, 'A')
+    create(store, worker, project, 'B', dependencies=['A'])
+    error('dependency_cycle', lambda: store.update_task(worker, project, 'A', {'title': 'Rollback', 'dependencies': ['B']}, 1, 'cycle'))
+    assert store.get_task(worker, project, 'A')['title'] == 'Test task'
+    assert len(store.task_history(worker, project, 'A')) == 1
+    error('validation', lambda: create(store, worker, project, 'C', dependencies=['missing']))
+    error('not_found', lambda: store.get_task(worker, project, 'C'))
+    error('validation', lambda: store.update_task(worker, project, 'A', {'dependencies': ['A']}, 1, 'self'))
+    create(store, people['owner'], project + '-other', 'OnlyElsewhere')
+    error('validation', lambda: store.update_task(worker, project, 'A', {'dependencies': ['OnlyElsewhere']}, 1, 'cross-project'))
+
+
+def test_concurrent_dependencies_cannot_form_cycle(store, actors):
+    project, people = actors
+    worker = people['worker']
+    create(store, worker, project, 'A')
+    create(store, worker, project, 'B')
+    barrier = Barrier(2)
+    def attempt(task_id, dependency):
+        barrier.wait(timeout=5)
+        try:
+            return store.update_task(worker, project, task_id, {'dependencies': [dependency]}, 1, 'race-' + task_id)
+        except DomainError as failure:
+            return failure.code
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda pair: attempt(*pair), [('A', 'B'), ('B', 'A')]))
+    assert sum(isinstance(result, dict) for result in results) == 1
+    assert 'dependency_cycle' in results
+    assert sorted(len(store.get_task(worker, project, task)['dependencies']) for task in ('A', 'B')) == [0, 1]
+
+
+def test_concurrent_same_idempotency_key_creates_one_outcome(store, actors):
+    project, people = actors
+    worker = people['worker']
+    barrier = Barrier(2)
+    def attempt(_):
+        barrier.wait(timeout=5)
+        return create(store, worker, project)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first, second = pool.map(attempt, range(2))
+    assert first == second
+    assert len(store.task_history(worker, project, 'T1')) == 1
+
+
+@pytest.mark.parametrize('statement', [
+    "UPDATE skybuild.task_journal SET reason = 'rewritten' WHERE project_id = %s",
+    'DELETE FROM skybuild.task_journal WHERE project_id = %s',
+    'TRUNCATE skybuild.task_journal',
+])
+def test_journal_mutation_is_blocked_in_database(store, actors, statement):
+    project, people = actors
+    create(store, people['worker'], project)
+    with psycopg.connect(store.dsn) as connection:
+        with pytest.raises(psycopg.errors.RaiseException, match='append-only'):
+            connection.execute(statement, (project,) if '%s' in statement else None)
+        connection.rollback()
+    assert len(store.task_history(people['worker'], project, 'T1')) == 1
+
+
+def send(store, people, project, key='send', **fields):
+    return store.send_message(people['worker'], project, {
+        'recipient': people['peer'].principal_id, 'subject': 'Question', 'body': 'Message content', **fields,
+    }, key)
+
+
+def test_cord_durable_receipt_handle_and_recipient_isolation(store, actors):
+    project, people = actors
+    message = send(store, people, project)
+    restarted = Store(store.dsn, store.expected_database)
+    assert restarted.inbox(people['peer'], project) == [message]
+    assert restarted.inbox(people['worker'], project) == []
+    assert send(store, people, project) == message
+    error('authorization', lambda: store.message_action(people['worker'], project, message['message_id'], 'receipt', {}, 'wrong-recipient'))
+    receipt = store.message_action(people['peer'], project, message['message_id'], 'receipt', {}, 'seen')
+    assert receipt['delivered_at'] and receipt['handled_at'] is None
+    assert store.inbox(people['peer'], project) == [receipt]
+    assert store.message_action(people['peer'], project, message['message_id'], 'receipt', {}, 'seen-again') == receipt
+    handled = store.message_action(people['peer'], project, message['message_id'], 'handle', {}, 'handled')
+    assert handled['handled_at']
+    assert store.inbox(people['peer'], project) == []
+    assert store.message_action(people['peer'], project, message['message_id'], 'receipt', {}, 'seen') == receipt
+    error('not_found', lambda: store.message_action(people['owner'], project + '-other', message['message_id'], 'handle', {}, 'other-project'))
+
+
+def test_cord_reply_is_atomic_explicit_and_idempotent(store, actors):
+    project, people = actors
+    first = send(store, people, project)
+    body = {'subject': 'Answer', 'body': 'Reply content'}
+    reply = store.message_action(people['peer'], project, first['message_id'], 'reply', body, 'reply')
+    assert reply['reply_to'] == first['message_id']
+    assert reply['sender'] == people['peer'].principal_id
+    assert reply['recipient'] == people['worker'].principal_id
+    assert store.inbox(people['peer'], project)[0]['handled_at'] is None
+    assert store.inbox(people['peer'], project)[0]['replied_at']
+    assert store.message_action(people['peer'], project, first['message_id'], 'reply', body, 'reply') == reply
+    assert len(store.inbox(people['worker'], project)) == 1
+    second = send(store, people, project, key='second')
+    combined = store.message_action(people['peer'], project, second['message_id'], 'reply', {**body, 'handle_original': True}, 'combined')
+    assert combined['reply_to'] == second['message_id']
+    assert len(store.inbox(people['peer'], project)) == 1
+    third = send(store, people, project, key='third')
+    error('validation', lambda: store.message_action(people['peer'], project, third['message_id'], 'reply', {'subject': '', 'body': 'No', 'handle_original': True}, 'bad-reply'))
+    untouched = [row for row in store.inbox(people['peer'], project) if row['message_id'] == third['message_id']][0]
+    assert untouched['handled_at'] is None and untouched['replied_at'] is None
+
+
+def test_cord_validates_project_references_and_scopes(store, actors):
+    project, people = actors
+    error('validation', lambda: send(store, people, project, recipient=people['outsider'].principal_id))
+    error('validation', lambda: send(store, people, project, recipient='missing'))
+    create(store, people['owner'], project + '-other', 'ForeignTask')
+    error('not_found', lambda: send(store, people, project, task_id='ForeignTask'))
+    foreign = store.send_message(people['owner'], project + '-other', {'recipient': people['owner'].principal_id, 'subject': 'Other', 'body': 'Content'}, 'foreign')
+    error('not_found', lambda: send(store, people, project, reply_to=foreign['message_id']))
+    original = send(store, people, project, key='original')
+    peer = people['peer']
+    store.provision_principal(peer.principal_id, people['peer_token'], grants={project: {'cord:read', 'cord:handle'}})
+    error('authorization', lambda: store.message_action(peer, project, original['message_id'], 'reply', {'subject': 'No', 'body': 'Content'}, 'no-send'))
+    assert store.inbox(peer, project)[0]['replied_at'] is None
+
+
+def test_direct_send_reply_cannot_bypass_reply_authority_or_direction(store, actors):
+    project, people = actors
+    original = send(store, people, project)
+    body = {'subject': 'Answer', 'body': 'Content', 'reply_to': original['message_id']}
+    error('authorization', lambda: store.send_message(people['worker'], project, {**body, 'recipient': people['peer'].principal_id}, 'sender-cannot-reply'))
+    error('validation', lambda: store.send_message(people['peer'], project, {**body, 'recipient': people['peer'].principal_id}, 'wrong-direction'))
+    peer = people['peer']
+    store.provision_principal(peer.principal_id, people['peer_token'], grants={project: {'cord:read', 'cord:send'}})
+    error('authorization', lambda: store.send_message(peer, project, {**body, 'recipient': people['worker'].principal_id}, 'no-handle'))
+    assert store.inbox(peer, project)[0]['replied_at'] is None
+    store.provision_principal(peer.principal_id, people['peer_token'], grants={project: OPERATIONS})
+    reply = store.send_message(peer, project, {**body, 'recipient': people['worker'].principal_id}, 'valid-direct-reply')
+    assert reply['reply_to'] == original['message_id']
+    assert store.inbox(peer, project)[0]['replied_at']
+    assert store.inbox(peer, project)[0]['handled_at'] is None
+
+
+def test_reply_rolls_back_insert_if_original_update_fails(store, actors):
+    project, people = actors
+    original = send(store, people, project)
+    trigger = 'test_fail_' + uuid4().hex
+    function = psycopg.sql.Identifier('skybuild', trigger)
+    trigger_name = psycopg.sql.Identifier(trigger)
+    with psycopg.connect(store.dsn) as connection:
+        connection.execute(psycopg.sql.SQL(
+            "CREATE FUNCTION {}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+            "IF NEW.message_id::text = TG_ARGV[0] THEN RAISE EXCEPTION 'Injected original update failure'; "
+            "END IF; RETURN NEW; END; $$"
+        ).format(function))
+        connection.execute(psycopg.sql.SQL('CREATE TRIGGER {} BEFORE UPDATE ON skybuild.messages FOR EACH ROW EXECUTE FUNCTION {}({})').format(trigger_name, function, psycopg.sql.Literal(original['message_id'])))
+    try:
+        error('unavailable', lambda: store.message_action(people['peer'], project, original['message_id'], 'reply', {'subject': 'Answer', 'body': 'Content', 'handle_original': True}, 'rollback-reply'))
+        assert store.inbox(people['worker'], project) == []
+        assert store.inbox(people['peer'], project) == [original]
+    finally:
+        with psycopg.connect(store.dsn) as connection:
+            connection.execute(psycopg.sql.SQL('DROP TRIGGER {} ON skybuild.messages').format(trigger_name))
+            connection.execute(psycopg.sql.SQL('DROP FUNCTION {}()').format(function))
+    reply = store.message_action(people['peer'], project, original['message_id'], 'reply', {'subject': 'Answer', 'body': 'Content', 'handle_original': True}, 'rollback-reply')
+    assert store.inbox(people['worker'], project) == [reply]
+    assert store.inbox(people['peer'], project) == []
+
+
+def cord_history(store, project):
+    with store._connection() as connection:
+        return connection.execute('SELECT * FROM cord_journal WHERE project_id = %s', (project,)).fetchall()
+
+
+def test_cord_journal_records_actors_and_distinct_reply_handling(store, actors):
+    project, people = actors
+    original = send(store, people, project)
+    receipt = store.message_action(people['peer'], project, original['message_id'], 'receipt', {}, 'receipt')
+    reply = store.message_action(people['peer'], project, original['message_id'], 'reply', {'subject': 'Answer', 'body': 'Content', 'handle_original': True}, 'reply-handle')
+    events = cord_history(store, project)
+    assert len(events) == 4
+    by_action = {event['action']: event for event in events}
+    assert by_action['send']['actor'] == people['worker'].principal_id
+    assert by_action['send']['before_state'] is None
+    assert by_action['send']['after_state'] == original
+    assert by_action['receipt']['actor'] == people['peer'].principal_id
+    assert by_action['receipt']['before_state'] == original
+    assert by_action['receipt']['after_state'] == receipt
+    replied, handled = by_action['reply'], by_action['handle']
+    assert str(replied['original_message_id']) == original['message_id']
+    assert str(replied['reply_message_id']) == reply['message_id']
+    assert replied['reply_state'] == reply
+    assert replied['after_state']['replied_at']
+    assert replied['after_state']['handled_at'] is None
+    assert handled['before_state'] == replied['after_state']
+    assert handled['after_state']['handled_at']
+    assert replied['actor'] == handled['actor'] == people['peer'].principal_id
+    assert store.message_action(people['peer'], project, original['message_id'], 'reply', {'subject': 'Answer', 'body': 'Content', 'handle_original': True}, 'reply-handle') == reply
+    assert len(cord_history(store, project)) == 4
+    second = send(store, people, project, key='admin-message')
+    store.message_action(people['owner'], project, second['message_id'], 'handle', {}, 'admin-handle')
+    admin_event = next(event for event in cord_history(store, project) if str(event['message_id']) == second['message_id'] and event['action'] == 'handle')
+    assert admin_event['actor'] == people['owner'].principal_id
+    assert admin_event['actor'] != second['recipient']
+
+
+@pytest.mark.parametrize('statement', [
+    "UPDATE skybuild.cord_journal SET action = 'receipt' WHERE project_id = %s",
+    'DELETE FROM skybuild.cord_journal WHERE project_id = %s',
+    'TRUNCATE skybuild.cord_journal',
+])
+def test_cord_journal_mutation_is_blocked_in_database(store, actors, statement):
+    project, people = actors
+    send(store, people, project)
+    with psycopg.connect(store.dsn) as connection:
+        with pytest.raises(psycopg.errors.RaiseException, match='Cord journal is append-only'):
+            connection.execute(statement, (project,) if '%s' in statement else None)
+        connection.rollback()
+    assert len(cord_history(store, project)) == 1
+
+
+@pytest.mark.parametrize('action', ['send', 'receipt', 'handle', 'reply', 'reply-handle'])
+def test_cord_event_insert_failure_rolls_back_state_and_idempotency(store, actors, action):
+    project, people = actors
+    original = None if action == 'send' else send(store, people, project)
+    before = cord_history(store, project)
+    trigger = 'test_cord_fail_' + uuid4().hex
+    function, trigger_name = psycopg.sql.Identifier('skybuild', trigger), psycopg.sql.Identifier(trigger)
+    fail_action = 'handle' if action == 'reply-handle' else action
+    with psycopg.connect(store.dsn) as connection:
+        connection.execute(psycopg.sql.SQL(
+            "CREATE FUNCTION {}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+            "IF NEW.project_id = TG_ARGV[0] AND NEW.action = TG_ARGV[1] THEN RAISE EXCEPTION 'Injected Cord journal failure'; "
+            "END IF; RETURN NEW; END; $$"
+        ).format(function))
+        connection.execute(psycopg.sql.SQL('CREATE TRIGGER {} BEFORE INSERT ON skybuild.cord_journal FOR EACH ROW EXECUTE FUNCTION {}({}, {})').format(trigger_name, function, psycopg.sql.Literal(project), psycopg.sql.Literal(fail_action)))
+    def mutation():
+        if action == 'send':
+            return send(store, people, project, key='failure-key')
+        body = {'subject': 'Answer', 'body': 'Content', 'handle_original': action == 'reply-handle'} if action.startswith('reply') else {}
+        return store.message_action(people['peer'], project, original['message_id'], 'reply' if action.startswith('reply') else action, body, 'failure-key')
+    try:
+        error('unavailable', mutation)
+        assert cord_history(store, project) == before
+        assert store.inbox(people['worker'], project) == []
+        assert store.inbox(people['peer'], project) == ([] if original is None else [original])
+        with store._connection() as connection:
+            assert connection.execute("SELECT count(*) AS count FROM idempotency WHERE project_id = %s AND idempotency_key = 'failure-key'", (project,)).fetchone()['count'] == 0
+    finally:
+        with psycopg.connect(store.dsn) as connection:
+            connection.execute(psycopg.sql.SQL('DROP TRIGGER {} ON skybuild.cord_journal').format(trigger_name))
+            connection.execute(psycopg.sql.SQL('DROP FUNCTION {}()').format(function))
+    result = mutation()
+    assert mutation() == result
+    assert len(cord_history(store, project)) == len(before) + (2 if action == 'reply-handle' else 1)
+
+
+@pytest.mark.parametrize('field,value', [('description', ''), ('description', '   '), ('body', ''), ('body', '   ')])
+def test_store_rejects_empty_required_text(store, actors, field, value):
+    project, people = actors
+    if field == 'description':
+        error('validation', lambda: create(store, people['worker'], project, description=value))
+    else:
+        error('validation', lambda: send(store, people, project, body=value))
+
+
+def test_literal_unicode_escape_survives_create_update_metadata_keys_and_values(store, actors):
+    project, people = actors
+    literal = 'literal escape: ' + chr(92) + 'u0000'
+    metadata = {literal: {'nested': [literal]}}
+    first = create(store, people['worker'], project, description=literal, metadata=metadata)
+    assert first['description'] == literal
+    assert first['metadata'] == metadata
+    updated = store.update_task(people['worker'], project, 'T1', {'description': literal + ' updated', 'metadata': {literal: literal}}, 1, 'literal-update')
+    assert updated['description'] == literal + ' updated'
+    assert updated['metadata'] == {literal: literal}
+    assert store.get_task(people['worker'], project, 'T1') == updated
+    message = send(store, people, project, body=literal)
+    assert message['body'] == literal
+
+
+@pytest.mark.parametrize('fields', [
+    {'description': 'actual\x00NUL'},
+    {'metadata': {'actual\x00key': 'value'}},
+    {'metadata': {'nested': [{'key': 'actual\x00value'}]}},
+])
+def test_actual_nul_in_fields_metadata_keys_or_values_is_rejected(store, actors, fields):
+    project, people = actors
+    error('validation', lambda: create(store, people['worker'], project, 'Invalid', **fields))
+    first = create(store, people['worker'], project)
+    error('validation', lambda: store.update_task(people['worker'], project, 'T1', fields, 1, 'actual-nul'))
+    assert store.get_task(people['worker'], project, 'T1') == first
+    assert len(store.task_history(people['worker'], project, 'T1')) == 1
+
+
+def test_json_traversal_bounds_depth_and_cycles(store, actors):
+    project, people = actors
+    nested = {}
+    for _ in range(101):
+        nested = {'nested': nested}
+    error('validation', lambda: create(store, people['worker'], project, 'Deep', metadata=nested))
+    cyclic = {}
+    cyclic['cycle'] = cyclic
+    error('validation', lambda: create(store, people['worker'], project, 'Cycle', metadata=cyclic))
+
+
+@pytest.mark.parametrize('identifier', ['.', '..', 'a/b', 'a\\b', 'a%2Fb', 'a\n', 'a\x85'])
+def test_store_rejects_unsafe_route_identifiers(store, actors, identifier):
+    project, people = actors
+    error('validation', lambda: create(store, people['worker'], project, identifier))
+    error('validation', lambda: store.list_tasks(people['worker'], identifier))
+    error('validation', lambda: store.provision_principal(identifier, secrets.token_urlsafe(32)))
+
+
+@pytest.mark.parametrize('body', [
+    {'is_admin': True}, {'task_id': 'changed'}, {'status': []}, {'priority': True},
+    {'metadata': {'bad': float('nan')}}, {'metadata': {'null': '\x00'}},
+    {'next_action': '', 'blocker': None}, {'responsible': ''}, {'dependencies': 'T2'},
+    {'title': '\ud800'}, {'metadata': {'too_large': 'x' * 16385}},
+])
+def test_task_update_validation_preserves_projection(store, actors, body):
+    project, people = actors
+    first = create(store, people['worker'], project)
+    error('validation', lambda: store.update_task(people['worker'], project, 'T1', body, 1, 'bad'))
+    assert store.get_task(people['worker'], project, 'T1') == first
+
+
+def test_bounded_views_and_no_unfinished_task_without_next_action(store, actors):
+    project, people = actors
+    create(store, people['worker'], project, 'A', priority=2)
+    create(store, people['worker'], project, 'B', priority=1)
+    assert [row['task_id'] for row in store.list_tasks(people['worker'], project, limit=1)] == ['B']
+    assert [row['task_id'] for row in store.list_tasks(people['worker'], project, limit=1, offset=1)] == ['A']
+    for limit, offset in ((0, 0), (101, 0), (1, -1), (True, 0)):
+        error('validation', lambda: store.list_tasks(people['worker'], project, limit=limit, offset=offset))
+        error('validation', lambda: store.inbox(people['worker'], project, limit=limit, offset=offset))
+    error('validation', lambda: create(store, people['worker'], project, 'Invalid', next_action=None, blocker=None))
+    assert create(store, people['worker'], project, 'Done', status='done', next_action=None)['status'] == 'done'
