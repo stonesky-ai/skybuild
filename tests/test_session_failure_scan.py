@@ -37,3 +37,11 @@ def test_scan_ignores_running_and_successful_quoted_failures(tmp_path):
 
 def test_empty_recent_window_has_no_failures(tmp_path):
     assert scanner.scan(tmp_path, 30)["categories"] == {}
+
+
+def test_long_session_in_old_date_folder_is_selected_by_modification_time(tmp_path):
+    folder = tmp_path / "2026/01/01"
+    folder.mkdir(parents=True)
+    path = folder / "rollout-long-running.jsonl"
+    path.write_text(json.dumps(event(1, "FAILED old-session-test - AssertionError")) + "\n")
+    assert scanner.scan(tmp_path, 30)["categories"] == {"test_failure": 1}

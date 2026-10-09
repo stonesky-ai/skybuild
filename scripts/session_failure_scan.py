@@ -21,11 +21,17 @@ PATTERNS = {
 
 def scan(log_root: Path, minutes: int) -> dict:
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
-    current_day = datetime.now(timezone.utc).date()
-    days = (current_day, cutoff.date())
-    candidates = sorted({path for day in days for path in
-                         (log_root / f"{day:%Y/%m/%d}").glob("*.jsonl")
-                         if path.stat().st_mtime >= cutoff.timestamp()})
+    # A long-running session stays under its creation date while receiving new events.
+    candidates = []
+    visited = 0
+    deadline = time.monotonic() + 5
+    for path in log_root.rglob("*.jsonl"):
+        visited += 1
+        if visited > 10_000 or time.monotonic() > deadline:
+            raise RuntimeError("Session log inventory exceeded its bound")
+        if path.stat().st_mtime >= cutoff.timestamp():
+            candidates.append(path)
+    candidates.sort()
     if len(candidates) > 200:
         raise RuntimeError("Too many recent session logs for one bounded scan")
     if not candidates:
