@@ -17,7 +17,8 @@ class ClientError(Exception):
 
 
 class Client:
-    def __init__(self, base_url: str, token: str, *, retries: int = 2, timeout: float = 10, transport: httpx.BaseTransport | None = None) -> None:
+    def __init__(self, base_url: str, token: str, *, retries: int = 2, timeout: float = 10,
+                 transport: httpx.BaseTransport | None = None, trust_env: bool = True) -> None:
         if not 0 <= retries <= 5 or not 0 < timeout <= 120:
             raise ValueError("Retries must be 0–5 and timeout must be 0–120 seconds")
         if not token or "\n" in token or "\r" in token:
@@ -26,7 +27,8 @@ class Client:
         if url.scheme not in {"http", "https"} or not url.host or url.userinfo or url.query or url.fragment:
             raise ValueError("Use an HTTP service URL without credentials, query, or fragment")
         self.retries = retries
-        self.http = httpx.Client(base_url=base_url.rstrip("/") + "/", headers={"Authorization": f"Bearer {token}"}, timeout=timeout, transport=transport, follow_redirects=False)
+        self.http = httpx.Client(base_url=base_url.rstrip("/") + "/", headers={"Authorization": f"Bearer {token}"}, timeout=timeout,
+                                 transport=transport, follow_redirects=False, trust_env=trust_env)
 
     def close(self) -> None:
         self.http.close()
@@ -79,6 +81,9 @@ class Client:
 
     def create_task(self, project_id: str, body: dict, *, idempotency_key: str | None = None) -> dict:
         return self.request("POST", self._path(project_id, "tasks"), body=body, idempotency_key=idempotency_key)
+
+    def whoami(self) -> dict:
+        return self.request("GET", "api/v1/me")
 
     def list_tasks(self, project_id: str, *, limit: int = 100, offset: int = 0,
                    after_task_id: str | None = None, by_id: bool = False) -> list:
