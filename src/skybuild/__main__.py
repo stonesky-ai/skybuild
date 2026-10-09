@@ -45,6 +45,9 @@ def main(argv: list[str] | None = None) -> int:
     audit = commands.add_parser("ledger-audit", help="Audit frozen versus current Markdown without database access or authority changes")
     audit.add_argument("--ledger-dir", type=Path, default=Path("docs/design"))
     audit.add_argument("--contract", type=Path, default=Path("docs/design/implementation/frozen_ledger_import.json"))
+    for command in ("audit-runtime-role", "provision-runtime-role"):
+        role_command = commands.add_parser(command, help="Inspect or qualify a pre-created restricted LOGIN role using SKYBUILD_ROLE_ADMIN_DSN")
+        role_command.add_argument("role")
     commands.add_parser("migrate", help="Apply migrations to the explicitly configured dedicated database")
     provision = commands.add_parser("provision", help="Provision a principal using SKYBUILD_TOKEN or --token-stdin")
     provision.add_argument("principal_id")
@@ -183,6 +186,17 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"scanned": scanned, "reassessed": reassessed,
                               "complete": next_cursor is None, "next_after_task_id": next_cursor}, ensure_ascii=False, indent=2))
             return 0
+        if args.command in ("audit-runtime-role", "provision-runtime-role"):
+            import psycopg
+            from .runtime_role import audit_runtime_role, provision_runtime_role
+
+            action = audit_runtime_role if args.command == "audit-runtime-role" else provision_runtime_role
+            with psycopg.connect(_environment("SKYBUILD_ROLE_ADMIN_DSN"), connect_timeout=5) as connection:
+                connection.execute("SET LOCAL statement_timeout = '10s'")
+                connection.execute("SET LOCAL lock_timeout = '5s'")
+                result = action(connection, _environment("SKYBUILD_EXPECTED_DATABASE"), args.role)
+            print(json.dumps(result, indent=2))
+            return 0 if result["ok"] else 1
         from .store import Store
 
         store = Store(_environment("SKYBUILD_DSN"), _environment("SKYBUILD_EXPECTED_DATABASE"))

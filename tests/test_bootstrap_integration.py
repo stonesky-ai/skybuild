@@ -16,8 +16,8 @@ from skybuild.api import create_app
 from skybuild.store import Store
 
 
-@pytest.fixture
-def service():
+@pytest.fixture(params=["migration-owner", "runtime"])
+def service(request):
     dsn = os.environ.get("SKYBUILD_HTTP_TEST_DSN")
     if not dsn:
         pytest.skip("Set SKYBUILD_HTTP_TEST_DSN to a task-owned disposable database")
@@ -33,6 +33,9 @@ def service():
     store.provision_principal(worker, worker_token, grants={project: [
         "tasks:read", "tasks:write", "cord:send", "cord:read", "cord:handle",
     ]})
+    if request.param == "runtime":
+        _, runtime_dsn, _, _ = request.getfixturevalue("restricted_database")
+        store = Store(runtime_dsn, database)
     with TestClient(create_app(store), raise_server_exceptions=False) as client:
         yield client, store, project, owner, worker, owner_token, worker_token
 
@@ -215,8 +218,8 @@ def test_http_preserves_literal_unicode_escape_but_rejects_nul(service):
 
 
 def test_cli_service_process_restart_preserves_task(service, tmp_path):
-    _, _, project, _, _, token, _ = service
-    dsn = os.environ["SKYBUILD_HTTP_TEST_DSN"]
+    _, store, project, _, _, token, _ = service
+    dsn = store.dsn
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
