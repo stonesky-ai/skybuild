@@ -1,6 +1,6 @@
 # SkyBuild current tasks
 
-Authority: Git-backed planning ledger, revision A38, 2026-10-09. API cutover has not occurred. See [architecture section 4](architecture.md#4-temporary-task-authority-and-transition) for the lifecycle. Order below is proposed priority. The owner authorizes repository implementation and isolated validation toward the parallel MVP; live authority cutover, unqualified inference, paid starts and deployment retain separate controls.
+Authority: Git-backed planning ledger, revision A39, 2026-10-09. API cutover has not occurred. See [architecture section 4](architecture.md#4-temporary-task-authority-and-transition) for the lifecycle. Order below is proposed priority. The owner authorizes repository implementation and isolated validation toward the parallel MVP; live authority cutover, unqualified inference, paid starts and deployment retain separate controls.
 
 Each task ID lives in exactly one ledger. Related ledgers: [deferred](deferred.md), [alreadydone](alreadydone.md). These are new SkyBuild project records, not updates to the old SkyKeep queue. Until claims/fencing exist, coordinate any later authorized execution manually and serially.
 
@@ -67,6 +67,15 @@ Each task ID lives in exactly one ledger. Related ledgers: [deferred](deferred.m
 - Brief: define/rehearse a lossless importer, freeze at a commit/hash, validate all three ledgers and history, record one authority switch, then make file ledgers generated/read-only. No bidirectional sync.
 - Acceptance: IDs, dependencies, status counts, ordering, full briefs and evidence match; repeat import is safe; conflict import is refused; API/restart/import checks pass; post-write recovery preserves API authority.
 - Architecture: sections 4–7. Plan: area 3.
+
+## SKYBUILD-TASK-WORKBENCH — Task page, explicit workflow and immutable journal
+
+- Status: in-progress (initial preview UI tranche complete; real-data wire-in remains). Phase: waiting for the live tasks endpoint and imported task records. Responsible: lead. Next action: after API serving and task cutover, connect the Workbench to the real project task list and journal; verify task list, detail and history responses while keeping preview data visibly fake. Priority: normal. Area: task management. Dependencies: SKYBUILD-BOOTSTRAP (serves `GET /api/v1/projects/{project_id}/tasks` and history); SKYBUILD-TASK-CUTOVER (imports the real task records and switches authority).
+- Brief: provide outstanding-task status/phase, next action, owner, blockers and journal; edit description/scope/definition of done/considerations, request rework/reassessment, split/merge, set dependencies and defer by date or milestone. Follow the explicit state-machine flowchart and guarded transitions. Bootstrap records manual journaled state; execution controls later enable automatic reassessment and qualified model planning scans. The local page currently has a fake preview and an implemented non-preview REST client path; successfully wire that path to real data after both dependencies are complete.
+- Acceptance: the initial local UI remains useful and labels fake records; the Workbench reads actual task records and journals from the authoritative API after cutover; every action has a known next state or explicit conflict; journal is append-only with no edit/delete path, including by ADR. Concurrent changes preserve task IDs, lineage, dependency correctness, prior evidence and budget history. Changed inputs invalidate affected readiness; live/unknown effects are reconciled before replacement work. Date/milestone triggers reassess without granting execution authority. Basic controls work with no model available. Multi-person approval chains remain deferred.
+- Completed preview evidence: branch `task/task-workbench`, commits `d87b6b0`, `9b553ca`, `58bd3b9`, `d7ef0c2`, `8290283`, `9cb25ca`, `f877185`, `587e66b`, `801c87c`, `baf6d93`, `5af2fd1`, `0280b50`, and `7b8c6d1`. This is preview/UI evidence, not real-data wire-in acceptance.
+- Architecture: sections 5, 9 and 13; [workflow](task_workflow.md). Plan: area 3a. ADR: [0031](../adr/tasks.md#adr-0031).
+- Preview boundary: the local Workbench uses an always-signed-in fake `user1` account and read-only task records parsed from this ledger. Each preview record is marked fake and has no live journal or write path. Real user accounts, browser sessions and human-to-API authentication remain deferred under [SKYBUILD-USER-LOGIN](deferred.md#skybuild-user-login). The demo credentials do not authorize API or database access.
 
 ## SKYBUILD-LEGACY-MIGRATION — Extract and port every legacy build API writer
 
