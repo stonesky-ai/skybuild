@@ -21,11 +21,21 @@ PATTERNS = {
 
 def scan(log_root: Path, minutes: int) -> dict:
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+    current_day = datetime.now(timezone.utc).date()
+    days = (current_day, cutoff.date())
+    candidates = sorted({path for day in days for path in
+                         (log_root / f"{day:%Y/%m/%d}").glob("*.jsonl")
+                         if path.stat().st_mtime >= cutoff.timestamp()})
+    if len(candidates) > 200:
+        raise RuntimeError("Too many recent session logs for one bounded scan")
+    if not candidates:
+        return {"window_minutes": minutes, "sessions_scanned": 0, "categories": {},
+                "agents_by_category": {}, "note": "No recent session logs found"}
     grep = subprocess.run(
-        ["rg", "-l", "-g", "*.jsonl", "Script error|Script failed|FAILED |AssertionError|SyntaxError|"
+        ["rg", "-l", "--max-filesize", "50M", "Script error|Script failed|FAILED |AssertionError|SyntaxError|"
          "ImportError|ModuleNotFoundError|No such file or directory|Permission denied|"
          "Bad owner or permissions|timed out|TimeoutExpired|apply_patch verification failed|exit_code",
-         str(log_root)], capture_output=True, text=True, check=False,
+         *map(str, candidates)], capture_output=True, text=True, check=False, timeout=20,
     )
     if grep.returncode not in {0, 1}:
         raise RuntimeError("ripgrep failed to read session logs")
@@ -66,7 +76,7 @@ def scan(log_root: Path, minutes: int) -> dict:
                     except ValueError:
                         result = None
                     if isinstance(result, dict) and "exit_code" in result:
-                        if result["exit_code"] == 0:
+                        if type(result["exit_code"]) is not int or result["exit_code"] == 0:
                             continue
                         output = str(result.get("output", ""))
                     elif raw.startswith(("Script error", "Script failed")):
