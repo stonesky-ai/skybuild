@@ -4,7 +4,8 @@
 Review evidence is an operator-supplied artifact, not a trusted publisher
 qualification. GitHub's merge API has no atomic expected-base CAS: another writer
 can move the base after the last check. A post-publication mismatch is reported
-as failure and cannot undo publication. Serialize publishers externally.
+as failure and cannot undo publication. Local invocations serialize; coordinate
+publishers outside this repository lock separately.
 """
 import argparse
 import hashlib
@@ -16,7 +17,7 @@ import sys
 import tempfile
 from uuid import uuid4
 from _repo_guard import RepoGuardError, verify_skybuild, verify_skybuild_remote
-from _worktree_capacity import reserve_worktree_slots
+from _worktree_capacity import reserve_worktree_slots, serialize_integrations
 
 
 def run(argv, cwd):
@@ -64,6 +65,12 @@ def integrate(args):
         raise RuntimeError("Review evidence must contain the exact expected head")
     if args.expected_base.encode() not in evidence:
         raise RuntimeError("Review evidence must contain the exact expected base")
+    with serialize_integrations(root):
+        return _integrate_locked(args, root, evidence)
+
+
+def _integrate_locked(args, root, evidence):
+    """Hold publication ownership through Git/GitHub observation and cleanup."""
     gh_repo = ["--repo", "stonesky-ai/skybuild"]
 
     def view():
@@ -94,13 +101,18 @@ def integrate(args):
     # Resolve both objects locally; fail if fetch and remote inspection raced.
     for oid in (base, head):
         run(["git", "cat-file", "-e", oid + "^{commit}"], root)
-    with reserve_worktree_slots(root, 1), tempfile.TemporaryDirectory(prefix="skybuild-pr-candidate-") as directory:
+    with tempfile.TemporaryDirectory(prefix="skybuild-pr-candidate-") as directory:
         candidate = Path(directory) / "checkout"
         added = False
         artifact = None
         try:
-            run(["git", "worktree", "add", "--detach", str(candidate), base], root)
-            added = True
+            # Noncooperating publishers can still move refs after observation.
+            view()
+            if remote_oid("refs/heads/" + args.base) != base or remote_oid(f"refs/pull/{args.pr}/head") != head:
+                raise RuntimeError("Remote refs changed before candidate creation")
+            with reserve_worktree_slots(root, 1):
+                run(["git", "worktree", "add", "--detach", str(candidate), base], root)
+                added = True
             run(["git", "-c", "user.name=SkyBuild candidate", "-c", "user.email=candidate@localhost",
                  "merge", "--no-ff", "--no-edit", head], candidate)
             candidate_head = run(["git", "rev-parse", "HEAD"], candidate)
