@@ -74,6 +74,8 @@ def verify_assignment(envelope: dict, repo: Path, *, worker: str) -> dict:
     if not isinstance(envelope["model_limit"], str) or not 0 < len(envelope["model_limit"]) <= 200:
         raise AssignmentError("Assignment needs a model limit")
     brief_path = _path(envelope["brief_path"])
+    if not brief_path.startswith("docs/design/assignments/") or not brief_path.endswith(".json"):
+        raise AssignmentError("Brief must be a committed assignment JSON file")
     repo = repo.resolve()
     root = Path(_git(repo, "rev-parse", "--show-toplevel").decode().strip()).resolve()
     if root != repo or not (repo / "docs/design/architecture.md").is_file():
@@ -89,13 +91,19 @@ def verify_assignment(envelope: dict, repo: Path, *, worker: str) -> dict:
     if not mode or mode[0] != "100644":
         raise AssignmentError("Brief must be a committed regular file")
     brief = _git(repo, "show", f"{base}:{brief_path}")
-    heading = re.compile(r"(?:\A|\n)## " + re.escape(task_id) + r"\s+[—–-]\s+")
     try:
-        brief_text = brief.decode("utf-8")
-    except UnicodeError as error:
-        raise AssignmentError("Brief is not UTF-8") from error
-    if hashlib.sha256(brief).hexdigest() != digest or not heading.search(brief_text):
-        raise AssignmentError("Brief hash or task ID differs from assignment")
+        document = json.loads(brief.decode("utf-8"))
+    except (UnicodeError, ValueError) as error:
+        raise AssignmentError("Brief must contain UTF-8 JSON") from error
+    if hashlib.sha256(brief).hexdigest() != digest:
+        raise AssignmentError("Brief hash differs from assignment")
+    committed_fields = {"assignment_id", "task_id", "worker", "dispatcher", "branch",
+                        "owned_paths", "checks", "model_limit"}
+    if (not isinstance(document, dict) or set(document) != committed_fields | {"schema", "next_action"}
+            or document.get("schema") != "manual-work-brief-v1"
+            or not isinstance(document.get("next_action"), str) or not document["next_action"].strip()
+            or any(document[field] != envelope[field] for field in committed_fields)):
+        raise AssignmentError("Cord assignment differs from committed brief")
     return {"assignment_id": envelope["assignment_id"], "task_id": task_id, "worker": worker,
             "base_sha": base, "brief_path": brief_path, "branch": branch, "owned_paths": paths,
             "verified": True, "authority": "markdown"}
