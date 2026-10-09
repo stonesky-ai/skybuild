@@ -1,6 +1,6 @@
 # SkyBuild implementation plan
 
-Derived from architecture revision A35, 2026-10-08. Status: MVP sequence refined; the owner subsequently authorized Sol/Luna subprocesses to begin implementation and isolated validation while away. Live cutover, fleet activation and deployment remain separate boundaries. [architecture.md](architecture.md) governs. This plan supersedes the delivery section of the dated combined revision 2 plan.
+Derived from architecture revision A36, 2026-10-09. Status: MVP sequence refined; the owner subsequently authorized Sol/Luna subprocesses to begin implementation and isolated validation while away. Live cutover, fleet activation and deployment remain separate boundaries. [architecture.md](architecture.md) governs. This plan supersedes the delivery section of the dated combined revision 2 plan.
 
 ## Planning discipline
 
@@ -52,6 +52,8 @@ Assign non-overlapping files or serialize shared-interface changes. Keep one sch
 ### Essential now, parallel operations, and later scope
 
 Essential MVP controls include basic task editing and stuck-task visibility, an append-only journal, independent observation, applicable authorization/budget/query-cutoff enforcement, separate-session code review, bundled integration, and the stable-controller/manual-recovery boundary. A small UI is sufficient; these behaviors cannot be dropped as dashboard polish.
+
+Roll out the bounded CPU-only host watcher as development tooling on each active SkyBuild box, including Wonko, before relying on host resource readings for heavy local gates. Commit its script and skill together, update each checkout to that version, and have each local Codex session load the checkout-local skill. One minute-spaced process per host-local status file samples memory reserve, workspace and temporary disk headroom, task-owned disposable Docker containers, and stale or prunable worktree metadata for its checkout. It writes one atomic status file without model polling. Treat stale or unknown readings as insufficient evidence for a new heavy gate. Start with the owner's 8 GiB reserve on this machine and set each other host's reserve explicitly. The watcher reports only; it neither launches workers nor cleans resources. Add owned worker processes and further resources when lifecycle identity and ownership make those observations reliable. This early aid feeds gate decisions but does not satisfy the managed observer or admission milestones.
 
 Daily database dump-file commits remain a normal-priority planned operation after the database exists. Develop this alongside the delivery path and settle its destination/encryption/retention before enabling publication. It is not a reason to wait for the separate low-priority restore/journal-rebuild drill. This refinement does not silently defer the daily task or claim database recovery from source commits.
 
