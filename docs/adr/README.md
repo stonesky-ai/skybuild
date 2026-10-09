@@ -40,5 +40,6 @@ Use sequential filenames NNNN-short-title.md. Status is proposed, accepted, reje
 | [0032](0032-shared-inference-capacity.md) | Accepted shared free inference and visible tradeoffs; capability/limits need qualification | Separate Qwen 4, Recall 2 and BGE-M3 1 reported pools; bounded coding, shared test capacity and integration-aware dispatch. |
 
 | [0033](0033-independent-review-and-compactness.md) | Accepted independent review and post-MVP quality feature; defaults/mechanics proposed | Separate adversarial review with actionable fixes/tests; retain configurable complexity/size criteria after the self-building parallel-worker MVP. |
+| [0034](0034-post-mvp-quality-debt-and-repo-review.md) | Accepted post-MVP priority, cadence and serialization; counting/fencing mechanics proposed | Clear actual Ruff/McCabe debt early; run one whole-repository review after 1,000 commits or 5,000 changed code lines, only after prior fixes land. |
 
 For a new record, state date/status, context, decision, alternatives, consequences, governing architecture sections and any unresolved choices. Keep it concise enough to explain why the current design exists.

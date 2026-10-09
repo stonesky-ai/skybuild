@@ -26,7 +26,7 @@ def _refuse(message: str) -> None:
     raise DomainError("import_contract", message, 409)
 
 
-def prepare_import(ledger_dir: Path, contract_path: Path) -> dict:
+def prepare_import(ledger_dir: Path, contract_path: Path, *, repository: Path | None = None) -> dict:
     """Validate exact committed source bytes and return a reviewable import plan."""
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
     if set(contract) != {"schema_version", "commit", "content_sha256", "sources", "dependencies"} or contract["schema_version"] != 1:
@@ -38,7 +38,7 @@ def prepare_import(ledger_dir: Path, contract_path: Path) -> dict:
     manifest = build_manifest(paths)
     if manifest["sources"] != contract["sources"] or manifest["content_sha256"] != contract["content_sha256"]:
         _refuse("Ledger bytes differ from frozen contract")
-    repo = ledger_dir.parent.parent
+    repo = repository if repository is not None else ledger_dir.parent.parent
     for path in paths:
         result = subprocess.run(
             ["git", "show", f"{commit}:docs/design/{path.name}"], cwd=repo,

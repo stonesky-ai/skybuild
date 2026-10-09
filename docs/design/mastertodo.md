@@ -1,6 +1,6 @@
 # SkyBuild current tasks
 
-Authority: Git-backed planning ledger, revision A33, 2026-10-08. API cutover has not occurred. See [architecture section 4](architecture.md#4-temporary-task-authority-and-transition) for the lifecycle. Order below is proposed priority, not execution authorization. Implementation remains unauthorized.
+Authority: Git-backed planning ledger, revision A34, 2026-10-08. API cutover has not occurred. See [architecture section 4](architecture.md#4-temporary-task-authority-and-transition) for the lifecycle. Order below is proposed priority, not execution authorization. Implementation remains unauthorized.
 
 Each task ID lives in exactly one ledger. Related ledgers: [deferred](deferred.md), [alreadydone](alreadydone.md). These are new SkyBuild project records, not updates to the old SkyKeep queue. Until claims/fencing exist, coordinate any later authorized execution manually and serially.
 
@@ -89,6 +89,7 @@ Each task ID lives in exactly one ledger. Related ledgers: [deferred](deferred.m
 - Dependencies: useful SKYBUILD-BOOTSTRAP and SKYBUILD-TASK-CUTOVER, minimal SKYBUILD-TASK-WORKBENCH, applicable SKYBUILD-EXECUTION-CONTROLS and SKYBUILD-KEEPER-ADOPTION slices, SKYBUILD-BUNDLED-INTEGRATION and one qualified author/reviewer profile. SKYBUILD-SHARED-INFERENCE applies only when selected; disjoint SkyBuild authority does not require unrelated legacy migration.
 - Brief: compose existing components into a running self-building product, rather than stopping at the launch-free API. Keep the accepted controller usable while at least two independent task attempts build features in isolated owned worktrees.
 - Acceptance: independently review, combine, test and publish accepted changes; demonstrate a compatible controlled update and one rework/interruption recovery with durable next action and no duplicate work. Shared budgets, slots, model cutoff and stable-controller authority hold. Dedicated complexity/size gates and GUI, all provider variants, complete extraction and cloud/HA features do not block this milestone.
+- A34 follow-on: once this milestone runs, prioritize SKYBUILD-QUALITY-GATES and SKYBUILD-QUALITY-DEBT-CLEANUP, then start the serialized SKYBUILD-REPO-REVIEW-CADENCE. These post-MVP tasks do not change this milestone's acceptance.
 - Architecture: sections 3, 13 and 16. Plan: MVP delivery target. This is acceptance work, not another subsystem or execution authorization.
 
 ## SKYBUILD-KEEPER-ADOPTION — Preserve Keeper and cover every launcher

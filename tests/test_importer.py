@@ -2,6 +2,8 @@
 
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
@@ -29,8 +31,20 @@ def apply(store, plan, contract=CONTRACT, expected=None):
 
 
 @pytest.fixture
-def plan():
-    return prepare_import(LEDGERS, CONTRACT)
+def plan(tmp_path, monkeypatch):
+    # Rehearse the identified freeze, not mutable live Markdown task authority.
+    root = tmp_path / "frozen"
+    ledger_dir = root / "docs/design"
+    ledger_dir.mkdir(parents=True)
+    commit = json.loads(CONTRACT.read_text())["commit"]
+    subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+    subprocess.run(["git", "fetch", "--quiet", str(ROOT), commit], cwd=root, check=True)
+    for name in ("mastertodo.md", "deferred.md", "alreadydone.md"):
+        blob = subprocess.run(["git", "show", f"{commit}:docs/design/{name}"], cwd=root,
+                              capture_output=True, check=True).stdout
+        (ledger_dir / name).write_bytes(blob)
+    monkeypatch.setattr(sys.modules[__name__], "LEDGERS", ledger_dir)
+    return prepare_import(ledger_dir, CONTRACT)
 
 
 @pytest.fixture
@@ -86,7 +100,7 @@ def test_atomic_import_replay_api_and_restart(plan, fresh_store):
         assert denied.status_code == 409
         assert denied.json()["error"]["code"] == "authority"
     restarted = Store(store.dsn, store.expected_database)
-    assert restarted.readiness()["schema_version"] == 4
+    assert restarted.readiness()["schema_version"] == 9
     assert apply(restarted, plan)["result"] == "unchanged"
     with store._connection() as connection:
         assert connection.execute("SELECT authority FROM ledger_imports").fetchone()["authority"] == "markdown"

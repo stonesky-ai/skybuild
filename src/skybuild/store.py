@@ -13,9 +13,12 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from .contracts import DomainError, Principal, valid_identifier
+from .claims import Claims
+from .admission import CPUAdmission
+from .observations import Observations
 
 
-OPERATIONS = frozenset({'tasks:read', 'tasks:write', 'cord:send', 'cord:read', 'cord:handle'})
+OPERATIONS = frozenset({'tasks:read', 'tasks:write', 'tasks:claim', 'cord:send', 'cord:read', 'cord:handle'})
 TASK_FIELDS = frozenset({
     'title', 'description', 'status', 'priority', 'dependencies', 'acceptance_criteria',
     'architecture_refs', 'assignee', 'phase', 'next_action', 'blocker', 'responsible', 'metadata',
@@ -91,7 +94,7 @@ def _public(value):
     return value
 
 
-class Store:
+class Store(Claims, CPUAdmission, Observations):
     def __init__(self, dsn: str, expected_database: str):
         self.dsn = dsn
         self.expected_database = _text(expected_database, 'expected_database', 63)
@@ -267,7 +270,11 @@ class Store:
         return values
 
     def _replace_task(self, connection, principal, project_id, task_id, before, changes, *, operation, reason):
+        self._require_no_effect_exposure(connection, project_id, task_id)
         values = self._task_values(changes, before)
+        self._advance_readiness(connection, project_id, task_id, values,
+                                acknowledge=operation in {'ready', 'completed'},
+                                preserve_input=operation == 'completed')
         columns = [key for key in values if key != 'dependencies']
         parameters = [Jsonb(values[key]) if key == 'metadata' else values[key] for key in columns]
         assignments = sql.SQL(', ').join(sql.SQL('{} = %s').format(sql.Identifier(key)) for key in columns)
@@ -275,7 +282,63 @@ class Store:
         self._dependencies(connection, project_id, task_id, values['dependencies'])
         after = self._task(connection, project_id, task_id)
         self._journal(connection, principal, after, before, operation=operation, reason=reason)
+        self._invalidate_dependents(connection, principal, project_id, task_id)
         return after
+
+    @staticmethod
+    def _advance_readiness(connection, project_id, task_id, values, *, acknowledge=False, preserve_input=False):
+        connection.execute('INSERT INTO task_readiness (project_id, task_id) VALUES (%s, %s) ON CONFLICT DO NOTHING',
+                           (project_id, task_id))
+        row = connection.execute(
+            'UPDATE task_readiness SET input_generation = input_generation + %s, '
+            'assessed_generation = CASE WHEN %s THEN input_generation + %s ELSE assessed_generation END '
+            'WHERE project_id = %s AND task_id = %s RETURNING input_generation, assessed_generation',
+            (0 if preserve_input else 1, acknowledge, 0 if preserve_input else 1, project_id, task_id)).fetchone()
+        metadata = json.loads(json.dumps(values['metadata']))
+        workflow = metadata.setdefault('_skybuild_workflow', {})
+        workflow.setdefault('generation', 0)
+        workflow['readiness'] = dict(row)
+        values['metadata'] = metadata
+
+    def _invalidate_dependents(self, connection, principal, project_id, task_id):
+        # The graph lock covers discovery, generation changes and all journal writes.
+        rows = connection.execute(
+            'WITH RECURSIVE edges(task_id, dependency_id) AS ('
+            'SELECT task_id, dependency_id FROM task_dependencies WHERE project_id = %s UNION '
+            "SELECT task_id, metadata->'_skybuild_workflow'->'deferral'->>'milestone_task_id' FROM tasks "
+            "WHERE project_id = %s AND metadata->'_skybuild_workflow'->'deferral'->>'milestone_task_id' IS NOT NULL), "
+            'affected(task_id) AS (SELECT task_id FROM edges WHERE dependency_id = %s UNION '
+            'SELECT e.task_id FROM edges e JOIN affected a ON e.dependency_id = a.task_id) '
+            'SELECT task_id FROM affected WHERE task_id <> %s ORDER BY task_id',
+            (project_id, project_id, task_id, task_id)).fetchall()
+        for row in rows:
+            dependent_id = row['task_id']
+            before = self._task(connection, project_id, dependent_id, lock=True)
+            if before['status'] == 'superseded':
+                continue
+            self._require_no_effect_exposure(connection, project_id, dependent_id)
+            values = self._task_values({}, before)
+            metadata = json.loads(json.dumps(before['metadata']))
+            workflow = metadata.setdefault('_skybuild_workflow', {})
+            workflow['generation'] = workflow.get('generation', 0) + 1
+            workflow.update({'last_action': 'dependency_invalidated', 'reason': f'Dependency {task_id} changed'})
+            values['metadata'] = metadata
+            if before['status'] != 'deferred':
+                values.update({'status': 'blocked', 'phase': 'reassess',
+                               'blocker': f'Dependency {task_id} changed',
+                               'next_action': 'Reconcile active effects and reassess dependencies' if
+                               self._has_started_history(connection, project_id, dependent_id) else
+                               'Reassess current definition and dependencies'})
+            self._advance_readiness(connection, project_id, dependent_id, values)
+            columns = [key for key in values if key != 'dependencies']
+            assignments = sql.SQL(', ').join(sql.SQL('{} = %s').format(sql.Identifier(key)) for key in columns)
+            parameters = [Jsonb(values[key]) if key == 'metadata' else values[key] for key in columns]
+            connection.execute(sql.SQL('UPDATE tasks SET {}, revision = revision + 1, updated_at = now() '
+                                       'WHERE project_id = %s AND task_id = %s').format(assignments),
+                               (*parameters, project_id, dependent_id))
+            after = self._task(connection, project_id, dependent_id)
+            self._journal(connection, principal, after, before, operation='dependency_invalidated',
+                          reason=f'Dependency {task_id} changed')
 
     @staticmethod
     def _dependencies(connection, project_id, task_id, dependencies):
@@ -303,6 +366,9 @@ class Store:
     @staticmethod
     def _journal(connection, principal, after, before=None, *, operation=None, reason=None):
         operation = operation or ('updated' if before else 'created')
+        if operation == 'created':
+            connection.execute('INSERT INTO task_readiness (project_id, task_id) VALUES (%s, %s) ON CONFLICT DO NOTHING',
+                               (after['project_id'], after['task_id']))
         connection.execute(
             'INSERT INTO task_journal (event_id, project_id, task_id, actor, operation, revision, reason, before_state, after_state) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)',
             (uuid4(), after['project_id'], after['task_id'], principal.principal_id, operation,
@@ -313,7 +379,7 @@ class Store:
         _body(body, TASK_FIELDS | {'task_id'})
         if body.get('status', 'proposed') != 'proposed' or body.get('phase', 'triage') != 'triage' or body.get('blocker') is not None:
             _invalid('New tasks start in proposed triage; use guarded actions for workflow changes')
-        if isinstance(body.get('metadata'), dict) and '_skybuild_workflow' in body['metadata']:
+        if isinstance(body.get('metadata'), dict) and set(body['metadata']) & {'_skybuild_workflow', '_skybuild_completion'}:
             _invalid('Workflow metadata is managed by task actions')
         task_id = _identifier(body.get('task_id'), 'task_id')
         values = self._task_values({key: value for key, value in body.items() if key != 'task_id'})
@@ -359,7 +425,7 @@ class Store:
         _body(body, TASK_FIELDS)
         if set(body) & {'status', 'phase', 'blocker'}:
             _invalid('Workflow state changes require a guarded task action')
-        if isinstance(body.get('metadata'), dict) and '_skybuild_workflow' in body['metadata']:
+        if isinstance(body.get('metadata'), dict) and set(body['metadata']) & {'_skybuild_workflow', '_skybuild_completion'}:
             _invalid('Workflow metadata is managed by task actions')
         def changes(before, connection):
             if '_skybuild_workflow' not in before['metadata']:
@@ -385,9 +451,10 @@ class Store:
             _invalid('Unsupported task action')
         _body(body, ACTION_FIELDS)
         def changes(before, connection):
-            if action == 'ready' and (not before['acceptance_criteria'] or before['dependencies'] or
-                                      self._has_started_history(connection, project_id, task_id)):
-                raise DomainError('workflow_conflict', 'Readiness requires acceptance, no dependencies and no started history', 409)
+            if action == 'ready':
+                if not before['acceptance_criteria'] or self._has_started_history(connection, project_id, task_id):
+                    raise DomainError('workflow_conflict', 'Readiness requires acceptance and no started history', 409)
+                self._require_current_dependencies(connection, project_id, before)
             result = action_change(before, action, body)
             milestone = body.get('milestone_task_id')
             if milestone is not None:
@@ -397,6 +464,36 @@ class Store:
             return result
         return self._change_task(principal, project_id, task_id, expected_revision, idempotency_key,
                                  'task.action.' + action,
+                                 {'task_id': task_id, 'revision': expected_revision, 'body': body}, changes,
+                                 reason=body.get('reason'))
+
+    def _require_current_dependencies(self, connection, project_id, task):
+        """The caller holds the graph lock throughout evaluation and publication."""
+        from .completion import current_completion
+
+        for dependency_id in task['dependencies']:
+            dependency = self._task(connection, project_id, dependency_id)
+            readiness = connection.execute(
+                'SELECT input_generation, assessed_generation FROM task_readiness '
+                'WHERE project_id = %s AND task_id = %s', (project_id, dependency_id)).fetchone()
+            if (not current_completion(dependency) or not readiness or
+                    readiness['input_generation'] != readiness['assessed_generation']):
+                raise DomainError('workflow_conflict', f'Dependency {dependency_id} lacks current completion', 409)
+
+    def complete_task(self, principal, project_id, task_id, body: dict, expected_revision: int, idempotency_key: str) -> dict:
+        """Record owner-attested code acceptance; never contact or publish to GitHub."""
+        from .completion import completion_change
+
+        _body(body, {'reason', 'generation', 'source_head', 'author', 'policy_ref',
+                     'acceptance', 'checks', 'review', 'publication'})
+        def changes(before, connection):
+            current = self._principal(connection, principal.principal_id)
+            if not current.is_admin:
+                raise DomainError('authorization', 'Only an owner/admin may attest completion', 403)
+            self._require_current_dependencies(connection, project_id, before)
+            return completion_change(before, body, current.principal_id)
+        return self._change_task(principal, project_id, task_id, expected_revision, idempotency_key,
+                                 'task.action.completed',
                                  {'task_id': task_id, 'revision': expected_revision, 'body': body}, changes,
                                  reason=body.get('reason'))
 
@@ -567,7 +664,10 @@ class Store:
                     {'status': 'superseded', 'phase': 'superseded', 'blocker': 'Replaced by split tasks',
                      'next_action': 'Review linked replacement tasks', 'metadata': metadata},
                     operation='split', reason=reason)
-                return {'source': superseded, 'children': created, 'rewired': rewired}
+                # Cascading invalidation can change an earlier returned row later in this transaction.
+                return {'source': self._task(connection, project_id, task_id),
+                        'children': [self._task(connection, project_id, row['task_id']) for row in created],
+                        'rewired': [self._task(connection, project_id, row['task_id']) for row in rewired]}
             return self._idempotent(connection, principal, project_id, 'task.split', idempotency_key, payload, mutation)
 
     def task_lineage(self, principal, project_id, task_id) -> list[dict]:
@@ -670,6 +770,8 @@ class Store:
                          'metadata': metadata}, operation='dependency_rewired', reason=f'Merge into {target_id}: {reason}'))
                 replaced = []
                 for source in sources:
+                    # Earlier source retirement can invalidate another source in this atomic merge.
+                    source = self._task(connection, project_id, source['task_id'], lock=True)
                     metadata = dict(source['metadata'])
                     workflow = dict(metadata.get('_skybuild_workflow', {}))
                     workflow['generation'] = workflow.get('generation', 0) + 1
@@ -681,7 +783,10 @@ class Store:
                         operation='merge', reason=reason))
                     connection.execute('INSERT INTO task_lineage (event_id, project_id, source_task_id, target_task_id, action) VALUES (%s, %s, %s, %s, %s)',
                                        (uuid4(), project_id, source['task_id'], target_id, 'merge'))
-                return {'sources': replaced, 'target': merged, 'rewired': rewired}
+                # Persist the final committed projection in the idempotency receipt.
+                return {'sources': [self._task(connection, project_id, row['task_id']) for row in replaced],
+                        'target': self._task(connection, project_id, target_id),
+                        'rewired': [self._task(connection, project_id, row['task_id']) for row in rewired]}
             return self._idempotent(connection, principal, project_id, 'task.merge', idempotency_key, payload, mutation)
 
     @staticmethod
@@ -692,6 +797,137 @@ class Store:
             "OR before_state->>'phase' IN ('working', 'integrating') OR after_state->>'phase' IN ('working', 'integrating')) LIMIT 1",
             (project_id, task_id),
         ).fetchone())
+
+    @staticmethod
+    def _require_no_effect_exposure(connection, project_id, task_id):
+        if connection.execute("SELECT 1 FROM cpu_reservations WHERE project_id = %s AND task_id = %s AND state = 'reserved' LIMIT 1",
+                              (project_id, task_id)).fetchone():
+            raise DomainError('capacity_conflict', 'Task has a held CPU reservation', 409)
+        if connection.execute('SELECT 1 FROM task_claims WHERE project_id = %s AND task_id = %s AND held',
+                              (project_id, task_id)).fetchone():
+            raise DomainError('claim_conflict', 'Task ownership must be reconciled before mutation', 409)
+        if connection.execute(
+            'SELECT 1 FROM task_effects WHERE project_id = %s AND task_id = %s '
+            'AND exposure_held LIMIT 1', (project_id, task_id)).fetchone():
+            raise DomainError('effect_conflict', 'Task has unresolved effect exposure', 409)
+
+    def create_effect_intent(self, principal, project_id, task_id, body, expected_revision, idempotency_key, *, claim_fence=None):
+        """Persist intent only. Caller-supplied references never grant launch authority."""
+        fields = {'operation_id', 'attempt_id', 'authority_epoch', 'authority_generation',
+                  'input_digest', 'policy_digest', 'allocation_refs'}
+        _body(body, fields)
+        if set(body) != fields:
+            _invalid('Effect intent requires all identity and allocation fields')
+        for field in ('operation_id', 'attempt_id'):
+            _identifier(body[field], field)
+        for field in ('authority_epoch', 'authority_generation'):
+            if type(body[field]) is not int or not 1 <= body[field] < 2**63:
+                _invalid(f'{field} must be a positive 64-bit integer')
+        for field in ('input_digest', 'policy_digest'):
+            value = body[field]
+            if not isinstance(value, str) or len(value) != 64 or any(c not in '0123456789abcdef' for c in value):
+                _invalid(f'{field} must be a SHA-256 hex digest')
+        refs = body['allocation_refs']
+        if not isinstance(refs, list) or not 1 <= len(refs) <= 100 or len(set(map(str, refs))) != len(refs):
+            _invalid('allocation_refs requires 1–100 distinct references')
+        for ref in refs:
+            _identifier(ref, 'allocation reference')
+        if type(expected_revision) is not int or not 1 <= expected_revision < 2**63:
+            _invalid('Effect intent requires a positive expected revision')
+        payload = {'task_id': task_id, 'revision': expected_revision, 'body': body}
+        if claim_fence is not None:
+            payload['claim_fence'] = claim_fence
+        digest = hashlib.sha256(_json({'project_id': project_id, **payload}).encode()).hexdigest()
+        with self._connection() as connection:
+            principal = self._authorize_effect_writer(connection, principal, project_id)
+            def mutation():
+                self._graph_lock(connection, project_id)
+                # Global operation identity must serialize even across projects and actors.
+                connection.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))',
+                                   ('skybuild:effect:' + body['operation_id'],))
+                prior = connection.execute('SELECT * FROM task_effects WHERE operation_id = %s',
+                                           (body['operation_id'],)).fetchone()
+                if prior:
+                    if prior['intent_hash'] != digest:
+                        raise DomainError('idempotency_conflict', 'Operation ID has different intent', 409)
+                    return _public(prior)
+                task = self._task(connection, project_id, task_id, lock=True)
+                self._require_claim_fence(connection, principal, project_id, task_id, claim_fence)
+                if task['revision'] != expected_revision:
+                    raise DomainError('stale_revision', 'Task revision has changed', 409)
+                if task['status'] in {'superseded', 'done', 'deferred'}:
+                    raise DomainError('workflow_conflict', 'Task cannot register effect intent in this state', 409)
+                connection.execute(
+                    'INSERT INTO task_effects (operation_id, project_id, task_id, attempt_id, task_revision, '
+                    'authority_epoch, authority_generation, input_digest, policy_digest, allocation_refs, intent_hash) '
+                    'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)',
+                    (body['operation_id'], project_id, task_id, body['attempt_id'], expected_revision,
+                     body['authority_epoch'], body['authority_generation'], body['input_digest'],
+                     body['policy_digest'], refs, digest))
+                after = _public(connection.execute('SELECT * FROM task_effects WHERE operation_id = %s',
+                                                  (body['operation_id'],)).fetchone())
+                self._effect_journal(connection, principal, after, None, 'Intent registered; no dispatch authorized')
+                return after
+            return self._idempotent(connection, principal, project_id, 'effect.intent', idempotency_key, payload, mutation)
+
+    def observe_effect(self, principal, project_id, operation_id, state, reason, idempotency_key, *, claim_fence=None):
+        """Hold uncertainty durably or cancel an intent never exposed to external I/O.
+
+        Unknown is deliberately irreversible here. No adapter proof format is qualified.
+        This method neither dispatches nor authorizes an external operation.
+        """
+        _identifier(operation_id, 'operation_id')
+        if state not in ('unknown', 'cancelled'):
+            _invalid('Only unknown exposure or never-dispatched cancellation is supported')
+        reason = _text(reason, 'reason', 4096)
+        payload = {'operation_id': operation_id, 'state': state, 'reason': reason}
+        if claim_fence is not None:
+            payload['claim_fence'] = claim_fence
+        with self._connection() as connection:
+            principal = self._authorize_effect_writer(connection, principal, project_id)
+            def mutation():
+                self._graph_lock(connection, project_id)
+                before = connection.execute('SELECT * FROM task_effects WHERE operation_id = %s AND project_id = %s FOR UPDATE',
+                                            (operation_id, project_id)).fetchone()
+                if not before:
+                    raise DomainError('not_found', 'Effect operation not found', 404)
+                self._require_claim_fence(connection, principal, project_id, before['task_id'], claim_fence)
+                if before['state'] == state:
+                    return _public(before)
+                if before['state'] != 'intent':
+                    raise DomainError('effect_conflict', 'Unknown exposure cannot be cancelled or released', 409)
+                connection.execute('UPDATE task_effects SET state = %s, exposure_held = %s WHERE operation_id = %s',
+                                   (state, state != 'cancelled', operation_id))
+                after = _public(connection.execute('SELECT * FROM task_effects WHERE operation_id = %s',
+                                                  (operation_id,)).fetchone())
+                self._effect_journal(connection, principal, after, _public(before), reason)
+                return after
+            return self._idempotent(connection, principal, project_id, 'effect.observe', idempotency_key, payload, mutation)
+
+    def effect_history(self, principal, project_id, operation_id, *, limit=100, offset=0):
+        self._page(limit, offset)
+        _identifier(operation_id, 'operation_id')
+        with self._connection() as connection:
+            self._authorize(connection, principal, project_id, 'tasks:read')
+            if not connection.execute('SELECT 1 FROM task_effects WHERE operation_id = %s AND project_id = %s',
+                                      (operation_id, project_id)).fetchone():
+                raise DomainError('not_found', 'Effect operation not found', 404)
+            return _public(connection.execute('SELECT * FROM effect_journal WHERE operation_id = %s '
+                                             'ORDER BY created_at, event_id LIMIT %s OFFSET %s',
+                                             (operation_id, limit, offset)).fetchall())
+
+    def _authorize_effect_writer(self, connection, principal, project_id):
+        current = self._authorize(connection, principal, project_id, 'tasks:write')
+        if not current.is_admin:
+            raise DomainError('authorization', 'Only an owner/admin may record effect observations', 403)
+        return current
+
+    @staticmethod
+    def _effect_journal(connection, principal, after, before, reason):
+        connection.execute('INSERT INTO effect_journal (event_id, operation_id, actor, action, reason, before_state, '
+                           'after_state) VALUES (%s, %s, %s, %s, %s, %s, %s)',
+                           (uuid4(), after['operation_id'], principal.principal_id, after['state'], reason,
+                            Jsonb(before) if before else None, Jsonb(after)))
 
     def task_history(self, principal, project_id, task_id, *, limit=100, offset=0) -> list[dict]:
         self._page(limit, offset)

@@ -363,7 +363,7 @@ def test_identity_guard_and_readiness(store):
     assert error('database_identity', wrong.migrate).status_code == 503
     error('database_identity', wrong.readiness)
     store.migrate()
-    assert store.readiness() == {'ready': True, 'schema_version': 4}
+    assert store.readiness() == {'ready': True, 'schema_version': 9}
 
 
 def test_upgrade_001_to_002_preserves_existing_records_and_is_repeatable(store):
@@ -387,7 +387,7 @@ def test_upgrade_001_to_002_preserves_existing_records_and_is_repeatable(store):
         error('schema_mismatch', upgraded.readiness)
         upgraded.migrate()
         upgraded.migrate()
-        assert upgraded.readiness() == {'ready': True, 'schema_version': 4}
+        assert upgraded.readiness() == {'ready': True, 'schema_version': 9}
         with upgraded._connection() as connection:
             assert connection.execute('SELECT * FROM tasks').fetchone() == task_before
             assert connection.execute('SELECT * FROM messages').fetchone() == message_before
@@ -736,7 +736,8 @@ def test_literal_unicode_escape_survives_create_update_metadata_keys_and_values(
     assert first['metadata'] == metadata
     updated = store.update_task(people['worker'], project, 'T1', {'description': literal + ' updated', 'metadata': {literal: literal}}, 1, 'literal-update')
     assert updated['description'] == literal + ' updated'
-    assert updated['metadata'] == {literal: literal}
+    assert updated['metadata'][literal] == literal
+    assert set(updated['metadata']) == {literal, '_skybuild_workflow'}
     assert store.get_task(people['worker'], project, 'T1') == updated
     message = send(store, people, project, body=literal)
     assert message['body'] == literal
