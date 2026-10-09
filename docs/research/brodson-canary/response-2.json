@@ -1,0 +1,46 @@
+{
+  "latency_seconds": 0.885,
+  "response": {
+    "choices": [
+      {
+        "finish_reason": "stop",
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "if not isinstance(retries, int) or isinstance(retries, bool) or not 0 <= retries <= 5 or not 0 < timeout <= 120:\n    raise ValueError(\"Retries must be 0\u20135 and timeout must be 0\u2013120 seconds\")"
+        }
+      }
+    ],
+    "created": 1791523119,
+    "model": "qwen3.5-think",
+    "system_fingerprint": "b11371-99b95488c",
+    "object": "chat.completion",
+    "usage": {
+      "completion_tokens": 62,
+      "prompt_tokens": 232,
+      "total_tokens": 294,
+      "prompt_tokens_details": {
+        "cached_tokens": 3
+      }
+    },
+    "id": "chatcmpl-54GiccdBBYMV4wBqOn8oWBqOG1grlgAy",
+    "timings": {
+      "cache_n": 3,
+      "prompt_n": 229,
+      "prompt_ms": 93.335,
+      "prompt_per_token_ms": 0.40757641921397375,
+      "prompt_per_second": 2453.5276155782935,
+      "predicted_n": 62,
+      "predicted_ms": 550.909,
+      "predicted_per_token_ms": 9.031295081967214,
+      "predicted_per_second": 110.72609087889289
+    }
+  },
+  "prompt": "SkyBuild Python client constructor currently uses:\nif not 0 <= retries <= 5 or not 0 < timeout <= 120:\n    raise ValueError(\"Retries must be 0\u20135 and timeout must be 0\u2013120 seconds\")\nLater request code uses range(self.retries + 1). Tiny task: replace only retry validation so retries must be a Python integer (not bool) in inclusive 0..5. Invalid values including floats, strings, None, containers, bool must raise existing ValueError before constructing httpx.Client. Preserve timeout validation and existing message. Return only replacement if statement plus raise. No tools or shell.\nYour first answer failed: self.retries/self.timeout are not assigned yet; use local retries and timeout. isinstance(True,int) is True, so explicitly reject bool. Keep original error message byte-for-byte. Recheck these three constraints. Current signature: def __init__(self, base_url: str, token: str, *, retries: int = 2, timeout: float = 10, transport=None):",
+  "request": {
+    "model": "qwen3.5-think",
+    "max_tokens": 512,
+    "temperature": 0,
+    "enable_thinking": false
+  }
+}
