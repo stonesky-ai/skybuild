@@ -110,16 +110,21 @@ def import_frozen(store: Store, project_id: str, ledger_dir: Path, contract_path
     store.readiness()
     with store._connection() as connection:
         connection.execute("SELECT pg_advisory_xact_lock(hashtextextended('skybuild:frozen-import', 0))")
-        connection.execute("LOCK TABLE tasks, task_dependencies, task_journal, messages, cord_journal, idempotency, ledger_imports IN ACCESS EXCLUSIVE MODE")
-        receipt = connection.execute("SELECT * FROM ledger_imports LIMIT 1").fetchone()
+        connection.execute("LOCK TABLE tasks, task_dependencies, task_journal, task_lineage, messages, cord_journal, idempotency, ledger_imports IN ACCESS EXCLUSIVE MODE")
+        receipts = connection.execute("SELECT * FROM ledger_imports LIMIT 2").fetchall()
+        if len(receipts) > 1:
+            _refuse("Destination has multiple import receipts")
+        receipt = receipts[0] if receipts else None
         if receipt:
             if (receipt["project_id"] != project_id or receipt["content_sha256"] != plan["content_sha256"]
-                    or receipt["import_sha256"] != plan["import_sha256"] or receipt["commit_id"] != plan["commit"]):
+                    or receipt["import_sha256"] != plan["import_sha256"] or receipt["commit_id"] != plan["commit"]
+                    or receipt["task_count"] != plan["task_count"] or receipt["status_counts"] != plan["counts"]
+                    or receipt["authority"] != "markdown"):
                 _refuse("Destination already has a different import")
             rows = connection.execute("SELECT project_id, task_id, title, description, status, priority, acceptance_criteria, architecture_refs, phase, next_action, responsible, metadata, revision FROM tasks ORDER BY priority").fetchall()
             if len(rows) != plan["task_count"] or connection.execute("SELECT count(*) AS count FROM task_journal").fetchone()["count"] != len(rows):
                 _refuse("Imported destination changed")
-            for table in ("messages", "cord_journal", "idempotency"):
+            for table in ("task_lineage", "messages", "cord_journal", "idempotency"):
                 if connection.execute(sql.SQL("SELECT 1 FROM {} LIMIT 1").format(sql.Identifier(table))).fetchone():
                     _refuse("Imported destination changed")
             for row, expected in zip(rows, plan["records"]):
@@ -138,7 +143,7 @@ def import_frozen(store: Store, project_id: str, ledger_dir: Path, contract_path
                         or journal["before_state"] is not None or journal["after_state"] != store._task(connection, project_id, row["task_id"])):
                     _refuse("Imported history changed")
             return {"result": "unchanged", "project_id": project_id, "task_count": len(rows), "authority": "markdown"}
-        for table in ("tasks", "task_dependencies", "task_journal", "messages", "cord_journal", "idempotency"):
+        for table in ("tasks", "task_dependencies", "task_journal", "task_lineage", "messages", "cord_journal", "idempotency"):
             if connection.execute(sql.SQL("SELECT 1 FROM {} LIMIT 1").format(sql.Identifier(table))).fetchone():
                 _refuse("Destination contains unrelated data")
         actor = "skybuild-ledger-import"

@@ -139,3 +139,33 @@ def test_mapping_change_requires_a_new_reviewed_hash(plan, fresh_store, tmp_path
         apply(fresh_store, plan, changed_path)
     with fresh_store._connection() as connection:
         assert connection.execute("SELECT count(*) AS count FROM tasks").fetchone()["count"] == 0
+
+
+@pytest.mark.parametrize("column,value", [("task_count", 27), ("status_counts", {"proposed": 28})])
+def test_replay_refuses_changed_receipt_counts(plan, fresh_store, column, value):
+    apply(fresh_store, plan)
+    with fresh_store._connection() as connection:
+        connection.execute(sql.SQL("UPDATE ledger_imports SET {} = %s").format(sql.Identifier(column)),
+                           (json.dumps(value) if column == "status_counts" else value,))
+    with pytest.raises(DomainError, match="different import"):
+        apply(fresh_store, plan)
+
+
+def test_replay_refuses_an_extra_import_receipt(plan, fresh_store):
+    apply(fresh_store, plan)
+    with fresh_store._connection() as connection:
+        connection.execute("INSERT INTO ledger_imports (project_id, commit_id, content_sha256, import_sha256, task_count, status_counts, authority) "
+                           "SELECT 'other', commit_id, content_sha256, import_sha256, task_count, status_counts, authority "
+                           "FROM ledger_imports WHERE project_id = 'skybuild'")
+    with pytest.raises(DomainError, match="multiple import receipts"):
+        apply(fresh_store, plan)
+
+
+def test_replay_refuses_lineage_not_in_frozen_import(plan, fresh_store):
+    apply(fresh_store, plan)
+    source, target = (record["task_id"] for record in plan["records"][:2])
+    with fresh_store._connection() as connection:
+        connection.execute("INSERT INTO task_lineage (event_id, project_id, source_task_id, target_task_id, action) "
+                           "VALUES (%s, 'skybuild', %s, %s, 'split')", (uuid4(), source, target))
+    with pytest.raises(DomainError, match="destination changed"):
+        apply(fresh_store, plan)
