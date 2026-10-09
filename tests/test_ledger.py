@@ -80,13 +80,11 @@ def test_rejects_invalid_utf8_and_ledgers_without_tasks(tmp_path: Path) -> None:
     assert error.value.code == "no_tasks"
 
 
-def test_reads_the_three_current_ledgers_without_assuming_task_counts() -> None:
+def test_retired_ledger_notices_are_not_importable_as_live_tasks() -> None:
     root = Path(__file__).parents[1] / "docs" / "design"
     paths = [root / "mastertodo.md", root / "deferred.md", root / "alreadydone.md"]
 
-    manifest = build_manifest(paths)
+    with pytest.raises(DomainError) as error:
+        build_manifest(paths)
 
-    assert manifest["schema_version"] == 1
-    assert len(manifest["tasks"]) == len(manifest["task_ids"]) > 0
-    assert [source["name"] for source in manifest["sources"]] == [path.name for path in paths]
-    assert all(task["source"] in {path.name for path in paths} for task in manifest["tasks"])
+    assert error.value.code == "no_tasks"
