@@ -2,11 +2,26 @@
 
 Saved 2026-10-08 after architecture revision A33 and the subsequent implementation authorization below. Resume from /home/kevin/my_code with sibling skybuild and skykeep checkouts. This is context, not a competing design plan.
 
+## Committed checkpoint and immediate next task
+
+The owner requested committing the work and saving a handoff. The reviewed implementation, governing A33 documents, task ledgers, tests and design evidence are committed on `main` as `1869904ee442dd626b185143ac730ecc4538b9dc` (`feat: add reviewed SkyBuild bootstrap and MVP delivery plan`). This handoff update is a follow-up documentation commit. No push has occurred; remote preservation is pending. The superseded dated plan was removed, and `dum.txt` was left unchanged. Local `.env`, `.venv` and build outputs remain ignored.
+
+The next task is **SKYBUILD-TASK-CUTOVER preparation**, not live cutover:
+
+1. Read the repository instructions, architecture sections 4–7, the bootstrap brief and the current importer/manifest code. Keep the reviewed source manifest as the baseline.
+2. Define an explicit dependency mapping and frozen-source contract for all three ledgers. Do not infer machine dependency edges from ambiguous prose or treat the raw manifest as an importer.
+3. Implement and test an atomic importer against a new, task-owned disposable PostgreSQL database. Preserve IDs, complete briefs, status/defer/completion evidence, dependencies and provenance. Repeated identical import must be a no-op; changed content or an unrelated nonempty destination must be refused.
+4. Test dry-run counts/content, rollback, conflicting import and restart persistence; obtain separate-session adversarial review. Leave the Markdown ledgers authoritative until a validated, explicitly executed authority switch.
+
+After import preparation, finish the structural task workflow and then CPU ownership, effect journaling and independent observation. Model/worker launch and publication still require their corresponding controls. No owner answer is needed to start isolated importer implementation.
+
+Suggested resume request: “Resume SkyBuild from docs/design/session_handoff.md. Implement the frozen ledger importer against disposable PostgreSQL, with independent review. Keep live task authority unchanged.”
+
 ## Current session authorization and progress
 
 The owner left for dinner for about an hour and explicitly requested completing the MVP plan, taking the assistant's recommendations, and spawning Luna or Sol subprocesses to start building. Coding and isolated validation are now authorized; the earlier planning-only restriction below is historical. Accumulate owner questions with their blocking boundary instead of waiting. This does not authorize production task import/cutover, old fleet starts, paid capacity or deployment.
 
-The implementation plan now separates the six-step disjoint SkyBuild MVP path from broad legacy migration/adoption, preserves essential task/control/review behaviors, and lists decisions only at their actual activation boundaries. No owner answer blocked bootstrap coding. The selected contract is [implementation/bootstrap.md](implementation/bootstrap.md). Two Sol workers implemented Store and API/client/workbench files, a Luna worker implemented the read-only ledger manifest, and a separate Sol session reviewed the combined result. The lead owns packaging/shared contracts and integrated/browser validation. All changes remain local and uncommitted on `main` at base commit `2da489c992f55e3484e475bdf3a175a97e1d90c7`; no push occurred. Preserve the existing deletion of the dated plan and unrelated dum.txt.
+The implementation plan now separates the six-step disjoint SkyBuild MVP path from broad legacy migration/adoption, preserves essential task/control/review behaviors, and lists decisions only at their actual activation boundaries. No owner answer blocked bootstrap coding. The selected contract is [implementation/bootstrap.md](implementation/bootstrap.md). Two Sol workers implemented Store and API/client/workbench files, a Luna worker implemented the read-only ledger manifest, and a separate Sol session reviewed the combined result. The lead owns packaging/shared contracts and integrated/browser validation. The work began at base commit `2da489c992f55e3484e475bdf3a175a97e1d90c7` and is now committed at the checkpoint above. No push occurred; `dum.txt` remains unchanged.
 
 Implemented: launch-free FastAPI routes; dedicated PostgreSQL identity checks and versioned migrations; hashed principal credentials and project scopes; revision/idempotency/dependency checks; immutable task and Cord journals; durable mailbox/reply handling; shared client and explicit CLI; read-only ledger manifest; and `/workbench` task list/create/detail/edit/history with token held only in page memory. This is an early implementation slice, not the self-building MVP. No task ledger import, automatic claims, model admission, worker launch, bundled publisher or controlled self-update exists yet.
 
