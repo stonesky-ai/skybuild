@@ -41,7 +41,7 @@ def _static(name: str) -> str:
 
 #: Sections the page draws with their own controls rather than as data.
 DRAWN_SECTIONS: tuple[str, ...] = ("summaries", "cleanup", "critical_path", "integrator_run",
-                                   "alarms", "health", "queue", "integration", "seamstatus", "help", "usage", "landing",
+                                   "alarms", "health", "queue", "integration", "seamstatus", "help", "usage", "landing", "fleet",
                                    "flow", "barriers")
 #: Sections that get no box of their own: the queue's lines are drawn inside the Queue box.
 HIDDEN_SECTIONS: tuple[str, ...] = ("queue_lines",)

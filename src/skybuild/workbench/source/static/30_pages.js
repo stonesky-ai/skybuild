@@ -41,6 +41,8 @@ function showPage(key, push) {
   }
   paintRail();
   if (lastState) paint(lastState);
+  else if (key === "boxes") paint({repo: "Tailnet fleet", generated_text: "Fleet data refreshes only when requested", sections: {}});
+  if (key === "boxes") void loadFleetCache();
   if (typeof window.scrollTo === "function") { try { window.scrollTo(0, 0); } catch (err) {} }
 }
 
@@ -49,6 +51,8 @@ function paintRail() {
   if (viewTitle) viewTitle.textContent = page ? page.title : "Build status";
   const asks = document.getElementById("asks");
   if (asks) asks.textContent = page ? page.asks : "";
+  const pause = document.getElementById("pause");
+  if (pause) pause.hidden = document.body.dataset.fleetInventory === "enabled" && Boolean(page && page.key === "boxes");
   if (!rail || !rail.children) return;
   for (const link of rail.children) {
     if (typeof link.getAttribute !== "function") continue;
@@ -70,6 +74,7 @@ window.addEventListener("popstate", () => {
   currentPage = pageFromPath();
   paintRail();
   if (lastState) paint(lastState);
+  if (currentPage === "boxes") void loadFleetCache();
 });
 
 // ---- the health strip, on every view -----------------------------------------
@@ -88,6 +93,10 @@ let nextAt = 0;
 
 function tickCountdown() {
   if (!countdown) return;
+  if (currentPage === "boxes" && document.body.dataset.fleetInventory === "enabled") {
+    countdown.textContent = "fleet updates only on manual refresh";
+    return;
+  }
   if (paused) { countdown.textContent = "refresh paused"; return; }
   const left = Math.max(0, Math.round((nextAt - Date.now()) / 1000));
   countdown.textContent = nextAt ? "refresh in " + left + " s" : "";

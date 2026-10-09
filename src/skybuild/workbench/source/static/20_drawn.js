@@ -64,6 +64,7 @@ function button(text, cls) {
 }
 
 function drawn(key, value) {
+  if (key === "fleet") return document.body.dataset.fleetInventory === "enabled" ? drawFleet() : render(value);
   if (key === "usage") return drawUsage(value);
   if (key === "landing") return drawLanding(value);
   if (isScalar(value) || Array.isArray(value)) return render(value);
@@ -81,6 +82,147 @@ function drawn(key, value) {
   if (key === "batch_history") return drawBatchHistory(value);
   if (key === "help") return drawHelp(value);
   return render(value);
+}
+
+let fleetInventory = {nodes: [], refreshed_at: null, error: "Press Refresh fleet to query the tailnet."};
+let fleetCacheLoaded = false;
+let fleetBusy = false;
+let fleetAllowedAt = 0;
+
+function fleetBytes(value) {
+  if (!Number.isFinite(value)) return "unknown";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let amount = value, unit = 0;
+  while (amount >= 1024 && unit < units.length - 1) { amount /= 1024; unit += 1; }
+  return amount.toFixed(unit ? 1 : 0) + " " + units[unit];
+}
+
+function fleetTime(value) {
+  if (!value) return "unknown";
+  if (String(value).startsWith("0001-01-01")) return "not recorded";
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? new Date(parsed).toLocaleString() : String(value);
+}
+
+function fleetValue(parent, label, value) {
+  const term = el("dt", "", label), detail = el("dd", "", value === null || value === undefined || value === "" ? "unknown" : String(value));
+  parent.append(term, detail);
+}
+
+function fleetFields(items) {
+  const list = el("dl", "fleet-fields");
+  for (const [label, value] of items) fleetValue(list, label, value);
+  return list;
+}
+
+function updateFleetButton() {
+  const control = document.getElementById("refresh-fleet");
+  if (!control) return;
+  const seconds = Math.max(0, Math.ceil((fleetAllowedAt - Date.now()) / 1000));
+  const available = document.body.dataset.fleetInventory === "enabled";
+  control.disabled = !available || fleetBusy || seconds > 0;
+  control.textContent = fleetBusy ? "Querying boxes…" : seconds ? `Refresh fleet (${seconds}s)` : "Refresh fleet";
+}
+
+function repaintFleet() {
+  const entry = boxes.get("fleet");
+  if (entry) entry.body.replaceChildren(drawFleet());
+}
+
+async function loadFleetCache() {
+  if (fleetCacheLoaded || document.body.dataset.fleetInventory !== "enabled") return;
+  fleetCacheLoaded = true;
+  try {
+    const response = await fetch("/workbench/api/fleet", {cache: "no-store", credentials: "same-origin"});
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    fleetInventory = await response.json();
+  } catch (error) {
+    fleetInventory = {...fleetInventory, error: "No saved fleet reading is available. Press Refresh fleet to query."};
+  }
+  const delay = Number(fleetInventory.retry_after || 0);
+  if (delay > 0) fleetAllowedAt = Date.now() + delay * 1000;
+  repaintFleet();
+}
+
+async function refreshFleet() {
+  if (fleetBusy || Date.now() < fleetAllowedAt || document.body.dataset.fleetInventory !== "enabled") return;
+  fleetBusy = true;
+  fleetAllowedAt = Date.now() + 10000;
+  updateFleetButton();
+  repaintFleet();
+  try {
+    const response = await fetch("/workbench/api/fleet/refresh", {method: "POST", cache: "no-store", credentials: "same-origin"});
+    fleetInventory = await response.json();
+    if (!response.ok && !fleetInventory.error) fleetInventory.error = `Fleet refresh refused (HTTP ${response.status}).`;
+    const retry = Number(fleetInventory.retry_after || 0);
+    if (retry > 0) fleetAllowedAt = Math.max(fleetAllowedAt, Date.now() + retry * 1000);
+  } catch (error) {
+    fleetInventory = {...fleetInventory, error: "Fleet refresh failed: " + (error.message || "no answer")};
+  } finally {
+    fleetBusy = false;
+    repaintFleet();
+    updateFleetButton();
+    setTimeout(updateFleetButton, Math.max(0, fleetAllowedAt - Date.now()));
+  }
+}
+
+function drawFleet() {
+  const wrap = el("div", "fleet-inventory");
+  const available = document.body.dataset.fleetInventory === "enabled";
+  const button = buttonNode("Refresh fleet", "small");
+  button.id = "refresh-fleet";
+  button.disabled = !available;
+  button.title = available ? "Query Tailscale and each online box. Limited to one refresh every 10 seconds." : "Fleet querying is available in the local preview.";
+  button.addEventListener("click", refreshFleet);
+  wrap.append(button);
+  updateFleetButton();
+  wrap.append(el("p", "muted note", fleetInventory.refreshed_at
+    ? "Last queried: " + fleetTime(fleetInventory.refreshed_at)
+    : "No fleet query yet. Fleet data does not refresh automatically."));
+  if (fleetInventory.error) wrap.append(el("p", fleetInventory.nodes.length ? "muted note" : "muted note", fleetInventory.error));
+  if (!fleetInventory.nodes.length) {
+    wrap.append(calm(available ? "Press Refresh fleet to discover devices on this tailnet." : "Fleet inventory is not connected."));
+    return wrap;
+  }
+  for (const node of fleetInventory.nodes) {
+    const card = el("article", "fleet-card");
+    const name = el("h3", "", node.name || "Unnamed box");
+    const state = node.online ? "ONLINE" : "OFFLINE";
+    const badge = el("span", "fleet-state " + (node.online ? "online" : "offline"), state);
+    name.append(" ", badge);
+    card.append(name);
+    card.append(fleetFields([
+      ["Tailnet IP", (node.ips || []).join(" · ") || "unknown"],
+      ["DNS name", node.dns_name], ["Tailnet OS", node.tailnet_os],
+      [node.online ? "Connection" : "Last tailnet seen", node.online ? "Online now" : fleetTime(node.last_seen)],
+      ["Last box stats", fleetTime(node.stats_at)], ["Device ID", node.id],
+      ["Tailnet user", node.tailnet_user], ["Tailnet user ID", node.user_id], ["Device created", fleetTime(node.created)],
+    ]));
+    if (node.stats) {
+      const stats = node.stats, memory = stats.memory || {}, disk = stats.root_disk || {};
+      card.append(fleetFields([
+        ["Processor", stats.cpu_model], ["CPU cores", `${stats.physical_cores ?? "?"} physical · ${stats.logical_cores ?? "?"} logical`],
+        ["Memory total", fleetBytes(memory.MemTotal)], ["Memory available", fleetBytes(memory.MemAvailable)],
+        ["Swap total / free", `${fleetBytes(memory.SwapTotal)} / ${fleetBytes(memory.SwapFree)}`],
+        ["Root disk total", fleetBytes(disk.total_bytes)], ["Root disk free", fleetBytes(disk.free_bytes)],
+        ["Operating system", [stats.os_name, stats.os_version].filter(Boolean).join(" ")],
+        ["Kernel / architecture", [stats.kernel, stats.architecture].filter(Boolean).join(" · ")],
+        ["Load average", Array.isArray(stats.load_average) ? stats.load_average.map(value => Number(value).toFixed(2)).join(" · ") : "unknown"],
+        ["Uptime", Number.isFinite(stats.uptime_seconds) ? Math.round(stats.uptime_seconds / 3600) + " hours" : "unknown"],
+        ["Python", stats.python_version], ["GPUs", Array.isArray(stats.gpus) && stats.gpus.length ? stats.gpus.map(gpu => `${gpu.name} (${gpu.memory_free_mib}/${gpu.memory_total_mib} MiB free)`).join(" · ") : "none detected"],
+      ]));
+    }
+    if (node.query_error) card.append(el("p", "muted note", "Latest box query failed: " + node.query_error + (node.stats ? ". Showing last successful stats." : "")));
+    else if (!node.online && !node.stats) card.append(el("p", "muted note", "Offline. No previous box stats are saved."));
+    wrap.append(card);
+  }
+  return wrap;
+}
+
+function buttonNode(text, cls) {
+  const node = el("button", cls || "", text);
+  node.type = "button";
+  return node;
 }
 
 // Previous batches: one table, newest first, every batch the trunk records. It shows the newest

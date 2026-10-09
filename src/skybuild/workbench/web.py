@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
-from . import navigation
+from . import fleet_inventory, navigation
 from ..ledger import build_manifest
 from .source import page
 
@@ -25,7 +25,8 @@ HEADERS = {
 
 def _revision() -> str:
     digest = hashlib.sha256()
-    paths = [ROOT / "web.py", ROOT / "workbench" / "web.py", ROOT / "workbench" / "navigation.py"]
+    paths = [ROOT / "web.py", ROOT / "workbench" / "web.py", ROOT / "workbench" / "navigation.py",
+             ROOT / "workbench" / "fleet_inventory.py"]
     paths.extend(path for path in STATIC.iterdir() if path.is_file())
     paths.extend(path for path in (ROOT / "workbench" / "source").rglob("*") if path.is_file() and "__pycache__" not in path.parts)
     for path in sorted(set(paths)):
@@ -82,6 +83,7 @@ def install_workbench(app: FastAPI, *, dev_reload: bool = False) -> None:
         body = body.replace("<!--WORKBENCH_NAV-->", navigation.sidebar(view_name))
         body = re.sub(r'<nav id="rail"[\s\S]*?</nav>', '', body, count=1)
         if dev_reload:
+            body = body.replace("<body>", '<body data-fleet-inventory="enabled">')
             body = body.replace("</body>", _dev_script(_revision()) + "</body>")
         policy = page.PAGE_CSP.replace("style-src ", "style-src 'self' ")
         if dev_reload:
@@ -111,6 +113,18 @@ def install_workbench(app: FastAPI, *, dev_reload: bool = False) -> None:
         )
 
     if dev_reload:
+        @app.get("/workbench/api/fleet", include_in_schema=False)
+        def fleet_snapshot() -> JSONResponse:
+            return JSONResponse(fleet_inventory.snapshot(), headers={"Cache-Control": "no-store"})
+
+        @app.post("/workbench/api/fleet/refresh", include_in_schema=False)
+        def fleet_refresh() -> JSONResponse:
+            status, payload = fleet_inventory.refresh()
+            headers = {"Cache-Control": "no-store"}
+            if status == 429:
+                headers["Retry-After"] = str(payload.get("retry_after", 10))
+            return JSONResponse(payload, status_code=status, headers=headers)
+
         @app.get("/workbench/dev/tasks-preview.json", include_in_schema=False)
         def preview_tasks() -> JSONResponse:
             manifest = build_manifest([PROJECT_ROOT / "docs" / "design" / "mastertodo.md"])

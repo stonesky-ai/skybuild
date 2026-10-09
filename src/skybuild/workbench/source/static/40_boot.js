@@ -109,7 +109,9 @@ function paint(state) {
   paintHealth(sections.health);
   const loading = document.getElementById("loading");
   if (loading) loading.remove();
-  const keys = visibleSections(Object.keys(sections)
+  const sectionNames = Object.keys(sections);
+  if (currentPage === "boxes" && !sectionNames.includes("fleet")) sectionNames.unshift("fleet");
+  const keys = visibleSections(sectionNames
     .filter(key => !HIDDEN.has(key))
     .map((key, i) => [order.has(key) ? order.get(key) : TITLES.length + i, key])
     .sort((a, b) => a[0] - b[0])
@@ -145,6 +147,11 @@ function paint(state) {
 
 // One read of the state, painted. Never throws: a failure is said on the page.
 async function load() {
+  if (currentPage === "boxes" && document.body.dataset.fleetInventory === "enabled") {
+    if (!lastState) paint({repo: "Tailnet fleet", generated_text: "Fleet data refreshes only when requested", sections: {}});
+    void loadFleetCache();
+    return;
+  }
   try {
     const response = await fetch("/workbench/api/state", {cache: "no-store", credentials: "same-origin"});
     if (!response.ok) throw new Error("HTTP " + response.status);
