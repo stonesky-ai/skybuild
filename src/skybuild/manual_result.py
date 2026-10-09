@@ -10,6 +10,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 from .client import Client, ClientError
@@ -246,36 +247,45 @@ def main(argv=None):
         if budget <= 0:
             raise ResultError("Collection deadline expired")
         deadline = time.monotonic() + budget
-        child = subprocess.Popen([sys.executable, '-c', _CHILD_CODE, *argv],
-                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                 stderr=subprocess.DEVNULL, start_new_session=True)
-        try:
-            output, _ = child.communicate(timeout=max(0, deadline - time.monotonic()))
-        except subprocess.TimeoutExpired:
-            # start_new_session creates an isolated group whose ID is this
-            # owned child's PID. Keep the leader unreaped through escalation so
-            # that identifier cannot be reused by an unrelated process group.
-            # Git/SSH descendants inherit this group; no group is discovered by
-            # name, process scan, or caller-supplied identifier.
+        with tempfile.TemporaryFile() as captured:
+            child = subprocess.Popen([sys.executable, '-c', _CHILD_CODE, *argv],
+                                     stdin=subprocess.DEVNULL, stdout=captured,
+                                     stderr=subprocess.DEVNULL, start_new_session=True)
+            expired = False
             try:
-                os.killpg(child.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            time.sleep(_TERMINATION_GRACE / 2)
-            try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            try:
-                child.communicate(timeout=_TERMINATION_GRACE / 2)
-            except subprocess.TimeoutExpired:
-                # Kernel operations may remain uninterruptible. Stop waiting;
-                # termination is unknown rather than falsely confirmed.
-                child.stdout.close()
-            failure.update(receipt_state='unknown',
-                           child_termination='confirmed' if child.poll() is not None else 'unknown',
-                           termination_grace_seconds=_TERMINATION_GRACE)
-            raise ResultError("Collection deadline expired") from None
+                # Observe exit without reaping: the owned session/group identifier
+                # stays reserved until all final group signals have been sent.
+                while os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
+                    remaining = min(deadline - time.monotonic(), cutoff.timestamp() - time.time())
+                    if remaining <= 0:
+                        expired = True
+                        break
+                    time.sleep(min(0.01, remaining))
+            finally:
+                # Run on success, failure and interruption, including an inner Git
+                # timeout that leaves an SSH descendant after its caller exits.
+                try:
+                    os.killpg(child.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    time.sleep(_TERMINATION_GRACE / 2)
+                finally:
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        child.wait(timeout=_TERMINATION_GRACE / 2)
+                    except subprocess.TimeoutExpired:
+                        pass  # Kernel completion is unknown; never wait forever.
+            if expired:
+                failure.update(receipt_state='unknown',
+                               child_termination='confirmed' if child.poll() is not None else 'unknown',
+                               termination_grace_seconds=_TERMINATION_GRACE)
+                raise ResultError("Collection deadline expired")
+            captured.seek(0)
+            output = captured.read(16385)
         if time.monotonic() >= deadline or time.time() >= cutoff.timestamp():
             raise ResultError("Collection deadline expired")
         if child.returncode != 0 or len(output) > 16384:
@@ -290,5 +300,10 @@ def main(argv=None):
         return 2
 
 
+def _interrupted(signum, frame):
+    raise ResultError('Collection interrupted; preserve local evidence')
+
+
 if __name__ == '__main__':
+    signal.signal(signal.SIGTERM, _interrupted)
     raise SystemExit(main())

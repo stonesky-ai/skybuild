@@ -368,7 +368,8 @@ def test_cli_cutoff_preserves_saved_evidence_for_valid_restart(collection, monke
     assert actions[-1] == previous and path.read_bytes() == original
 
 
-def test_cli_cutoff_kills_owned_git_ssh_group_and_preserves_unrelated_child(collection, tmp_path, monkeypatch):
+@pytest.mark.parametrize('exit_path', ['outer_timeout', 'inner_git_timeout', 'success', 'interruption'])
+def test_cli_all_exit_paths_clean_owned_group_and_preserve_unrelated_child(collection, tmp_path, monkeypatch, exit_path):
     import os
     import sys
     import time
@@ -380,15 +381,34 @@ def test_cli_cutoff_kills_owned_git_ssh_group_and_preserves_unrelated_child(coll
         'signal.signal(signal.SIGTERM, signal.SIG_IGN)\n' +
         'Path(' + repr(str(marker)) + ').write_text(str(os.getpid()))\ntime.sleep(10)\n')
     helper.chmod(0o700)
-    monkeypatch.setattr(module, '_CHILD_CODE',
-        "import subprocess, os; env=dict(os.environ, GIT_SSH_COMMAND=" + repr(str(helper)) +
+    timeout = 0.2 if exit_path == 'inner_git_timeout' else 10
+    code = ("import subprocess, os; env=dict(os.environ, GIT_SSH_COMMAND=" + repr(str(helper)) +
         ", GIT_SSH_VARIANT='ssh'); subprocess.run(['git','ls-remote',"
-        "'ssh://synthetic.invalid/no-repo'], capture_output=True, timeout=10, env=env)")
+        "'ssh://synthetic.invalid/no-repo'], capture_output=True, timeout=" + str(timeout) + ", env=env)")
+    if exit_path == 'success':
+        code = ("import subprocess, time; from pathlib import Path; subprocess.Popen([" + repr(str(helper)) +
+                "]); marker=Path(" + repr(str(marker)) + "); "
+                "exec('while not marker.exists(): time.sleep(0.01)'); print('{\"receipted\": true}')")
+    monkeypatch.setattr(module, '_CHILD_CODE', code)
+    if exit_path == 'interruption':
+        waitid = os.waitid
+        interrupted = False
+        def interrupt_after_ssh(*args):
+            nonlocal interrupted
+            if marker.exists() and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt
+            return waitid(*args)
+        monkeypatch.setattr(os, 'waitid', interrupt_after_ssh)
     foreign = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)'])
     owned = None
     try:
         started = time.monotonic()
-        assert module.main(cli_args(collection)) == 2
+        if exit_path == 'interruption':
+            with pytest.raises(KeyboardInterrupt):
+                module.main(cli_args(collection))
+        else:
+            assert module.main(cli_args(collection)) == (0 if exit_path == 'success' else 2)
         assert time.monotonic() - started < 1.8
         owned = int(marker.read_text())  # The real Git SSH subprocess was reached.
         # A killed orphan may briefly remain a zombie until its parent reaps it.
