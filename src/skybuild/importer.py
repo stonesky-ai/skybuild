@@ -173,9 +173,8 @@ def _apply_plan(store: Store, project_id: str, plan: dict, authority: str) -> di
             rows = connection.execute("SELECT project_id, task_id, title, description, status, priority, acceptance_criteria, architecture_refs, phase, next_action, responsible, metadata, revision FROM tasks ORDER BY priority").fetchall()
             if len(rows) != plan["task_count"] or connection.execute("SELECT count(*) AS count FROM task_journal").fetchone()["count"] != len(rows):
                 _refuse("Imported destination changed")
-            for table in ("task_lineage", "messages", "cord_journal", "idempotency"):
-                if connection.execute(sql.SQL("SELECT 1 FROM {} LIMIT 1").format(sql.Identifier(table))).fetchone():
-                    _refuse("Imported destination changed")
+            if connection.execute("SELECT 1 FROM task_lineage LIMIT 1").fetchone():
+                _refuse("Imported destination changed")
             for row, expected in zip(rows, plan["records"]):
                 actual = _public(row)
                 for field in ("task_id", "title", "description", "status", "priority", "acceptance_criteria", "architecture_refs", "phase", "next_action", "responsible", "metadata"):
@@ -192,7 +191,7 @@ def _apply_plan(store: Store, project_id: str, plan: dict, authority: str) -> di
                         or journal["before_state"] is not None or journal["after_state"] != store._task(connection, project_id, row["task_id"])):
                     _refuse("Imported history changed")
             return {"result": "unchanged", "project_id": project_id, "task_count": len(rows), "authority": authority}
-        for table in ("tasks", "task_dependencies", "task_journal", "task_lineage", "messages", "cord_journal", "idempotency"):
+        for table in ("tasks", "task_dependencies", "task_journal", "task_lineage"):
             if connection.execute(sql.SQL("SELECT 1 FROM {} LIMIT 1").format(sql.Identifier(table))).fetchone():
                 _refuse("Destination contains unrelated data")
         actor = "skybuild-ledger-import"
