@@ -4,6 +4,7 @@ import json
 from contextlib import nullcontext
 from pathlib import Path
 import sys
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -67,7 +68,7 @@ def test_pr_comment_uses_rest_and_verifies_response(tmp_path, monkeypatch, capsy
 
 
 @pytest.mark.parametrize("change", [
-    "gate_failure", "base_changed", "wrong_initial_base", "pass", "default_gate", "default_gate_publish",
+    "gate_failure", "base_changed", "base_changed_waiting", "wrong_initial_base", "pass", "overlap", "default_gate", "default_gate_publish",
     "head_changed", "custom_head_changed", "wrong_artifact", "nonterminal_artifact",
     "missing_artifact", "cleanup_unknown", "malformed_artifact", "wrong_run", "gate_malformed",
 ])
@@ -85,6 +86,13 @@ def test_candidate_gate_cleanup_and_ref_checks(tmp_path, monkeypatch, change):
     monkeypatch.setattr(module, "verify_skybuild", lambda path: path)
     monkeypatch.setattr(module, "verify_skybuild_remote", lambda *_: None)
     monkeypatch.setattr(module, "reserve_worktree_slots", lambda *_: nullcontext())
+    monkeypatch.setattr(module, "serialize_integrations", lambda *_: nullcontext(), raising=False)
+    if change == "overlap":
+        import _worktree_capacity as capacity
+        monkeypatch.setattr(capacity, "_git", lambda *_: str(tmp_path))
+        monkeypatch.setattr(capacity, "_worktree_count", lambda _: 1)
+        monkeypatch.setattr(module, "reserve_worktree_slots", capacity.reserve_worktree_slots)
+        monkeypatch.setattr(module, "serialize_integrations", capacity.serialize_integrations, raising=False)
     calls = []
     base_reads = 0
     def fake_run(argv, cwd):
@@ -100,7 +108,10 @@ def test_candidate_gate_cleanup_and_ref_checks(tmp_path, monkeypatch, change):
         if "ls-remote" in argv:
             if argv[-1] == "refs/heads/dev-002":
                 base_reads += 1
-                oid = "c" * 40 if change == "wrong_initial_base" or change == "base_changed" and base_reads > 1 else base
+                changed = (change == "wrong_initial_base"
+                           or change == "base_changed" and base_reads > 2
+                           or change == "base_changed_waiting" and base_reads > 1)
+                oid = "c" * 40 if changed else base
             else:
                 oid = head
             return oid + "\t" + argv[-1]
@@ -114,6 +125,16 @@ def test_candidate_gate_cleanup_and_ref_checks(tmp_path, monkeypatch, change):
         gate_commands.append(argv)
         if change == "gate_failure":
             raise RuntimeError("gate failed")
+        if change == "overlap":
+            entered = threading.Event()
+            def prepare_during_gate():
+                with capacity.reserve_worktree_slots(tmp_path, 2):
+                    entered.set()
+            thread = threading.Thread(target=prepare_during_gate, daemon=True)
+            thread.start()
+            assert entered.wait(1), "Integration retained the capacity lock during its gate"
+            thread.join(1)
+            assert not thread.is_alive()
         if "--artifact" in argv:
             def value(flag):
                 return argv[argv.index(flag) + 1]
@@ -134,7 +155,7 @@ def test_candidate_gate_cleanup_and_ref_checks(tmp_path, monkeypatch, change):
         return {"ok": True, "passed": 17, "cleaned_up": change != "cleanup_unknown"}
     monkeypatch.setattr(module, "run", fake_run)
     monkeypatch.setattr(module, "run_gate", fake_gate)
-    if change in {"pass", "default_gate", "default_gate_publish"}:
+    if change in {"pass", "overlap", "default_gate", "default_gate_publish"}:
         result = module.integrate(args)
         assert result["merged"] is (change == "default_gate_publish")
         assert result["gate"] == {"ok": True, "passed": 17, "cleaned_up": True}
@@ -149,10 +170,11 @@ def test_candidate_gate_cleanup_and_ref_checks(tmp_path, monkeypatch, change):
         if default_gate:
             artifact = gate_commands[0][gate_commands[0].index("--artifact") + 1]
             assert "artifact=" + artifact in str(failure.value)
-    if change != "wrong_initial_base":
+    if change not in {"wrong_initial_base", "base_changed_waiting"}:
         assert any(argv[:3] == ["git", "worktree", "remove"] for argv in calls)
     else:
         assert not any(argv[:3] == ["git", "worktree", "add"] for argv in calls)
+        assert gate_commands == []
     assert any(argv[:3] == ["gh", "pr", "merge"] for argv in calls) is (change == "default_gate_publish")
 
 

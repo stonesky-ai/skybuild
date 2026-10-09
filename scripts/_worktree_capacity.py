@@ -32,7 +32,11 @@ def _worktree_count(checkout: Path) -> int:
 
 @contextmanager
 def reserve_worktree_slots(checkout: Path, slots: int):
-    """Hold a shared lock while a caller creates and uses reserved worktrees."""
+    """Hold the capacity lock through count verification and worktree creation.
+
+    Once registered, worktrees count against later reservations without retaining
+    this lock. Callers may hold it longer when their operation requires that.
+    """
     if type(slots) is not int or not 1 <= slots <= MAX_WORKTREES:
         raise WorktreeCapacityError("Requested worktree reserve is invalid")
     common_dir = Path(_git(checkout, "rev-parse", "--path-format=absolute", "--git-common-dir"))
@@ -44,3 +48,16 @@ def reserve_worktree_slots(checkout: Path, slots: int):
             raise WorktreeCapacityError(
                 f"Need {slots} free worktree slot(s); current count is {count} of {MAX_WORKTREES}")
         yield count
+
+
+@contextmanager
+def serialize_integrations(checkout: Path):
+    """Serialize cooperating local integrators without blocking preparation.
+
+    Acquire this lock before the capacity lock. Preparers never acquire this
+    lock. This does not fence GitHub or other noncooperating publishers.
+    """
+    common_dir = Path(_git(checkout, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    with (common_dir / "skybuild-integration.lock").open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield

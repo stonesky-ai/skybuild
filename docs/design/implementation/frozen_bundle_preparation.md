@@ -57,6 +57,11 @@ start at the worktree limit. Clean only finished worktrees owned by the current
 session after verifying their work is pushed or otherwise preserved; never
 remove locked, dirty, or unknown-owner worktrees. Preparation and integration
 serialize slot reservations with a shared lock in the common Git directory.
+Integration holds a separate repository-local publication lock through its gate
+and publication, releasing capacity immediately after candidate registration.
+Preparation can therefore proceed during a gate when capacity allows. Refs are
+rechecked after acquiring publication ownership; a moved base requires a new
+freeze before another gate starts. See [overlapped preparation](overlapped_bundle_preparation.md).
 
 Run from a clean, explicitly owned SkyBuild checkout whose origin fetch/push
 URLs identify `stonesky-ai/skybuild`. Use a new output directory outside every
