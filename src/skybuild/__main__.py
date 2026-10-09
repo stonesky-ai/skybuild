@@ -49,6 +49,12 @@ def main(argv: list[str] | None = None) -> int:
     due.add_argument("--page-size", type=int, default=100)
     due.add_argument("--max-pages", type=int, default=20)
     due.add_argument("--after-task-id")
+    schedule = commands.add_parser("schedule-due", help="Run a finite CPU-only due-deferral catch-up timer")
+    schedule.add_argument("project_id")
+    schedule.add_argument("--interval-seconds", type=int, default=60)
+    schedule.add_argument("--max-ticks", type=int, default=60)
+    schedule.add_argument("--page-size", type=int, default=100)
+    schedule.add_argument("--max-pages", type=int, default=20)
     args = parser.parse_args(argv)
     try:
         if args.command == "ledger-manifest":
@@ -83,6 +89,14 @@ def main(argv: list[str] | None = None) -> int:
                     result = client.list_tasks(args.project_id, limit=args.limit, offset=args.offset)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
+        if args.command == "schedule-due":
+            from .scheduler import schedule_due
+
+            with Client(_environment("SKYBUILD_API_URL"), _environment("SKYBUILD_TOKEN")) as client:
+                result = schedule_due(client, args.project_id, interval_seconds=args.interval_seconds,
+                                      max_ticks=args.max_ticks, page_size=args.page_size, max_pages=args.max_pages,
+                                      report=lambda tick: print(json.dumps(tick, ensure_ascii=False), flush=True))
+            return 0 if result["complete"] else 1
         if args.command == "reconcile-due":
             if not 1 <= args.page_size <= 100 or not 1 <= args.max_pages <= 100:
                 raise ValueError("Reconciliation bounds are invalid")
