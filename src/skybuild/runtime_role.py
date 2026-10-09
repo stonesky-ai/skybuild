@@ -76,7 +76,7 @@ def audit_runtime_role(connection, expected_database, role):
     Catalog queries run as the administrator, but all has_*_privilege calls
     explicitly inspect the runtime role, including privileges from PUBLIC.
     """
-    _identity(connection, expected_database, role)
+    runtime_oid = _identity(connection, expected_database, role)
     findings = []
     if not connection.execute("SELECT has_database_privilege(%s, current_database(), 'CONNECT')", (role,)).fetchone()[0]:
         findings.append("missing database CONNECT")
@@ -103,6 +103,9 @@ def audit_runtime_role(connection, expected_database, role):
             granted = connection.execute(sql.SQL("SELECT {}(%s, %s, %s)").format(sql.SQL(function)), (role, oid, privilege)).fetchone()[0]
             if granted != (privilege in expected):
                 findings.append(f"{'excess' if granted else 'missing'} {schema}.{table} {privilege}")
+            if connection.execute(sql.SQL("SELECT {}(%s, %s, %s)").format(sql.SQL(function)),
+                                  (role, oid, privilege + ' WITH GRANT OPTION')).fetchone()[0]:
+                findings.append(f"table grant option: {schema}.{table} {privilege}")
         if kind == "S":
             continue
         # Table-level checks alone miss column grants, including grant options.
@@ -123,10 +126,17 @@ def audit_runtime_role(connection, expected_database, role):
         "JOIN pg_namespace n ON n.oid = c.relnamespace "
         "CROSS JOIN unnest(ARRAY['INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']) p(privilege) "
         "WHERE n.nspname IN ('pg_catalog', 'information_schema') AND c.relkind IN ('r','p','v') "
-        "AND NOT (n.nspname = 'pg_catalog' AND c.relname = 'pg_settings' AND p.privilege = 'UPDATE') "
-        "AND (has_table_privilege(%s, c.oid, p.privilege) OR CASE WHEN p.privilege IN "
-        "('INSERT','UPDATE','REFERENCES') THEN has_any_column_privilege(%s, c.oid, p.privilege) ELSE false END)",
-        (role, role),
+        "AND (((c.oid <> 'pg_catalog.pg_settings'::regclass OR p.privilege <> 'UPDATE') AND "
+        "(has_table_privilege(%s, c.oid, p.privilege) OR CASE WHEN p.privilege IN "
+        "('INSERT','UPDATE','REFERENCES') THEN has_any_column_privilege(%s, c.oid, p.privilege) ELSE false END)) "
+        "OR EXISTS (SELECT 1 FROM aclexplode(c.relacl) a WHERE a.grantee IN (0, %s) "
+        "AND a.privilege_type = p.privilege AND NOT (c.oid = 'pg_catalog.pg_settings'::regclass "
+        "AND p.privilege = 'UPDATE' AND a.grantee = 0 AND NOT a.is_grantable)) "
+        "OR EXISTS (SELECT 1 FROM pg_attribute att, "
+        "LATERAL aclexplode(att.attacl) a WHERE att.attrelid = c.oid AND a.grantee IN (0, %s) "
+        "AND a.privilege_type = p.privilege AND NOT (c.oid = 'pg_catalog.pg_settings'::regclass "
+        "AND p.privilege = 'UPDATE' AND a.grantee = 0 AND NOT a.is_grantable)))",
+        (role, role, runtime_oid, runtime_oid),
     ):
         findings.append(f"system catalog write: {table} {privilege}")
     seen_routines = set()
@@ -150,6 +160,22 @@ def audit_runtime_role(connection, expected_database, role):
         if connection.execute("SELECT has_function_privilege(%s, %s, 'EXECUTE WITH GRANT OPTION')", (role, oid)).fetchone()[0]:
             findings.append(f"routine grant option: {schema}.{name}")
     findings.extend("missing lock routine: " + name for name in sorted(LOCK_ROUTINES.keys() - seen_routines))
+    # Preserve initdb's ordinary PUBLIC function access, not later grants to
+    # restricted server utilities. pg_init_privs records nondefault initdb ACLs.
+    for name, granted, grantable, baseline in connection.execute(
+        "SELECT n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', "
+        "has_function_privilege(%s, p.oid, 'EXECUTE'), "
+        "has_function_privilege(%s, p.oid, 'EXECUTE WITH GRANT OPTION'), "
+        "EXISTS (SELECT 1 FROM aclexplode(COALESCE(i.initprivs, acldefault('f', p.proowner))) a "
+        "WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE') "
+        "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+        "LEFT JOIN pg_init_privs i ON i.objoid = p.oid AND i.classoid = 'pg_proc'::regclass AND i.objsubid = 0 "
+        "WHERE n.nspname IN ('pg_catalog', 'information_schema')", (role, role),
+    ):
+        if granted and not baseline:
+            findings.append("system routine EXECUTE: " + name)
+        if grantable:
+            findings.append("system routine grant option: " + name)
     return {"ok": not findings, "database": expected_database, "role": role, "findings": findings}
 
 

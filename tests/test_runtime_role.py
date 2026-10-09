@@ -92,12 +92,17 @@ def test_runtime_supports_launch_free_store_operations(restricted_database, oper
     ("GRANT UPDATE ON skybuild.task_journal TO {role}", "task_journal UPDATE"),
     ("GRANT UPDATE (is_admin) ON skybuild.principals TO {role}", "principals.is_admin UPDATE"),
     ("GRANT SELECT ON skybuild.tasks TO {role} WITH GRANT OPTION", "grant option"),
+    ("GRANT DELETE ON skybuild.task_dependencies TO {role} WITH GRANT OPTION", "table grant option"),
     ("GRANT CREATE ON SCHEMA public TO PUBLIC", "schema CREATE"),
     ("GRANT TEMP ON DATABASE {database} TO PUBLIC", "database TEMP"),
     ("GRANT CONNECT ON DATABASE {database} TO {role} WITH GRANT OPTION", "CONNECT grant option"),
     ("GRANT USAGE ON SCHEMA skybuild TO {role} WITH GRANT OPTION", "USAGE grant option"),
     ("GRANT CREATE ON SCHEMA information_schema TO {role}", "schema CREATE"),
     ("GRANT UPDATE ON pg_catalog.pg_class TO {role}", "system catalog write"),
+    ("GRANT UPDATE ON pg_catalog.pg_settings TO {role} WITH GRANT OPTION", "system catalog write"),
+    ("GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_file(text) TO {role}", "system routine EXECUTE"),
+    ("GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_file(text) TO PUBLIC", "system routine EXECUTE"),
+    ("GRANT EXECUTE ON FUNCTION pg_catalog.now() TO {role} WITH GRANT OPTION", "system routine grant option"),
     ("GRANT EXECUTE ON FUNCTION skybuild.refuse_journal_mutation() TO PUBLIC", "routine EXECUTE"),
 ])
 def test_audit_detects_effective_privilege_drift(restricted_database, grant, expected):
