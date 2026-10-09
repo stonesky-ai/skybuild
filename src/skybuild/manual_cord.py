@@ -1,7 +1,9 @@
 """One-shot REST/Cord transport for the manually assigned worker pilot.
 
-This module does not start a model or grant task authority. The dispatcher
-still checks the Markdown ledger and reviews the reported Git head.
+This module does not start a model or claim, reserve, or fence a task. The
+dispatcher binds and rechecks an API task status/revision snapshot; that read
+does not prevent concurrent assignments. The dispatcher separately reviews
+the reported Git head.
 """
 
 import argparse

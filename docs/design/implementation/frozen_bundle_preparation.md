@@ -4,7 +4,7 @@ Task: `SKYBUILD-BUNDLED-INTEGRATION`. Implementation source base:
 `42c3256d1dd05af2c1c457d214231cce9f69c066` (architecture A38, working
 contract and automatic bundled integration in section 2). This is the bounded
 preparation slice of the existing integration workflow, not a new readiness
-authority. The Markdown ledgers retain task authority.
+authority. The SkyBuild task API remains authoritative; this helper changes no task state.
 
 `scripts/prepare_bundle.py` composes only caller-supplied, already-reviewed full
 commit SHAs, in supplied dependency order, into a detached candidate. It checks
