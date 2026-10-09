@@ -86,6 +86,7 @@ def _dispatch(tmp_path, monkeypatch, client):
                 "owned_paths": ["src/skybuild/new_module.py"], "checks": ["Run focused tests"],
                 "model_limit": "One existing subscription worker"}
     monkeypatch.setattr(manual_dispatch, "build_envelope", lambda *_args, **_kwargs: envelope)
+    monkeypatch.setattr(manual_dispatch, "verify_assignment", lambda *_args, **_kwargs: {"verified": True})
     monkeypatch.setattr(manual_dispatch, "_published_head", lambda _repo: "a" * 40)
     kwargs = {"worker": "wonko", "dispatcher": "jeltz", "project": "skybuild",
               "principal": "dispatch-principal", "url": "https://controller.ts.net",
@@ -103,9 +104,11 @@ def test_retry_uses_same_intent_and_key(tmp_path, monkeypatch):
         manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
     prepared = list(state_dir.glob("*.json"))
     assert len(prepared) == 1
-    assert json.loads(prepared[0].read_text())["status"] == "prepared"
+    assert json.loads(prepared[0].read_text())["status"] == "sending"
+    monkeypatch.setattr(manual_dispatch, "_published_head", lambda _repo: "c" * 40)
     sent = manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
     assert sent["status"] == "sent"
+    assert sent["mode"] == "pinned_retry"
     assert len(client.calls) == 2
     assert client.calls[0] == client.calls[1]
     assert json.loads(prepared[0].read_text())["status"] == "sent"
@@ -113,14 +116,15 @@ def test_retry_uses_same_intent_and_key(tmp_path, monkeypatch):
     assert len(client.calls) == 2
 
 
-def test_changed_assignment_cannot_reuse_id(tmp_path, monkeypatch):
+def test_changed_current_brief_cannot_replace_pinned_intent(tmp_path, monkeypatch):
     client = FakeClient()
     repo, _, envelope, kwargs = _dispatch(tmp_path, monkeypatch, client)
     manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
     envelope["owned_paths"] = ["src/skybuild/other.py"]
-    with pytest.raises(manual_dispatch.DispatchError, match="different durable intent"):
-        manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
+    result = manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
+    assert result["mode"] == "already_sent"
     assert len(client.calls) == 1
+    assert json.loads(client.calls[0][1]["body"])["owned_paths"] == ["src/skybuild/new_module.py"]
 
 
 def test_private_url_and_scoped_principal_required(tmp_path, monkeypatch):
@@ -133,6 +137,24 @@ def test_private_url_and_scoped_principal_required(tmp_path, monkeypatch):
     with pytest.raises(manual_dispatch.DispatchError, match="scoped dispatcher"):
         manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
     assert client.calls == []
+    client.grants = {"skybuild": ["cord:send", "tasks:write"]}
+    with pytest.raises(manual_dispatch.DispatchError, match="scoped dispatcher"):
+        manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
+    client.grants = {"skybuild": ["cord:send", "cord:send"]}
+    with pytest.raises(manual_dispatch.DispatchError, match="scoped dispatcher"):
+        manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
+
+
+def test_retry_cannot_change_controller_port(tmp_path, monkeypatch):
+    client = FakeClient()
+    client.fail_once = True
+    repo, _, _, kwargs = _dispatch(tmp_path, monkeypatch, client)
+    with pytest.raises(manual_dispatch.DispatchError, match="unavailable"):
+        manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
+    with pytest.raises(manual_dispatch.DispatchError, match="durable intent"):
+        manual_dispatch.dispatch(repo, "docs/design/assignments/test.json",
+                                 **{**kwargs, "url": "https://controller.ts.net:444"})
+    assert len(client.calls) == 1
 
 
 def test_moved_development_head_blocks_send(tmp_path, monkeypatch):
@@ -143,3 +165,32 @@ def test_moved_development_head_blocks_send(tmp_path, monkeypatch):
         manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
     assert client.calls == []
     assert json.loads(next(state_dir.glob("*.json")).read_text())["status"] == "prepared"
+
+
+def test_prepared_retry_reuses_pinned_body_after_head_moves(tmp_path, monkeypatch):
+    client = FakeClient()
+    client.grants = {"skybuild": ["cord:read"]}
+    repo, state_dir, _, kwargs = _dispatch(tmp_path, monkeypatch, client)
+    with pytest.raises(manual_dispatch.DispatchError, match="scoped dispatcher"):
+        manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
+    assert json.loads(next(state_dir.glob("*.json")).read_text())["status"] == "prepared"
+    monkeypatch.setattr(manual_dispatch, "_published_head", lambda _repo: "c" * 40)
+    client.grants = {"skybuild": ["cord:send"]}
+    sent = manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
+    assert sent["mode"] == "prepared_retry"
+    assert json.loads(client.calls[0][1]["body"])["base_sha"] == "a" * 40
+
+
+def test_large_valid_intent_can_be_retried(tmp_path, monkeypatch):
+    client = FakeClient()
+    client.fail_once = True
+    repo, state_dir, envelope, kwargs = _dispatch(tmp_path, monkeypatch, client)
+    envelope["owned_paths"] = [f"src/skybuild/feature_{number:04d}.py" for number in range(1020)]
+    with pytest.raises(manual_dispatch.DispatchError, match="unavailable"):
+        manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
+    state_file = next(state_dir.glob("*.json"))
+    assert state_file.stat().st_size > 65536
+    result = manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
+    assert result["mode"] == "pinned_retry"
+    assert len(client.calls) == 2
+    assert client.calls[0] == client.calls[1]
