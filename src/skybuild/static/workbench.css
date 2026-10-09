@@ -26,7 +26,7 @@ button:disabled { opacity: .5; cursor: default; }
 #notice.error { border-color: #ac2d32; color: #7b2025; background: #fff1f1; }
 .task-list { list-style: none; padding: 0; max-height: 30rem; overflow: auto; }
 .task-list li { margin: .4rem 0; }
-.task-list button { width: 100%; text-align: left; color: #182b35; background: #f3f7f8; border-color: #cbd8de; overflow-wrap: anywhere; }
+.task-list button { width: 100%; text-align: left; white-space: pre-wrap; color: #182b35; background: #f3f7f8; border-color: #cbd8de; overflow-wrap: anywhere; }
 .task-list button[aria-current="true"] { border-color: #265c70; background: #e1edf1; }
 .field-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
 #save { margin-top: .8rem; }

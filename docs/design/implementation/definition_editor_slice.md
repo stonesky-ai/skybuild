@@ -5,3 +5,5 @@ The launch-free workbench now exposes acceptance criteria and architecture refer
 An unrelated edit round-trips a multiline criterion and reference unchanged in the browser-handler regression. Independent `structure_ui_review` found the initially lossy line-based fields and accepted the JSON-array correction. The full disposable PostgreSQL suite passed 134 tests with the existing Starlette TestClient deprecation warning. This editor does not mark acceptance met, assert review evidence or complete a task. It only changes a definition through the existing guarded task update.
 
 The authenticated task detail also includes a collapsible full-record view. It shows the API record, including metadata/provenance fields, as inert text and clears it on logout. This helps inspect imported task content without altering it.
+
+Task-list rows show status, phase, responsible owner and the current blocker or next action alongside the title. This makes outstanding work easier to triage before opening the full record.

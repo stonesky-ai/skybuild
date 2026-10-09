@@ -26,6 +26,8 @@ The workbench now offers a collapsible full API task record beside the editable 
 
 The [task-history paging slice](implementation/history_paging_slice.md) makes events beyond the first 100 reachable from the workbench, in immutable revision order. No live task authority changed.
 
+Task-list rows now surface phase, responsible owner and blocker/next action for triage. No live task authority changed.
+
 Saved 2026-10-08 after architecture revision A33 and the subsequent implementation authorization below. Resume from /home/kevin/my_code with sibling skybuild and skykeep checkouts. This is context, not a competing design plan.
 
 ## Committed checkpoint and immediate next task

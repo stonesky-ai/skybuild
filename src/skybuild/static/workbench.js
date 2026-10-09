@@ -113,7 +113,7 @@
       const item = document.createElement("li"), button = document.createElement("button");
       button.type = "button";
       button.dataset.taskId = task.task_id;
-      button.textContent = `${task.task_id}: ${task.title} (${task.status})`;
+      button.textContent = `${task.task_id}: ${task.title} (${task.status} · ${task.phase})\n${task.blocker || task.next_action || "No next action"} · ${task.responsible}`;
       button.setAttribute("aria-current", String(selected?.task_id === task.task_id));
       button.addEventListener("click", () => perform(async () => { await selectTask(task.task_id); notice("Task loaded."); }));
       item.append(button); list.append(item);

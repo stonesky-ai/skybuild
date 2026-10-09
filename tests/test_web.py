@@ -114,6 +114,8 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 async function run() {
   get("project").value = " project "; get("token").value = "test-token";
   get("connection-form").listeners.submit({preventDefault() {}}); await tick();
+  assert.match(get("task-list").querySelectorAll()[0].textContent, /proposed · triage/);
+  assert.match(get("task-list").querySelectorAll()[0].textContent, /Review · owner/);
   get("task-list").querySelectorAll()[0].listeners.click(); await tick();
   assert.equal(get("history").children.length, 100);
   assert.equal(get("load-more-history").disabled, false);
