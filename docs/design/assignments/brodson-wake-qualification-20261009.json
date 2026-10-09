@@ -1,0 +1,27 @@
+{
+  "schema": "manual-work-brief-v1",
+  "assignment_id": "MWP-20261009-BRODSON-QUALIFICATION-012",
+  "task_id": "SKYBUILD-SHARED-INFERENCE",
+  "worker": "wonko",
+  "dispatcher": "pilot_dispatcher",
+  "branch": "task/brodson-wake-opt-in",
+  "owned_paths": [
+    "scripts/brodson_qualification.py",
+    "tests/test_brodson_qualification.py",
+    "docs/research/brodson-spike/qualification.md",
+    "docs/design/assignments/brodson-wake-qualification-20261009.json"
+  ],
+  "checks": [
+    "Preparation is based on e85c22451a517bca94d780eca325f6f0fd4759ee. This new assignment does not change assignment011's no-reload contract or authorize endpoint requests by itself. Preserve earlier consumed attempts and expired run evidence.",
+    "Require independent exact-head review, published immutable brief, verified REST receipt and separate parent operator authorization. Version2 requires an explicit boolean allow_automatic_wake_reload; only true with actual owner permission admits ordinary-request automatic wake/reload.",
+    "Permit only ordinary-request automatic wake/reload of the selected existing loaded or sleeping child. Reject missing, unloaded, loading, stopped or error targets. No explicit load/unload/admin route, model change, infrastructure change or paid fallback.",
+    "The metadata invocation permits only GET /models and GET /props?model=qwen3.5-think&autoload=false, then stops. False or absent wake permission retains the strict explicit sleep-disabled guard. Version1 and assignment011 never gain wake permission.",
+    "One run permits 14 serial attempts: 2 metadata GETs, 6 exact input-count POSTs and 6 generation POSTs. Keep autoload=false on model-specific routes; no retries, redirects, proxies, extra probes or fallback. Persist consumed attempts and reservations before each effect.",
+    "Continuation binds the same run/head, immutable wake permission, exact metadata/build, reviewed deterministic template hash and unchanged serving profile. Same-boot metadata expires after 30 minutes. Receipt/restart cannot extend the original deadline or reset its budget.",
+    "Require 1..2048 counted input tokens and reserve count+512 before generation against15360 aggregate. Freeze identical count/generation bodies; require exact prompt usage and model/build, bounded completion/total usage. Unknown usage, timeout or ambiguity stops further calls.",
+    "Only the controller HTTP transport reads the existing private credential reference. No token transfer, artifact echo or returned-code execution. Metadata/count caps remain64KiB/4KiB and10s; generation16KiB and60s. Evaluate three committed fixtures with at most one correction each.",
+    "Root owns independent review, publication, receipt reconciliation and actual owner authorization. Source preparation, this brief and its receipt do not assert that the owner granted wake permission. No live calls during implementation or review. Default remains strict."
+  ],
+  "model_limit": "Existing approved zero-charge profile only; no paid fallback. Wake/reload requires separate explicit owner opt-in. Owner cutoff 2026-10-09T15:20:53Z; no budget reset or expiry extension.",
+  "next_action": "Wonko receives and verifies this new immutable REST brief without friend credentials or a new model turn. The controller records actual owner scope and final exact-head review before authorizing metadata only. Stop after metadata; separately admit any continuation under the same durable run, immutable wake setting and all existing count, usage, freshness and deadline bounds. Leave assignment011 and its expired evidence unchanged."
+}
