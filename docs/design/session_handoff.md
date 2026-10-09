@@ -1,5 +1,13 @@
 # SkyBuild session handoff
 
+## 2026-10-08 frozen importer checkpoint
+
+SKYBUILD-TASK-CUTOVER preparation is implemented and independently reviewed. The importer pins the three ledger files to commit `6d96075f88493d0b54577a2a8c9526f19a78a5ed`, canonical manifest SHA-256 `292a94e84a98f2d4cd7170fe997d9ab9521a55edb16ad3af01556750f790a3a6`, and a reviewed projected import SHA-256 `1d3400fc5ae31ddfbc9e7e55e3b231b070cf7456e11921728aac6e074cdbcdc0`. The explicit dependency contract is [frozen_ledger_import.json](implementation/frozen_ledger_import.json); its interpretation, normalized-field limits and command sequence are in [frozen_ledger_import.md](implementation/frozen_ledger_import.md). The [separate review](implementation/frozen_import_review.md) records findings and corrections.
+
+Against a task-owned disposable PostgreSQL container, import created 28 tasks (5 in progress, 9 proposed, 12 deferred, 2 done), one immutable import event per task and the explicit dependencies. A separate CLI process repeated the import and returned `unchanged`. Focused tests cover source/mapping conflict, rollback, unrelated destination refusal, API read/history, write denial and restart persistence. The final full suite passed 119 tests with one pre-existing Starlette TestClient deprecation warning. Wheel/source builds passed, and the wheel contains importer code and migration 003. The container is disposable and must be stopped after any remaining validation. No live database, deployed service, task ledger, worker or authority manifest changed. Markdown remains the sole live task authority; the imported project is write-blocked while its receipt says `markdown`.
+
+The owner requested continuing development while away and a five-minute self-reminder loop. A local reminder process runs in this session only; it does not start SkyBuild or change task authority. Next useful work: continue the structural task workflow in isolated code/tests. Before any real authority switch, reconcile normalized imported workflow fields with their full raw sections, revalidate the freeze, record recovery and switch authority explicitly under architecture section 4. Do not confuse this rehearsal with cutover.
+
 Saved 2026-10-08 after architecture revision A33 and the subsequent implementation authorization below. Resume from /home/kevin/my_code with sibling skybuild and skykeep checkouts. This is context, not a competing design plan.
 
 ## Committed checkpoint and immediate next task

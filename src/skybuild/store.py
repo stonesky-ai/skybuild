@@ -190,6 +190,10 @@ class Store:
         current = self._principal(connection, principal.principal_id)
         if not current.is_admin and operation not in current.grants.get(project_id, ()):
             raise DomainError('authorization', 'Project operation not permitted', 403)
+        if operation == 'tasks:write' and connection.execute(
+            "SELECT 1 FROM ledger_imports WHERE project_id = %s AND authority = 'markdown' FOR SHARE", (project_id,)
+        ).fetchone():
+            raise DomainError('authority', 'Markdown ledger remains task authority', 409)
         return current
 
     @staticmethod

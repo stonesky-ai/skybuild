@@ -22,6 +22,12 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     manifest = commands.add_parser("ledger-manifest", help="Emit a read-only ledger validation manifest without database access")
     manifest.add_argument("paths", nargs="+", type=Path)
+    ledger_import = commands.add_parser("ledger-import", help="Plan or rehearse frozen ledger import; never switch live authority")
+    ledger_import.add_argument("--ledger-dir", type=Path, default=Path("docs/design"))
+    ledger_import.add_argument("--contract", type=Path, default=Path("docs/design/implementation/frozen_ledger_import.json"))
+    ledger_import.add_argument("--project-id", default="skybuild")
+    ledger_import.add_argument("--apply-disposable", action="store_true")
+    ledger_import.add_argument("--expected-import-sha256")
     commands.add_parser("migrate", help="Apply migrations to the explicitly configured dedicated database")
     provision = commands.add_parser("provision", help="Provision a principal using SKYBUILD_TOKEN or --token-stdin")
     provision.add_argument("principal_id")
@@ -44,6 +50,23 @@ def main(argv: list[str] | None = None) -> int:
             from .ledger import build_manifest
 
             print(json.dumps(build_manifest(args.paths), ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "ledger-import":
+            from .importer import import_frozen, prepare_import
+            from .store import Store
+
+            plan = prepare_import(args.ledger_dir, args.contract)
+            if args.apply_disposable:
+                if not args.expected_import_sha256:
+                    raise ValueError("Apply requires --expected-import-sha256 from reviewed dry run")
+                expected_database = _environment("SKYBUILD_EXPECTED_DATABASE")
+                if not expected_database.startswith("skybuild_import_test"):
+                    raise ValueError("Frozen import rehearsal requires a skybuild_import_test database")
+                result = import_frozen(Store(_environment("SKYBUILD_DSN"), expected_database), args.project_id,
+                                       args.ledger_dir, args.contract, args.expected_import_sha256)
+                print(json.dumps({**result, "content_sha256": plan["content_sha256"]}, ensure_ascii=False, indent=2))
+            else:
+                print(json.dumps(plan, ensure_ascii=False, indent=2))
             return 0
         if args.command in {"tasks", "get", "history"}:
             with Client(_environment("SKYBUILD_API_URL"), _environment("SKYBUILD_TOKEN")) as client:
