@@ -33,7 +33,7 @@ def _resolved_addresses(host: str) -> set[str]:
 
 def _token_from_file(path: Path) -> str:
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
             info = os.fstat(descriptor)
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
@@ -70,7 +70,7 @@ def probe_private_api(url: str, project_id: str, token_file: Path, expected_prin
         raise PreflightError("Project or principal identifier is invalid")
     token = _token_from_file(token_file)
     try:
-        with Client(url, token, retries=0, timeout=10, transport=transport) as client:
+        with Client(url, token, retries=0, timeout=10, transport=transport, trust_env=False) as client:
             ready = client.request("GET", "health/ready")
             if ready != {"status": "ready"}:
                 raise PreflightError("SkyBuild API is not ready")

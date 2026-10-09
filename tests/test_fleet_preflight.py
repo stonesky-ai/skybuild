@@ -1,6 +1,9 @@
 """A worker preflight sees its own narrow identity without sending a task."""
 
 import json
+import os
+import subprocess
+import sys
 
 import httpx
 import pytest
@@ -88,3 +91,15 @@ def test_token_symlink_refused(token_file, tmp_path):
     link.symlink_to(token_file)
     with pytest.raises(PreflightError, match="cannot be read safely"):
         checked_probe(URL, "skybuild", link, "wonko-worker")
+
+
+def test_token_fifo_is_refused_without_blocking(tmp_path):
+    fifo = tmp_path / "worker.token"
+    os.mkfifo(fifo, 0o600)
+    result = subprocess.run(
+        [sys.executable, "-m", "skybuild.fleet_preflight", "--url", URL,
+         "--project", "skybuild", "--token-file", str(fifo), "--principal", "wonko-worker"],
+        capture_output=True, text=True, timeout=2, check=False,
+    )
+    assert result.returncode == 2
+    assert json.loads(result.stdout) == {"ready": False, "reason": "Private API or worker scope check failed"}
