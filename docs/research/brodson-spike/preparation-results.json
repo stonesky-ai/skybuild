@@ -90,7 +90,7 @@
       "entries": [
         {
           "packet": {
-            "latency_ms": 4.788,
+            "latency_ms": 4.635,
             "response": {
               "data": [
                 {
@@ -101,6 +101,7 @@
               ]
             }
           },
+          "parent_elapsed_wall_ms": 19.531,
           "request": {
             "body": null,
             "case_id": null,
@@ -111,7 +112,7 @@
         },
         {
           "packet": {
-            "latency_ms": 4.829,
+            "latency_ms": 4.533,
             "response": {
               "choices": [
                 {
@@ -130,6 +131,7 @@
               }
             }
           },
+          "parent_elapsed_wall_ms": 9.012,
           "request": {
             "body": {
               "chat_template_kwargs": {
@@ -158,7 +160,7 @@
         },
         {
           "packet": {
-            "latency_ms": 4.423,
+            "latency_ms": 4.567,
             "response": {
               "choices": [
                 {
@@ -177,6 +179,7 @@
               }
             }
           },
+          "parent_elapsed_wall_ms": 8.827,
           "request": {
             "body": {
               "chat_template_kwargs": {
@@ -213,7 +216,7 @@
         },
         {
           "packet": {
-            "latency_ms": 4.735,
+            "latency_ms": 5.077,
             "response": {
               "choices": [
                 {
@@ -232,6 +235,7 @@
               }
             }
           },
+          "parent_elapsed_wall_ms": 9.29,
           "request": {
             "body": {
               "chat_template_kwargs": {
@@ -260,7 +264,7 @@
         },
         {
           "packet": {
-            "latency_ms": 4.401,
+            "latency_ms": 4.584,
             "response": {
               "choices": [
                 {
@@ -279,6 +283,7 @@
               }
             }
           },
+          "parent_elapsed_wall_ms": 8.896,
           "request": {
             "body": {
               "chat_template_kwargs": {
@@ -307,7 +312,7 @@
         },
         {
           "packet": {
-            "latency_ms": 4.65,
+            "latency_ms": 4.356,
             "response": {
               "choices": [
                 {
@@ -326,6 +331,7 @@
               }
             }
           },
+          "parent_elapsed_wall_ms": 8.651,
           "request": {
             "body": {
               "chat_template_kwargs": {
@@ -363,9 +369,9 @@
       ],
       "identity": {
         "assignment_id": "synthetic-http-preparation",
-        "expires_at": 1791534395.0039756,
+        "expires_at": 1791536644.2903266,
         "head": "baa71c431bf74229974ec117b1fb8e05e1ce86fa",
-        "journal_root": "/tmp/brodson-synthetic-http-iqt6gu30",
+        "journal_root": "/tmp/brodson-synthetic-http-od042ze9",
         "limits": {
           "attempts_per_case": 2,
           "cases": 3,
@@ -385,7 +391,7 @@
       },
       "synthetic": true
     },
-    "note": "Authored synthetic server responses and token counts; HTTP wall latency is a local mock-process observation. Synthetic authority is not live permission. This artifact is not a resumable journal.",
+    "note": "Authored synthetic server responses and token counts; parent_elapsed_wall_ms is a local parent mock-operation measurement. packet.latency_ms separately measures child mock response processing. Synthetic authority is not live permission. This artifact is not a resumable journal.",
     "result": {
       "cases": [
         {

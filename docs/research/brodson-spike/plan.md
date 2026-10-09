@@ -4,7 +4,9 @@ Task: `SKYBUILD-SHARED-INFERENCE`, manual file assignments 008–010.
 Base: `257216c5498b95d5a6e56bca60c31abcd6736226`, architecture A35.
 HTTP preparation branch: `task/brodson-spike-http-preparation-20261009`, based on
 published offline preparation `baa71c431bf74229974ec117b1fb8e05e1ce86fa`.
-That base remains subject to the parent’s independent review.
+The published pinned-brief base `9e41ac131afe3e4f44b85a99f9acd8f4d04178f7`
+was deliberately merged into the same branch for REST assignment reconciliation.
+The parent owns independent exact-head review of the correction and merged delta.
 Owner: lead dispatcher. The implementation owns only the six paths confirmed in
 `next-task-20261009-009.md`. The central ledger and production code retain their
 existing authority and scope.
@@ -113,9 +115,9 @@ The owner cutoff is **2026-10-09 15:20:53 UTC**, including nested inference.
 Begin checkpoint and closeout by 15:15:53 UTC. An answer or path confirmation
 does not renew that cutoff. Checkpoint exact head/push status, remaining gates,
 test evidence and unconsumed future request budget in the separate task result.
-REST access is currently blocked by controller Serve/operator and sandbox
-privilege boundaries. Qualification and explicit clearance remain required
-before any endpoint use; no self-SSH or alternate privileged route is authorized.
+The existing scoped Wonko REST client and pinned installation CA now transport
+this assignment and its review feedback. REST transport qualification grants no
+Brodson endpoint clearance. No self-SSH or alternate privileged route is authorized.
 
 ## Fake HTTP protocol and durable accounting
 
@@ -158,8 +160,14 @@ trusting it. A lock without its state refuses a reset. Reader and writer share
 the same 512 KiB journal cap.
 
 Evidence retains sanitized complete message bodies, successful JSON responses,
-returned usage, model metadata, wall latency, validation outcomes and coarse
-failure categories. Authentication-shaped fields and bearer strings are
+returned usage, model metadata, validation outcomes and coarse failure categories.
+Every completed HTTP outcome also stores `parent_elapsed_wall_ms`, measured by
+parent monotonic time around the request operation, including IPC and owned-child
+termination on deadline. Success, HTTP/transport errors and deadline timeouts all
+retain this measurement. `packet.latency_ms` separately describes child-observed
+mock response processing; it is not the parent wall measurement. A restart that
+refuses an uncertain consumed attempt preserves the original latency and exposure
+rather than timing or dispatching another attempt. Authentication-shaped fields and bearer strings are
 redacted recursively, including structured JSON chat content. No credential
 reference is read; mock authorization uses an explicitly synthetic constant.
 Every HTTP result is labeled synthetic, with live_calls zero and synthetic

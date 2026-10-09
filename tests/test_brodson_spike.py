@@ -540,3 +540,77 @@ def test_fake_http_discovery_endpoint_error_stops_even_with_model_metadata(http_
     result = run_http(http_setup, transport)
     assert result["status"] == "stopped"
     assert result["consumed_discovery"] == 1 and result["consumed_generation"] == 0
+
+
+def test_fake_http_success_persists_parent_wall_latency_independent_of_child(http_setup, monkeypatch):
+    import httpx
+    import math
+    import time
+    request = spike.fake_http_request
+
+    def delayed_request(*args, **kwargs):
+        time.sleep(0.03)
+        packet = request(*args, **kwargs)
+        packet["latency_ms"] = 0  # Child-reported latency cannot erase parent elapsed time.
+        return packet
+
+    monkeypatch.setattr(spike, "fake_http_request", delayed_request)
+    result = run_http(http_setup)
+    assert result["status"] == "prepared"
+    path = http_setup[2] / "attempts.json"
+    original = path.read_bytes()
+    entries = json.loads(original)["entries"]
+    assert len(entries) == 6
+    for entry in entries:
+        elapsed = entry["parent_elapsed_wall_ms"]
+        assert type(elapsed) in (int, float) and math.isfinite(elapsed) and elapsed >= 25
+        assert entry["packet"]["latency_ms"] == 0
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("restart must preserve original timings without extra effects")
+
+    monkeypatch.setattr(spike, "fake_http_request", forbidden)
+    assert run_http(http_setup, httpx.MockTransport(forbidden)) == result
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("outcome", ["http503", "timeout"])
+def test_fake_http_failed_generation_retains_parent_wall_latency_and_exposure(http_setup, outcome):
+    import httpx
+    import math
+    import time
+    manifest, recordings, root, _ = http_setup
+    happy = http_transport(manifest, recordings)
+
+    def handler(request):
+        if request.method == "GET":
+            return happy.handle_request(request)
+        time.sleep(5 if outcome == "timeout" else 0.03)
+        return httpx.Response(503, json={"error": "synthetic service unavailable"})
+
+    result = run_http(http_setup, httpx.MockTransport(handler),
+                      deadline_seconds=0.1 if outcome == "timeout" else 60)
+    assert result["status"] == "stopped"
+    assert result["stop_reason"] == ("wall_deadline_ambiguous_exposure" if outcome == "timeout"
+                                      else "HTTP_status_error")
+    assert result["consumed_discovery"] == result["consumed_generation"] == 1
+    assert result["reserved_token_exposure"] == 2560
+    path = root / "attempts.json"
+    original = path.read_bytes()
+    entries = json.loads(original)["entries"]
+    assert len(entries) == 2
+    assert all(type(entry["parent_elapsed_wall_ms"]) in (int, float)
+               and math.isfinite(entry["parent_elapsed_wall_ms"])
+               and entry["parent_elapsed_wall_ms"] >= 0 for entry in entries)
+    generation = entries[1]
+    assert generation["request"]["method"] == "POST"
+    assert generation["status"] == "consumed_uncertain"
+    assert generation["parent_elapsed_wall_ms"] >= (95 if outcome == "timeout" else 25)
+
+    def forbidden(request):
+        raise AssertionError("failed generation remains consumed on restart")
+
+    restarted = run_http(http_setup, httpx.MockTransport(forbidden))
+    assert restarted["stop_reason"] == "consumed_attempt_not_reconciled"
+    assert restarted["consumed_generation"] == 1 and restarted["reserved_token_exposure"] == 2560
+    assert json.loads(path.read_text())["entries"] == entries

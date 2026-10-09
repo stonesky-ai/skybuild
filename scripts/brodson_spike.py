@@ -574,13 +574,16 @@ class FakeHTTPJournal:
         entry = {"request": request, "status": "consumed_uncertain"}
         entries.append(entry)
         self.save()  # File and directory fsync BEFORE the simulated external effect.
+        started = time.monotonic()
         try:
             packet = fake_http_request(transport, request["method"], request["path"], request["body"],
                                        deadline_seconds=deadline_seconds)
         except SpikeError as error:
+            entry["parent_elapsed_wall_ms"] = round((time.monotonic() - started) * 1000, 3)
             entry["failure"] = str(error)
             self.save()
             raise
+        entry["parent_elapsed_wall_ms"] = round((time.monotonic() - started) * 1000, 3)
         entry["packet"] = packet
         if "failure" in packet:
             entry["failure"] = packet["failure"]
