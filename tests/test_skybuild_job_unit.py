@@ -14,12 +14,17 @@ class FakeSystemd:
         self.calls = []
         self.show = "LoadState=not-found\nActiveState=inactive\n"
         self.run_status = 0
+        self.invocation = "a" * 32
+        self.description = ""
 
     def __call__(self, argv, **kwargs):
         self.calls.append((argv, kwargs))
         if argv[0] == "systemctl" and argv[1:3] == ["--user", "show"]:
-            return subprocess.CompletedProcess(argv, 0, self.show, "")
+            identity = f"InvocationID={self.invocation}\nDescription={self.description}\n" if "LoadState=loaded\n" in self.show else ""
+            return subprocess.CompletedProcess(argv, 0, self.show + identity, "")
         if argv[0] == "systemd-run":
+            self.description = next(arg.removeprefix("Description=") for arg in argv if arg.startswith("Description="))
+            self.show = "LoadState=loaded\nActiveState=active\nSubState=running\n"
             return subprocess.CompletedProcess(argv, self.run_status, "", "failed" if self.run_status else "")
         return subprocess.CompletedProcess(argv, 0, "", "")
 
@@ -48,7 +53,9 @@ def test_launch_is_niced_capped_isolated_and_durable(tmp_path):
     assert manifest["phase"] == "launch_intent"
     assert manifest["memory_max_bytes"] == 2 * 1024**3
     assert manifest_path.stat().st_mode & 0o777 == 0o600
-    command = fake.calls[-1][0]
+    command = next(argv for argv, _ in fake.calls if argv[0] == "systemd-run")
+    assert manifest["invocation_id"] == fake.invocation
+    assert f"Description=SkyBuild launch {manifest['launch_nonce']}" in command
     props = [command[index + 1] for index, item in enumerate(command) if item == "-p"]
     assert {"Nice=10", "MemoryHigh=1073741824", "MemoryMax=2147483648", "MemorySwapMax=0",
             "RuntimeMaxSec=3600", "NoNewPrivileges=yes", "RemainAfterExit=yes",
@@ -90,6 +97,9 @@ def test_uncertain_systemd_failure_keeps_intent(tmp_path):
     with pytest.raises(JobUnitError, match="launch intent retained"):
         manager.start(job)
     assert json.loads((tmp_path / "state" / f"{job.unit()}.json").read_text())["phase"] == "launch_intent"
+    # A later successful show must not adopt an invocation after a lost reply.
+    with pytest.raises(JobUnitError, match="unpinned"):
+        manager.observe(job.unit())
 
 
 def test_observe_running_and_completed_retains_peak(tmp_path):
@@ -165,3 +175,82 @@ def test_invalid_spec_starts_nothing(tmp_path, changes):
     with pytest.raises(JobUnitError):
         JobUnitManager(tmp_path / "state", run=fake).start(spec(tmp_path, **changes))
     assert fake.calls == []
+
+
+@pytest.mark.parametrize("replacement", ["b" * 32, "", "0" * 32])
+def test_reused_or_missing_invocation_never_overwrites_owned_evidence(tmp_path, replacement):
+    fake = FakeSystemd()
+    manager = JobUnitManager(tmp_path / "state", run=fake)
+    unit = manager.start(spec(tmp_path))
+    manager.observe(unit)
+    path = tmp_path / "state" / f"{unit}.json"
+    before = path.read_bytes()
+    fake.invocation = replacement
+    fake.show += "MemoryPeak=999999\n"
+    with pytest.raises(JobUnitError, match="differs"):
+        JobUnitManager(tmp_path / "state", run=fake).observe(unit)
+    assert path.read_bytes() == before
+
+
+def test_different_launch_nonce_is_not_adopted(tmp_path):
+    fake = FakeSystemd()
+    manager = JobUnitManager(tmp_path / "state", run=fake)
+    unit = manager.start(spec(tmp_path))
+    fake.description = "SkyBuild launch " + "b" * 32
+    with pytest.raises(JobUnitError, match="differs"):
+        manager.observe(unit)
+
+
+def test_interrupted_identity_persistence_cannot_adopt_later_replacement(tmp_path, monkeypatch):
+    fake = FakeSystemd()
+    manager = JobUnitManager(tmp_path / "state", run=fake)
+    job = spec(tmp_path)
+    def interrupted(*_args):
+        raise OSError("injected persistence failure")
+    monkeypatch.setattr(manager, "_write_manifest", interrupted)
+    with pytest.raises(OSError, match="persistence failure"):
+        manager.start(job)
+    fake.invocation = "b" * 32
+    recovered = JobUnitManager(tmp_path / "state", run=fake)
+    with pytest.raises(JobUnitError, match="unpinned"):
+        recovered.observe(job.unit())
+    with pytest.raises(JobUnitError, match="already exists"):
+        recovered.start(job)
+
+
+def test_stop_remains_disabled_even_for_matching_invocation(tmp_path):
+    fake = FakeSystemd()
+    manager = JobUnitManager(tmp_path / "state", run=fake)
+    unit = manager.start(spec(tmp_path))
+    fake.calls.clear()
+    with pytest.raises(JobUnitError, match="cannot atomically guard"):
+        manager.stop(unit)
+    assert fake.calls == []
+
+
+def test_legacy_unpinned_manifest_requires_reconciliation(tmp_path):
+    fake = FakeSystemd()
+    manager = JobUnitManager(tmp_path / "state", run=fake)
+    unit = manager.start(spec(tmp_path))
+    path = tmp_path / "state" / f"{unit}.json"
+    manifest = json.loads(path.read_text())
+    del manifest["invocation_id"]
+    del manifest["launch_nonce"]
+    path.write_text(json.dumps(manifest))
+    before = path.read_bytes()
+    with pytest.raises(JobUnitError, match="unpinned"):
+        manager.observe(unit)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("invocation", ["", "0" * 32, "not-an-invocation"])
+def test_start_cannot_pin_missing_or_invalid_identity(tmp_path, invocation):
+    fake = FakeSystemd()
+    fake.invocation = invocation
+    manager = JobUnitManager(tmp_path / "state", run=fake)
+    job = spec(tmp_path)
+    with pytest.raises(JobUnitError, match="unpinned"):
+        manager.start(job)
+    manifest = json.loads((tmp_path / "state" / f"{job.unit()}.json").read_text())
+    assert manifest["invocation_id"] is None
+    assert manifest["phase"] == "launch_intent"

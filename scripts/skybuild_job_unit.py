@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping
+from uuid import uuid4
 
 
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\Z")
@@ -136,7 +137,7 @@ class JobUnitManager:
         return data
 
     def _show(self, unit: str) -> dict[str, str]:
-        properties = ("LoadState", "ActiveState", "SubState", "Result", "ExecMainStatus", "ControlGroup", "MemoryCurrent", "MemoryPeak", "MemoryMax")
+        properties = ("LoadState", "ActiveState", "SubState", "Result", "ExecMainStatus", "ControlGroup", "MemoryCurrent", "MemoryPeak", "MemoryMax", "InvocationID", "Description")
         result = self._call([self.systemctl, "--user", "show", unit, *[item for prop in properties for item in ("-p", prop)]])
         if result.returncode != 0:
             raise JobUnitError(f"systemctl show failed for {unit}: {(result.stderr or result.stdout).strip()}")
@@ -145,12 +146,45 @@ class JobUnitManager:
             raise JobUnitError(f"systemctl show returned an unknown load state for {unit}")
         return props
 
+    def _write_manifest(self, unit: str, manifest: dict) -> None:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.state_dir, delete=False) as stream:
+            temporary = Path(stream.name)
+            os.chmod(temporary, 0o600)
+            json.dump(manifest, stream, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.replace(temporary, self._manifest_path(unit))
+            directory = os.open(self.state_dir, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @staticmethod
+    def _check_invocation(manifest: dict, props: dict) -> None:
+        invocation = manifest.get("invocation_id")
+        nonce = manifest.get("launch_nonce")
+        if (not isinstance(invocation, str) or not re.fullmatch(r"[0-9a-f]{32}", invocation)
+                or invocation == "0" * 32 or not isinstance(nonce, str)
+                or not re.fullmatch(r"[0-9a-f]{32}", nonce)):
+            raise JobUnitError("launch invocation is unpinned; reconcile the retained intent")
+        if props.get("LoadState") == "loaded" and (
+                props.get("InvocationID") != invocation
+                or props.get("Description") != f"SkyBuild launch {nonce}"):
+            raise JobUnitError("unit invocation differs from the pinned launch; reconcile replacement")
+
     def start(self, spec: JobSpec) -> str:
         """Create one launch intent and submit it once; never retry an uncertain start."""
         spec.validate()
         unit = spec.unit()
         self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._check_state_dir()
+        if self._manifest_path(unit).exists():
+            raise JobUnitError("launch intent already exists; reconcile it before any new attempt")
         if self._show(unit).get("LoadState") == "loaded":
             raise JobUnitError("unit already exists; reconcile it before any new attempt")
         manifest = {
@@ -158,6 +192,7 @@ class JobUnitManager:
             "worktree": str(spec.worktree), "phase": "launch_intent",
             "memory_max_bytes": spec.memory_max_bytes, "memory_current_bytes": None,
             "memory_peak_bytes": None, "control_group": None, "observed_at": None,
+            "launch_nonce": uuid4().hex, "invocation_id": None,
         }
         path = self._manifest_path(unit)
         try:
@@ -175,6 +210,7 @@ class JobUnitManager:
         except FileExistsError:
             raise JobUnitError("launch intent already exists; reconcile it before any new attempt") from None
         properties = (
+            f"Description=SkyBuild launch {manifest['launch_nonce']}",
             "Nice=10", f"MemoryHigh={spec.memory_high_bytes}", f"MemoryMax={spec.memory_max_bytes}",
             "MemorySwapMax=0", "OOMPolicy=continue", "NoNewPrivileges=yes",
             f"RuntimeMaxSec={spec.runtime_seconds}", f"WorkingDirectory={spec.worktree}",
@@ -190,6 +226,12 @@ class JobUnitManager:
         result = self._call(command)
         if result.returncode != 0:
             raise JobUnitError(f"systemd-run failed for {unit}: {(result.stderr or result.stdout).strip()}; launch intent retained")
+        props = self._show(unit)
+        manifest["invocation_id"] = props.get("InvocationID")
+        if props.get("LoadState") != "loaded":
+            raise JobUnitError("launched unit is unavailable; launch intent retained")
+        self._check_invocation(manifest, props)
+        self._write_manifest(unit, manifest)
         return unit
 
     def observe(self, unit: str) -> JobUnitState:
@@ -199,6 +241,7 @@ class JobUnitManager:
             fcntl.flock(lock, fcntl.LOCK_EX)
             manifest = self._read_manifest(unit)
             props = self._show(unit)
+            self._check_invocation(manifest, props)
             loaded = props.get("LoadState") == "loaded"
             active_state = props.get("ActiveState")
             substate = props.get("SubState")
@@ -216,30 +259,12 @@ class JobUnitManager:
             manifest.update(phase=phase, control_group=group or manifest.get("control_group"),
                             memory_current_bytes=current, memory_peak_bytes=peak,
                             observed_at=datetime.now(timezone.utc).isoformat())
-            path = self._manifest_path(unit)
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.state_dir, delete=False) as stream:
-                temporary = Path(stream.name)
-                os.chmod(temporary, 0o600)
-                json.dump(manifest, stream, sort_keys=True)
-                stream.write("\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            try:
-                os.replace(temporary, path)
-                directory = os.open(self.state_dir, os.O_RDONLY | os.O_DIRECTORY)
-                try:
-                    os.fsync(directory)
-                finally:
-                    os.close(directory)
-            finally:
-                temporary.unlink(missing_ok=True)
+            self._write_manifest(unit, manifest)
         return JobUnitState(unit, phase, loaded, active, props.get("Result") or None,
                             _counter(props.get("ExecMainStatus")), group, current, peak,
                             manifest["memory_max_bytes"])
 
     def stop(self, unit: str) -> None:
-        """Stop only a unit whose durable manifest this manager owns."""
+        """Refuse name-based stops until an invocation-bound effect is qualified."""
         self._read_manifest(unit)
-        result = self._call([self.systemctl, "--user", "stop", unit])
-        if result.returncode != 0:
-            raise JobUnitError(f"systemctl stop failed for {unit}: {(result.stderr or result.stdout).strip()}")
+        raise JobUnitError("stop is unavailable: systemctl stop cannot atomically guard the pinned invocation")
