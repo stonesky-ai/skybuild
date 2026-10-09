@@ -7,6 +7,7 @@ import os
 import stat
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -247,23 +248,30 @@ def main(argv=None):
         deadline = time.monotonic() + budget
         child = subprocess.Popen([sys.executable, '-c', _CHILD_CODE, *argv],
                                  stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                 stderr=subprocess.DEVNULL)
+                                 stderr=subprocess.DEVNULL, start_new_session=True)
         try:
             output, _ = child.communicate(timeout=max(0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
-            # Only this owned child's handle is signaled. An issued receipt is
-            # uncertain; persisted evidence/key must survive for reconciliation.
-            child.terminate()
+            # start_new_session creates an isolated group whose ID is this
+            # owned child's PID. Keep the leader unreaped through escalation so
+            # that identifier cannot be reused by an unrelated process group.
+            # Git/SSH descendants inherit this group; no group is discovered by
+            # name, process scan, or caller-supplied identifier.
+            try:
+                os.killpg(child.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            time.sleep(_TERMINATION_GRACE / 2)
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             try:
                 child.communicate(timeout=_TERMINATION_GRACE / 2)
             except subprocess.TimeoutExpired:
-                child.kill()
-                try:
-                    child.communicate(timeout=_TERMINATION_GRACE / 2)
-                except subprocess.TimeoutExpired:
-                    # SIGKILL may await an uninterruptible kernel operation.
-                    # Do not wait indefinitely or report confirmed termination.
-                    child.stdout.close()
+                # Kernel operations may remain uninterruptible. Stop waiting;
+                # termination is unknown rather than falsely confirmed.
+                child.stdout.close()
             failure.update(receipt_state='unknown',
                            child_termination='confirmed' if child.poll() is not None else 'unknown',
                            termination_grace_seconds=_TERMINATION_GRACE)

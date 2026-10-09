@@ -366,3 +366,43 @@ def test_cli_cutoff_preserves_saved_evidence_for_valid_restart(collection, monke
     previous = actions[-1]
     assert collect(collection)['receipted'] is True
     assert actions[-1] == previous and path.read_bytes() == original
+
+
+def test_cli_cutoff_kills_owned_git_ssh_group_and_preserves_unrelated_child(collection, tmp_path, monkeypatch):
+    import os
+    import sys
+    import time
+    import skybuild.manual_result as module
+    marker = tmp_path / 'ssh.pid'
+    helper = tmp_path / 'ssh-helper'
+    helper.write_text('#!' + sys.executable + '\n' +
+        'import os, signal, time\nfrom pathlib import Path\n' +
+        'signal.signal(signal.SIGTERM, signal.SIG_IGN)\n' +
+        'Path(' + repr(str(marker)) + ').write_text(str(os.getpid()))\ntime.sleep(10)\n')
+    helper.chmod(0o700)
+    monkeypatch.setattr(module, '_CHILD_CODE',
+        "import subprocess, os; env=dict(os.environ, GIT_SSH_COMMAND=" + repr(str(helper)) +
+        ", GIT_SSH_VARIANT='ssh'); subprocess.run(['git','ls-remote',"
+        "'ssh://synthetic.invalid/no-repo'], capture_output=True, timeout=10, env=env)")
+    foreign = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)'])
+    owned = None
+    try:
+        started = time.monotonic()
+        assert module.main(cli_args(collection)) == 2
+        assert time.monotonic() - started < 1.8
+        owned = int(marker.read_text())  # The real Git SSH subprocess was reached.
+        # A killed orphan may briefly remain a zombie until its parent reaps it.
+        stat = module.Path('/proc') / str(owned) / 'stat'
+        cleanup_deadline = time.monotonic() + 0.2
+        while stat.exists() and not stat.read_text().split(') ')[1].startswith('Z '):
+            assert time.monotonic() < cleanup_deadline
+            time.sleep(0.01)
+        assert foreign.poll() is None
+    finally:
+        foreign.terminate()
+        foreign.wait(timeout=1)
+        if owned is not None:
+            try:
+                os.kill(owned, 9)  # Test-owned cleanup if the regression fails.
+            except ProcessLookupError:
+                pass
