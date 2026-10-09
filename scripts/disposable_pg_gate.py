@@ -22,6 +22,21 @@ class ArtifactError(RuntimeError):
     """Durable reporting failed; never interpret the gate as accepted."""
 
 
+_SAFE_GATE_DIAGNOSTICS = {
+    "Available memory cannot be measured",
+    "Container port must bind only to localhost",
+    "Gate deadline exceeded",
+}
+
+
+def _safe_gate_diagnostic(error: BaseException) -> str | None:
+    detail = str(error)
+    if detail in _SAFE_GATE_DIAGNOSTICS or re.fullmatch(
+            r"Available memory below gate minimum: \d+ bytes available; \d+ bytes required", detail):
+        return detail
+    return None
+
+
 def candidate_identity(checkout: Path) -> dict:
     def git(*args):
         return subprocess.check_output(["git", "-C", str(checkout), *args],
@@ -192,8 +207,11 @@ def run_gate(checkout: Path, timeout: float, image: str, command: list[str],
 
         try:
             def require_headroom():
-                if min_available_bytes and available_memory_bytes() < min_available_bytes:
-                    raise RuntimeError("Available memory is below the gate minimum")
+                if min_available_bytes:
+                    available = available_memory_bytes()
+                    if available < min_available_bytes:
+                        raise RuntimeError("Available memory below gate minimum: "
+                                           f"{available} bytes available; {min_available_bytes} bytes required")
 
             require_headroom()
             if artifact:
@@ -234,6 +252,9 @@ def run_gate(checkout: Path, timeout: float, image: str, command: list[str],
         except (OSError, RuntimeError, subprocess.SubprocessError, TimeoutError, KeyboardInterrupt) as error:
             # Do not expose subprocess environment or database passwords in the summary.
             result["error"] = type(error).__name__
+            detail = _safe_gate_diagnostic(error)
+            if detail is not None:
+                result["error_detail"] = detail
             outcome = ("interrupted" if isinstance(error, KeyboardInterrupt) else
                        "timed_out" if isinstance(error, (TimeoutError, subprocess.TimeoutExpired)) else "error")
             log.write(f"\nGate failed: {type(error).__name__}\n")
@@ -278,7 +299,7 @@ def run_gate(checkout: Path, timeout: float, image: str, command: list[str],
             artifact.update("terminal", status="cleanup_unconfirmed" if cleanup_status == "unknown" else outcome,
                             gate_outcome=outcome, cleanup=cleanup_status,
                             ok=result["ok"], exit_code=exit_code,
-                            error=result.get("error"))
+                            error=result.get("error"), error_detail=result.get("error_detail"))
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
             result.update(ok=False, exit_code=1, artifact_error=True)
             exit_code = 1
