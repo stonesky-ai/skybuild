@@ -148,3 +148,24 @@ def test_concurrent_duplicate_preparers_share_one_worktree(setup):
         results = list(executor.map(lambda _: prepare(), range(2)))
     assert results[0] == results[1]
     assert git(repo, "worktree", "list", "--porcelain").count(str(destination)) == 1
+
+
+@pytest.mark.parametrize("git_marker", ["directory", "file"])
+def test_destination_inside_foreign_checkout_is_refused_before_mutation(setup, tmp_path, git_marker):
+    repo, envelope, destination, prepare = setup
+    foreign = tmp_path / "skykeep"
+    foreign.mkdir()
+    if git_marker == "directory":
+        subprocess.run(["git", "init", "--quiet", str(foreign)], check=True)
+    else:
+        (foreign / ".git").write_text("gitdir: /missing/foreign/metadata\n")
+    keep = foreign / "keep.txt"
+    keep.write_text("Foreign work must stay intact.\n")
+    nested = foreign / "not-created" / "owned"
+    with pytest.raises(WorktreeError, match="another Git checkout"):
+        prepare_worktree(envelope, repo, worker="wonko", destination=nested,
+                         base_ref="refs/remotes/origin/dev-001")
+    assert not nested.parent.exists()
+    assert keep.read_text() == "Foreign work must stay intact.\n"
+    assert git(repo, "for-each-ref", "--format=%(refname)", "refs/heads/" + envelope["branch"]) == ""
+    assert not (repo / ".git" / "skybuild-manual-worktrees").exists()

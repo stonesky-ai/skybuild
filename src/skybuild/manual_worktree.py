@@ -32,6 +32,7 @@ def prepare_worktree(envelope: dict, repo: Path, *, worker: str,
         raise WorktreeError("Worktree path must be canonical and must not use symlinks")
     if destination == repo or repo in destination.parents:
         raise WorktreeError("Worktree must be outside the source checkout")
+    _verify_outside_checkouts(destination)
     common = Path(_git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir").decode().strip())
     registry = common / "skybuild-manual-worktrees"
     registry.mkdir(exist_ok=True)
@@ -66,6 +67,7 @@ def prepare_worktree(envelope: dict, repo: Path, *, worker: str,
             with record_path.open("x") as record:
                 json.dump(owner, record, sort_keys=True)
                 record.write("\n")
+        _verify_outside_checkouts(destination)
         if not destination.exists():
             if _branch_exists(repo, snapshot["branch"]):
                 raise WorktreeError("Owned branch has no checkout; preserve and reconcile")
@@ -73,6 +75,16 @@ def prepare_worktree(envelope: dict, repo: Path, *, worker: str,
         _verify_pristine(repo, destination, snapshot)
         return snapshot | {"worktree": str(destination), "head_sha": base,
                            "base_ref": base_ref, "prepared": True}
+
+
+def _verify_outside_checkouts(destination: Path) -> None:
+    # Inspect all parents, including ancestors of not-yet-created directories.
+    # A linked worktree uses a .git file; a regular checkout uses a directory.
+    for parent in destination.parents:
+        marker = parent / ".git"
+        # Some sandbox roots contain an empty .git sentinel, not a checkout.
+        if marker.is_file() or marker.is_symlink() or (marker / "HEAD").exists():
+            raise WorktreeError("Worktree must not be nested inside another Git checkout")
 
 
 def _branch_exists(repo: Path, branch: str) -> bool:
