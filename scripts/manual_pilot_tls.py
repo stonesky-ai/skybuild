@@ -57,12 +57,15 @@ def private_file(path: Path) -> None:
 
 
 def controller(checkout: Path, expected_sha: str, state_dir: Path,
-               hostname: str, tailnet_ip: str) -> None:
-    """Require reviewed published source and the existing owned pilot containers."""
+               hostname: str, tailnet_ip: str, *,
+               expected_api_image: str | None = None) -> None:
+    """Require reviewed source and owned pilot containers with pinned images."""
     if os.getuid() == 0:
         raise TLSError("Run TLS preparation as the non-root pilot state owner")
     if not re.fullmatch(r"[0-9a-f]{40}", expected_sha):
         raise TLSError("Require an explicit reviewed 40-character source SHA")
+    if expected_api_image is not None and not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_api_image):
+        raise TLSError("Require an exact retained API image ID")
     checkout = checkout.absolute()
     if command("git", "-C", str(checkout), "rev-parse", "--show-toplevel") != str(checkout):
         raise TLSError("Require the exact checkout root")
@@ -94,7 +97,9 @@ def controller(checkout: Path, expected_sha: str, state_dir: Path,
                 or not row.get("State", {}).get("Running")):
             raise TLSError("Existing pilot container ownership/running state differs")
         image = "postgres:16" if service == "db" else "skybuild-pilot-api:local"
-        if row.get("Image") != command("docker", "image", "inspect", image, "--format", "{{.Id}}"):
+        expected_image = (expected_api_image if service == "api" and expected_api_image is not None
+                          else command("docker", "image", "inspect", image, "--format", "{{.Id}}"))
+        if row.get("Image") != expected_image:
             raise TLSError("Pilot container differs from the expected local image")
         ports = row.get("NetworkSettings", {}).get("Ports", {})
         if service == "db" and ports.get("5432/tcp") != [{"HostIp": "127.0.0.1", "HostPort": "55432"}]:
