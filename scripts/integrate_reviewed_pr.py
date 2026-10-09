@@ -37,7 +37,11 @@ def run_gate(argv, cwd):
         detail = f"Gate failed (exit {process.returncode})"
         error_detail = evidence.get("error_detail") if isinstance(evidence, dict) else None
         if (isinstance(error_detail, str) and len(error_detail) <= 256
-                and all(char.isprintable() for char in error_detail)):
+                and (error_detail in {"Available memory cannot be measured",
+                                     "Container port must bind only to localhost",
+                                     "Gate deadline exceeded"}
+                     or re.fullmatch(r"Available memory below gate minimum: \d+ bytes available; "
+                                     r"\d+ bytes required", error_detail))):
             detail += "; reason=" + error_detail
         if isinstance(log, str) and not any(ord(char) < 32 for char in log):
             detail += "; log=" + log

@@ -136,6 +136,15 @@ def test_failed_gate_retains_log_without_test_output(monkeypatch, tmp_path):
     assert "secret" not in str(failure.value)
 
 
+def test_failed_gate_hides_untrusted_error_detail(monkeypatch, tmp_path):
+    module = load("integrate_reviewed_pr")
+    monkeypatch.setattr(module.subprocess, "run", lambda *a, **kw: SimpleNamespace(
+        returncode=1, stdout='{"ok":false,"error_detail":"private secret detail"}', stderr=""))
+    with pytest.raises(RuntimeError) as failure:
+        module.run_gate(["gate"], tmp_path)
+    assert "private secret detail" not in str(failure.value)
+
+
 def test_custom_gate_cannot_publish(monkeypatch, tmp_path):
     module = load("integrate_reviewed_pr")
     monkeypatch.setattr(module, "verify_skybuild", lambda path: path)
