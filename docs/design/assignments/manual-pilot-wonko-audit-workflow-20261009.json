@@ -1,0 +1,21 @@
+{
+  "schema": "manual-work-brief-v1",
+  "assignment_id": "MWP-20261009-WONKO-AUDIT-WORKFLOW-001",
+  "task_id": "SKYBUILD-TASK-CUTOVER",
+  "worker": "wonko",
+  "dispatcher": "jeltz",
+  "branch": "task/cutover-workflow-audit-001",
+  "owned_paths": [
+    "src/skybuild/ledger_audit.py",
+    "tests/test_ledger_audit.py",
+    "docs/design/implementation/ledger_audit.md"
+  ],
+  "checks": [
+    "Extend the existing read-only ledger-audit report with one workflow-reconciliation row per current task. Preserve exact ledger source evidence for phase, next action, and responsible fields, including missing, repeated, or ambiguous labels. Do not infer approved destination values from prose.",
+    "For existing IDs, show frozen importer defaults: phase imported; next action Review imported ledger task before execution for unfinished tasks; responsible owner. For added IDs, frozen comparison is null. Do not modify frozen contract, importer, ledgers, API, or database.",
+    "Keep authority markdown and cutover_ready false in every report. Source drift must remain visible, and malformed or conflicting source evidence must never silently become an accepted workflow value. Preserve existing dependency-reconciliation output and CLI exit behavior.",
+    "Add focused tests for embedded and standalone labels, absent and repeated fields, added IDs, stale source, and no database configuration. Run rtk pytest -q tests/test_ledger_audit.py and report exact result. Update only the owned audit document with report semantics and limits."
+  ],
+  "model_limit": "One interactive Codex worker plus at most one task-local subagent; no paid API. Keep at least 8 GiB host memory available. No service or container start.",
+  "next_action": "After dispatcher verifies private access and sends a pinned manual-work-v1 envelope, extend only the read-only workflow audit evidence in owned paths. Commit and push the branch; return exact head, checks, risks, and next action through Cord."
+}
