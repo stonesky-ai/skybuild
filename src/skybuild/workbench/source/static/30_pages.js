@@ -29,6 +29,7 @@ function visibleSections(keys) {
 
 function baseTitle() {
   const page = pageByKey.get(currentPage);
+  if (page && page.key === "boxes") return "Fleet Members";
   return page && page.key !== "all" ? page.title + " – Build status" : "Build status";
 }
 

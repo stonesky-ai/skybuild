@@ -104,17 +104,6 @@ function fleetTime(value) {
   return Number.isFinite(parsed) ? new Date(parsed).toLocaleString() : String(value);
 }
 
-function fleetValue(parent, label, value) {
-  const term = el("dt", "", label), detail = el("dd", "", value === null || value === undefined || value === "" ? "unknown" : String(value));
-  parent.append(term, detail);
-}
-
-function fleetFields(items) {
-  const list = el("dl", "fleet-fields");
-  for (const [label, value] of items) fleetValue(list, label, value);
-  return list;
-}
-
 function updateFleetButton() {
   const control = document.getElementById("refresh-fleet");
   if (!control) return;
@@ -184,38 +173,47 @@ function drawFleet() {
     wrap.append(calm(available ? "Press Refresh fleet to discover devices on this tailnet." : "Fleet inventory is not connected."));
     return wrap;
   }
+  const tableWrap = el("div", "fleet-table-wrap");
+  const table = el("table", "fleet-table");
+  const headings = ["Hostname", "DNS", "Status / last seen", "OS", "Created", "CPU / cores", "Memory", "Free memory", "Disk", "Free disk", "Extra"];
+  const head = el("thead"), headerRow = el("tr");
+  for (const label of headings) headerRow.append(el("th", "", label));
+  head.append(headerRow);
+  const body = el("tbody");
   for (const node of fleetInventory.nodes) {
-    const card = el("article", "fleet-card");
-    const name = el("h3", "", node.name || "Unnamed box");
-    const state = node.online ? "ONLINE" : "OFFLINE";
-    const badge = el("span", "fleet-state " + (node.online ? "online" : "offline"), state);
-    name.append(" ", badge);
-    card.append(name);
-    card.append(fleetFields([
-      ["Tailnet IP", (node.ips || []).join(" · ") || "unknown"],
-      ["DNS name", node.dns_name], ["Tailnet OS", node.tailnet_os],
-      [node.online ? "Connection" : "Last tailnet seen", node.online ? "Online now" : fleetTime(node.last_seen)],
-      ["Last box stats", fleetTime(node.stats_at)], ["Device ID", node.id],
-      ["Tailnet user", node.tailnet_user], ["Tailnet user ID", node.user_id], ["Device created", fleetTime(node.created)],
-    ]));
-    if (node.stats) {
-      const stats = node.stats, memory = stats.memory || {}, disk = stats.root_disk || {};
-      card.append(fleetFields([
-        ["Processor", stats.cpu_model], ["CPU cores", `${stats.physical_cores ?? "?"} physical · ${stats.logical_cores ?? "?"} logical`],
-        ["Memory total", fleetBytes(memory.MemTotal)], ["Memory available", fleetBytes(memory.MemAvailable)],
-        ["Swap total / free", `${fleetBytes(memory.SwapTotal)} / ${fleetBytes(memory.SwapFree)}`],
-        ["Root disk total", fleetBytes(disk.total_bytes)], ["Root disk free", fleetBytes(disk.free_bytes)],
-        ["Operating system", [stats.os_name, stats.os_version].filter(Boolean).join(" ")],
-        ["Kernel / architecture", [stats.kernel, stats.architecture].filter(Boolean).join(" · ")],
-        ["Load average", Array.isArray(stats.load_average) ? stats.load_average.map(value => Number(value).toFixed(2)).join(" · ") : "unknown"],
-        ["Uptime", Number.isFinite(stats.uptime_seconds) ? Math.round(stats.uptime_seconds / 3600) + " hours" : "unknown"],
-        ["Python", stats.python_version], ["GPUs", Array.isArray(stats.gpus) && stats.gpus.length ? stats.gpus.map(gpu => `${gpu.name} (${gpu.memory_free_mib}/${gpu.memory_total_mib} MiB free)`).join(" · ") : "none detected"],
-      ]));
-    }
-    if (node.query_error) card.append(el("p", "muted note", "Latest box query failed: " + node.query_error + (node.stats ? ". Showing last successful stats." : "")));
-    else if (!node.online && !node.stats) card.append(el("p", "muted note", "Offline. No previous box stats are saved."));
-    wrap.append(card);
+    const stats = node.stats || {}, memory = stats.memory || {}, disk = stats.root_disk || {};
+    const row = el("tr", node.online ? "fleet-online" : "fleet-offline");
+    const name = el("th", "fleet-hostname", node.name || "Unnamed device");
+    name.scope = "row";
+    const status = el("span", "fleet-state " + (node.online ? "online" : "offline"), node.online ? "ONLINE" : "OFFLINE");
+    name.append(el("br"), status);
+    const extras = [
+      `Kernel: ${stats.kernel || "unknown"} · Tailnet IP: ${(node.ips || []).join(" · ") || "unknown"}`,
+      `User ID: ${node.user_id ?? "unknown"} · User: ${node.tailnet_user || "unknown"} · Device ID: ${node.id || "unknown"}`,
+      `GPU: ${Array.isArray(stats.gpus) && stats.gpus.length ? stats.gpus.map(gpu => `${gpu.name} (${gpu.memory_free_mib}/${gpu.memory_total_mib} MiB free)`).join("; ") : "none detected"}`,
+    ];
+    const cells = [
+      name,
+      node.dns_name || "unknown",
+      node.online ? "Online now" : `Offline · last seen ${fleetTime(node.last_seen)}`,
+      [stats.os_name || node.tailnet_os, stats.os_version].filter(Boolean).join(" ") || "unknown",
+      fleetTime(node.created),
+      [stats.cpu_model, `${stats.physical_cores ?? "?"} physical / ${stats.logical_cores ?? "?"} logical`].filter(Boolean).join(" · "),
+      fleetBytes(memory.MemTotal), fleetBytes(memory.MemAvailable),
+      fleetBytes(disk.total_bytes), fleetBytes(disk.free_bytes),
+    ];
+    row.append(cells[0]);
+    for (const value of cells.slice(1)) row.append(el("td", "", value));
+    const extra = el("td", "fleet-extra");
+    for (const value of extras) extra.append(el("div", "", value));
+    if (node.query_error) extra.append(el("div", "fleet-query-error", "Latest query failed: " + node.query_error + (node.stats ? " (showing saved stats)" : "")));
+    else if (!node.online && !node.stats) extra.append(el("div", "muted", "No saved box stats"));
+    row.append(extra);
+    body.append(row);
   }
+  table.append(head, body);
+  tableWrap.append(table);
+  wrap.append(tableWrap);
   return wrap;
 }
 

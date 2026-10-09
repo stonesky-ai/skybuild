@@ -346,14 +346,25 @@ svg.bar .fill-bad { stroke: var(--bad); } svg.bar .mark { stroke: var(--text); }
 #todo-warnings .todo-warning:last-child { margin-bottom: 0; }
 #todo-warnings .todo-warning strong { display: block; font-size: 16px; color: #fff; }
 .fleet-inventory > button { margin: 0 0 8px; }
-.fleet-card { margin: 12px 0; padding: 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--sunken); }
-.fleet-card h3 { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; font-size: var(--fs-heading); }
+.fleet-table-wrap { width: 100%; overflow-x: auto; }
+.fleet-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 11px; line-height: 1.3; }
+.fleet-table th, .fleet-table td { padding: 5px 6px; vertical-align: top; text-align: left; overflow-wrap: anywhere; border-bottom: 1px solid var(--line); }
+.fleet-table thead th { position: sticky; top: 0; z-index: 1; background: var(--panel); color: var(--dim); font-size: 10px; }
+.fleet-table th:nth-child(1) { width: 8%; }
+.fleet-table th:nth-child(2) { width: 10%; }
+.fleet-table th:nth-child(3) { width: 9%; }
+.fleet-table th:nth-child(4) { width: 9%; }
+.fleet-table th:nth-child(5) { width: 8%; }
+.fleet-table th:nth-child(6) { width: 12%; }
+.fleet-table th:nth-child(7), .fleet-table th:nth-child(8), .fleet-table th:nth-child(9), .fleet-table th:nth-child(10) { width: 6%; }
+.fleet-table th:nth-child(11) { width: 14%; }
+.fleet-table tbody tr:nth-child(even) { background: var(--sunken); }
+.fleet-table .fleet-hostname { color: var(--text); font-size: 12px; }
+.fleet-extra > div { margin: 0 0 2px; }
+.fleet-query-error { color: var(--warn); }
 .fleet-state { padding: 2px 6px; border-radius: 4px; font-size: 10px; letter-spacing: .04em; }
 .fleet-state.online { color: var(--good); background: var(--good-bg); }
 .fleet-state.offline { color: var(--warn); background: var(--warn-bg); }
-.fleet-fields { display: grid; grid-template-columns: minmax(130px, max-content) minmax(0, 1fr); gap: 3px 12px; margin: 8px 0 0; }
-.fleet-fields dt { color: var(--dim); font-weight: 600; }
-.fleet-fields dd { margin: 0; overflow-wrap: anywhere; }
 /* Print view (the button, and the printer): no rail, no buttons, every box one column wide, light. */
 body.print #rail, body.print .tools, body.print .changed, body.print .more button { display: none; }
 body.print .box { grid-column: 1 / -1; break-inside: avoid; }

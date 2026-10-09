@@ -35,14 +35,15 @@ def sidebar(active: str) -> str:
     for item in page.PAGES:
         key = item["key"]
         current = ' aria-current="page"' if active == key else ""
-        parts.append(f'<section class="workbench-nav-group"><a class="workbench-view-link" href="/workbench/views/{key}"{current}>{escape(item["title"])}</a>')
+        nav_title = "Fleet" if key == "boxes" else item["title"]
+        parts.append(f'<section class="workbench-nav-group"><a class="workbench-view-link" href="/workbench/views/{key}"{current}>{escape(nav_title)}</a>')
         sections = item["sections"]
         if sections is None:
             sections = tuple(key for key in page.SECTION_TITLES if key not in page.HIDDEN_SECTIONS)
         if sections:
             parts.append('<ul class="workbench-nav-subsections">')
             for section in sections:
-                title = page.SECTION_TITLES.get(section, section.replace("_", " ").title())
+                title = "Members" if key == "boxes" and section == "fleet" else page.SECTION_TITLES.get(section, section.replace("_", " ").title())
                 parts.append(f'<li><a href="/workbench/views/{key}#section-{escape(section, quote=True)}">{escape(title)}</a></li>')
             parts.append('</ul>')
         parts.append('</section>')
