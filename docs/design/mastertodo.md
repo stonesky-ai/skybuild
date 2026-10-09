@@ -1,6 +1,6 @@
 # SkyBuild current tasks
 
-Authority: Git-backed planning ledger, revision A35, 2026-10-08. API cutover has not occurred. See [architecture section 4](architecture.md#4-temporary-task-authority-and-transition) for the lifecycle. Order below is proposed priority. The owner authorizes repository implementation and isolated validation toward the parallel MVP; live authority cutover, unqualified inference, paid starts and deployment retain separate controls.
+Authority: Git-backed planning ledger, revision A36, 2026-10-09. API cutover has not occurred. See [architecture section 4](architecture.md#4-temporary-task-authority-and-transition) for the lifecycle. Order below is proposed priority. The owner authorizes repository implementation and isolated validation toward the parallel MVP; live authority cutover, unqualified inference, paid starts and deployment retain separate controls.
 
 Each task ID lives in exactly one ledger. Related ledgers: [deferred](deferred.md), [alreadydone](alreadydone.md). These are new SkyBuild project records, not updates to the old SkyKeep queue. Until claims/fencing exist, coordinate any later authorized execution manually and serially.
 
@@ -27,6 +27,14 @@ Each task ID lives in exactly one ledger. Related ledgers: [deferred](deferred.m
 - Brief: establish hello-world/version/liveness/readiness first, then project-scoped tasks/history and durable mailbox with shared CLI/Python client. Preserve full task briefs, revision conflicts, owner/admin access, separate project-scoped worker tokens and retry deduplication. Provide the initial private Tailscale website/API endpoint for all intended enrolled boxes, with application scopes still enforced and PostgreSQL kept local. No worker launch path.
 - Acceptance: implementation-plan area 2 checks pass against disposable dedicated PostgreSQL, including restart persistence and refusal of wrong targets/credentials. A manual client can retrieve a task and exchange a handoff.
 - Architecture: sections 3, 5–7. Model requirement when selected: size/capability to be chosen from the actual brief; no vendor fixed.
+
+## SKYBUILD-HOST-WATCH — Observe host resources before heavy validation
+
+- Status: in-progress (implementation on `task/host-watch`). Phase: focused checks passed; independent exact-head review and integration remain. Responsible: lead. Next action: review the bounded gate guard and CPU-only host-watch skill, then integrate the tested task branch and propagate the accepted version to active boxes.
+- Area: developer tooling. Dependencies: disposable PostgreSQL gate from SKYBUILD-BOOTSTRAP.
+- Brief: expose an optional available-memory threshold before starting the disposable database and test command; cap that database container's memory. Provide a checkout-local script and skill for one bounded, minute-spaced CPU watcher per active SkyBuild box, including Wonko. Atomically report available memory, workspace and temporary disk headroom, task-owned disposable Docker containers, and stale or prunable worktree metadata for that checkout. Commit and propagate script and skill updates to each active checkout, then load the local skill in each Codex session. Extend observation to owned worker processes and other resources only when their lifecycle ownership exists. The status is advisory and cannot authorize execution, launch workers or clean unrelated resources.
+- Acceptance: low-memory refusal starts no container; a drop before tests removes the task-owned container; the full disposable PostgreSQL suite passes with the cap. One watcher holds each host-local status-file lock and exits within its bounded lifetime; stale or unknown samples do not establish gate headroom. Keep at least 8 GiB available on this host during this session. Verify the same committed watcher version and checkout-local skill on every active box before using its readings.
+- Architecture: observation and resource boundaries in sections 8–9. This task does not start a SkyBuild service or worker.
 
 ## SKYBUILD-MANUAL-WORKER-PILOT — Run two bounded parallel coding assignments
 
