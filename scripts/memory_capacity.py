@@ -23,6 +23,13 @@ def _number(path: Path) -> int:
     return int(value)
 
 
+def _time(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("Memory measurement time lacks timezone")
+    return parsed
+
+
 def _registry(path: Path, cgroup_root: Path) -> list[dict]:
     if path.is_dir():
         files = sorted(path.glob("*.json"))
@@ -117,8 +124,8 @@ def observe(registry_path: Path, prior_state_path: Path, *, available_bytes: int
                 observed_at = manifest.get("observed_at")
                 if not isinstance(peak, int) or not isinstance(maximum, int) or not isinstance(observed_at, str):
                     raise ValueError("Completed job has no observed peak")
-                source_datetime = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
-                if source_datetime.tzinfo is None or source_datetime > now_time:
+                source_datetime = _time(observed_at)
+                if source_datetime > now_time:
                     raise ValueError("Completed peak timestamp is invalid")
                 source = "systemd-MemoryPeak"
                 source_time = observed_at
@@ -153,15 +160,18 @@ def observe(registry_path: Path, prior_state_path: Path, *, available_bytes: int
             prior_count = 0
         result["measurement_count"] = prior_count + new_measurements
         latest = prior.get("latest_measurement_at")
+        latest_time = _time(latest) if isinstance(latest, str) else None
         for item in result["peak_history"]:
             if isinstance(item, dict) and isinstance(item.get("observed_at"), str):
-                if latest is None or item["observed_at"] > latest:
+                candidate_time = _time(item["observed_at"])
+                if latest_time is None or candidate_time > latest_time:
                     latest = item["observed_at"]
+                    latest_time = candidate_time
         age = None
-        if isinstance(latest, str):
-            latest_time = datetime.fromisoformat(latest.replace("Z", "+00:00"))
-            if latest_time.tzinfo is not None:
-                age = max(0, int((now_time - latest_time).total_seconds()))
+        if latest_time is not None:
+            if latest_time > now_time:
+                raise ValueError("Memory measurement time is in the future")
+            age = int((now_time - latest_time).total_seconds())
         result["latest_measurement_at"] = latest
         result["measurement_age_seconds"] = age
         result["running_jobs"] = running
