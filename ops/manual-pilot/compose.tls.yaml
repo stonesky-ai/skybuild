@@ -1,0 +1,11 @@
+# Optional application TLS. Compose merges the base loopback port; both use TLS.
+services:
+  api:
+    # Match the owner of mode-0600 bind-mounted files without widening key access.
+    user: "${SKYBUILD_PILOT_TLS_UID:?Set to the non-root TLS file owner uid}"
+    command: ["python", "-m", "skybuild", "serve", "--host", "0.0.0.0", "--port", "8000", "--ssl-certfile", "/run/skybuild-tls/server.crt", "--ssl-keyfile", "/run/skybuild-tls/server.key"]
+    ports:
+      - "${SKYBUILD_PILOT_TAILNET_IP:?Verify current local Tailscale IPv4}:8443:8000"
+    volumes:
+      - ${SKYBUILD_PILOT_STATE:?Set SKYBUILD_PILOT_STATE}/tls/server.crt:/run/skybuild-tls/server.crt:ro
+      - ${SKYBUILD_PILOT_STATE:?Set SKYBUILD_PILOT_STATE}/tls/server.key:/run/skybuild-tls/server.key:ro

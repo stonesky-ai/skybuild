@@ -48,6 +48,39 @@ python -m skybuild.fleet_preflight --url https://jeltz.tail991ac1.ts.net --proje
 
 The worker check verifies private TLS/DNS, readiness, exact identity, project grants and Cord inbox. Next send a harmless JSON pilot message from `pilot_dispatcher` to each worker using `skybuild cord-send` with `--body-file`, let the worker receive it with `cord-inbox`, acknowledge with `cord-receipt` and `cord-handle`, and send a `manual-result-v1` result back to `pilot_dispatcher`. Verify the dispatcher receives, acknowledges and handles that result. Use a unique idempotency key and record message IDs and exact outcomes. Use `pilot_dispatcher`'s token for the bounded manual assignment dispatch command, whose identity check requires principal `pilot_dispatcher` and exactly `cord:read`, `cord:send` and `cord:handle` on `skybuild`. The brief and assignment dispatcher must match that authenticated principal; worker principals are `wonko` and `wowbagger`. Only then dispatch the two committed, disjoint briefs under [manual worker pilot](manual_worker_pilot.md). The ledgers remain authoritative.
 
+## Optional application TLS when Serve operator access is unavailable
+
+Tailscale Serve remains the default. The owner approved this bounded fallback on 2026-10-09 within the eight-hour window ending 15:20:53 UTC. It does not authorize changing Tailscale operators, ACLs, firewall rules, system trust or sandbox privilege boundaries. Do not use self-SSH or Docker as a privilege bypass. Preserve the healthy dedicated controller while qualifying this option. The only remote listener is the controller's current Tailscale IPv4 address at 8443; workers still use its exact ts.net DNS name, never an IP URL.
+
+First integrate and publish the independently reviewed TLS client/server and deployment changes. Obtain the full reviewed published source SHA from the integration record and verify the clean deployment checkout, the existing Compose project ownership, image identities, restricted database audit and private state location. Do not rerun database provisioning. The following certificate preparation/check command enforces the current local Tailscale DNS/IP identity and known running controller, requires owned mode-0700 state, and starts no service. Use the existing OpenSSL executable; install nothing automatically. Read the fresh host watcher and retain 8 GiB available memory before building or restarting the API.
+
+```sh
+APPROVED_SHA='REPLACE_WITH_REVIEWED_PUBLISHED_40_HEX_SHA'
+CONTROLLER_HOST='REPLACE_WITH_CURRENT_SELF_DNS_NAME_WITHOUT_TRAILING_DOT'
+export SKYBUILD_PILOT_TAILNET_IP='REPLACE_WITH_CURRENT_SELF_TAILSCALE_IPV4'
+export SKYBUILD_PILOT_TLS_UID="$(id -u)"
+./.venv/bin/python scripts/manual_pilot_tls.py generate --checkout "$PWD" --expected-sha "$APPROVED_SHA" --state-dir "$SKYBUILD_PILOT_STATE" --hostname "$CONTROLLER_HOST" --tailnet-ip "$SKYBUILD_PILOT_TAILNET_IP"
+```
+
+Derive hostname and address from `tailscale status --json` Self, rather than copying stale values. Preparation creates a new private `$SKYBUILD_PILOT_STATE/tls` directory with mode-0600 CA key, CA certificate, server key and server certificate. It refuses existing TLS state. The leaf contains exactly the DNS SAN and serverAuth usage, lasts 30 days, and chains to a dedicated one-year CA. The report includes expiry, public CA fingerprint and runtime UID, never key material. `check` in place of `generate` revalidates existing state and refuses certificates with less than one day remaining. Retain the CA key only on this controller; mount only the server certificate/key readonly. Never mount the CA key or transfer it to a worker. The optional overlay runs the API as the non-root numeric TLS-file owner, so the existing image UID 10001 cannot cause a private-key read failure. Verify the reported UID equals the exported UID and the effective container user; never loosen keys to world-readable mode or run this overlay as root.
+
+After preparation, independently inspect the rendered Compose configuration without printing environment secrets: require only the base loopback API binding and the verified Tailscale-IP:8443 binding, the two readonly leaf mounts, the exact non-root runtime UID, and native paired `--ssl-certfile`/`--ssl-keyfile` flags. PostgreSQL stays only on 127.0.0.1:55432 with its existing state. Confirm the Tailnet port is free and current grants allow intended workers; do not widen them automatically. Re-run `check` immediately before applying the reviewed overlay, and use the same two Compose files for every subsequent inspection/restart/rollback operation:
+
+```sh
+./.venv/bin/python scripts/manual_pilot_tls.py check --checkout "$PWD" --expected-sha "$APPROVED_SHA" --state-dir "$SKYBUILD_PILOT_STATE" --hostname "$CONTROLLER_HOST" --tailnet-ip "$SKYBUILD_PILOT_TAILNET_IP"
+docker compose -f ops/manual-pilot/compose.yaml -f ops/manual-pilot/compose.tls.yaml up -d --build --no-deps api
+```
+
+Compose retains `127.0.0.1:8000:8000`, but that port now speaks TLS too. The earlier HTTP readiness probe and an HTTP Serve target no longer apply while this overlay is active. Verify local readiness with pinned CA and the DNS name, resolving that name to loopback only for the local probe; then verify the actual private endpoint from each worker. Do not use `curl -k` or disable client verification. Confirm no Funnel/public bind and verify wrong-CA, wrong-hostname and expired-certificate rejection using isolated test certificates, never by replacing live controller credentials.
+
+```sh
+curl --fail --silent --cacert "$SKYBUILD_PILOT_STATE/tls/ca.crt" --resolve "$CONTROLLER_HOST:8000:127.0.0.1" "https://$CONTROLLER_HOST:8000/health/ready"
+```
+
+Copy only `tls/ca.crt` through the existing approved SSH channel to an owned worker file and compare its SHA-256 certificate fingerprint with the controller report. Pass `--ca-file <public-ca-file>` to worker preflight and all Cord/manual commands at `https://<current-controller-ts.net>:8443`. Complete exact scoped-principal/grant checks and authenticated send/receive/receipt/handle round trips before assignment dispatch. Optional transport qualification does not launch workers or authorize inference. Record the observed endpoint, reviewed source, CA fingerprint, expiry, bind/user/mount checks and message IDs as deployment evidence, without credentials.
+
+For rollback, stop dispatch and preserve in-flight assignment/result state. Recreate only the API using the base Compose file to restore its former loopback HTTP command and remove the Tailnet binding; verify the actual bindings and readiness. Do not touch the database, state directory or unrelated Serve routes. Keep CA/leaf files for inspection. Rotation is a separate explicit manual operation before expiry, requiring a new reviewed preparation/transfer/qualification sequence; no renewal service or global CA trust is introduced.
+
 ## Restart, rollback and limits
 
 Docker's restart policy preserves the dedicated database and restarts both services after Docker/host restart. After a restart, run `docker compose -f ops/manual-pilot/compose.yaml ps`, check `/health/ready` and check Serve reachability; do not infer readiness from container state alone. The initial preflight intentionally fails once the owned ports and container name are in use. The API has no migration or provisioning privileges. Schema upgrades must stop the API, use administrator credentials explicitly, requalify the runtime role, then restart.
