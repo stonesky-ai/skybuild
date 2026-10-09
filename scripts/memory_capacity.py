@@ -16,6 +16,10 @@ _GIB = 1024**3
 _MEASUREMENT_MAX_AGE_SECONDS = 24 * 60 * 60
 
 
+class _MemoryCapMismatch(ValueError):
+    """Observed, declared or prior hard caps do not match this configuration."""
+
+
 def _number(path: Path) -> int:
     value = path.read_text(encoding="ascii").strip()
     if not value.isdecimal():
@@ -101,6 +105,11 @@ def observe(registry_path: Path, prior_state_path: Path, *, available_bytes: int
               "hard_concurrency": hard_concurrency, "status": "unknown", "jobs": [],
               "peak_history": prior.get("peak_history", [])[-64:] if isinstance(prior.get("peak_history"), list) else []}
     try:
+        if prior.get("new_job_limit_bytes", new_job_limit_bytes) != new_job_limit_bytes:
+            raise _MemoryCapMismatch("Prior capacity configuration has a different cap")
+        for measurement in result["peak_history"]:
+            if not isinstance(measurement, dict) or measurement.get("max_bytes") != new_job_limit_bytes:
+                raise _MemoryCapMismatch("Retained measurement has a different or unknown cap")
         jobs = _registry(registry_path, cgroup_root)
         active_remaining = 0
         running = 0
@@ -131,6 +140,12 @@ def observe(registry_path: Path, prior_state_path: Path, *, available_bytes: int
                 source_time = observed_at
             if maximum <= 0 or current > maximum or peak < current:
                 raise ValueError("Cgroup memory counters are inconsistent")
+            manifest_maximum = item["manifest"].get("memory_max_bytes")
+            if maximum != new_job_limit_bytes:
+                raise _MemoryCapMismatch("Observed MemoryMax differs from configured new-job cap")
+            if manifest_maximum is not None and (type(manifest_maximum) is not int or
+                                                  manifest_maximum != maximum):
+                raise _MemoryCapMismatch("Manifest MemoryMax differs from observed or configured cap")
             record = {"job_id": item["job_id"], "phase": item["phase"],
                       "cgroup": str(group) if group is not None else None,
                       "current_bytes": current, "peak_bytes": peak, "max_bytes": maximum,
@@ -201,6 +216,18 @@ def observe(registry_path: Path, prior_state_path: Path, *, available_bytes: int
         previous_healthy = prior.get("healthy_samples", 0)
         if not isinstance(previous_healthy, int) or previous_healthy < 0:
             previous_healthy = 0
+        last_counted = prior.get("last_counted_sample_at")
+        if isinstance(last_counted, str):
+            last_counted_time = _time(last_counted)
+            if last_counted_time > now_time:
+                raise ValueError("Last counted capacity sample is in the future")
+            if (now_time - last_counted_time).total_seconds() > _MEASUREMENT_MAX_AGE_SECONDS:
+                last_counted_time = None
+                previous_healthy = 0
+        else:
+            last_counted_time = None
+            previous_healthy = 0
+        counted_at = None
         cap_covers_peak = measured_peak is not None and measured_peak <= new_job_limit_bytes
         fresh_measurement = cap_covers_peak and age is not None and age <= _MEASUREMENT_MAX_AGE_SECONDS
         if safe_total < previous_target:
@@ -210,7 +237,11 @@ def observe(registry_path: Path, prior_state_path: Path, *, available_bytes: int
         elif not fresh_measurement:
             target, healthy = min(previous_target, 1, safe_total), 0
         elif safe_total > previous_target and previous_target <= observed_running:
-            healthy = min(step_samples, previous_healthy + 1)
+            # The watcher samples once per minute. Calls and restarts inside that
+            # interval must not manufacture additional healthy observations.
+            count_sample = last_counted_time is None or (now_time - last_counted_time).total_seconds() >= 60
+            healthy = min(step_samples, previous_healthy + int(count_sample))
+            counted_at = now if count_sample else last_counted
             target = previous_target + 1 if healthy >= step_samples else previous_target
             if healthy >= step_samples:
                 healthy = 0
@@ -219,6 +250,7 @@ def observe(registry_path: Path, prior_state_path: Path, *, available_bytes: int
         target = min(target, observed_running + 1)
         result["target_jobs"] = target
         result["healthy_samples"] = healthy
+        result["last_counted_sample_at"] = counted_at
         result["max_new_jobs"] = max(0, min(target, safe_total) - running)
         result["status"] = "ok" if fresh_measurement else "needs_completed_measurement"
         if measured_peak is not None and not cap_covers_peak:
@@ -226,6 +258,8 @@ def observe(registry_path: Path, prior_state_path: Path, *, available_bytes: int
         elif cap_covers_peak and not fresh_measurement:
             result["status"] = "measurement_stale"
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
-        result.update({"status": "unknown", "reason": type(error).__name__,
-                       "target_jobs": 0, "max_new_jobs": 0, "healthy_samples": 0})
+        result.update({"status": "unknown", "reason": "memory_cap_mismatch" if isinstance(error, _MemoryCapMismatch)
+                       else type(error).__name__,
+                       "target_jobs": 0, "max_new_jobs": 0, "healthy_samples": 0,
+                       "last_counted_sample_at": None})
     return result
