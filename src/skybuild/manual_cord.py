@@ -34,11 +34,19 @@ def _private_write(destination: Path, payload: bytes) -> None:
     if destination.is_symlink() or not destination.parent.is_dir():
         raise ManualCordError("Assignment destination must have an existing directory")
     if destination.exists():
-        info = destination.stat()
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
-            raise ManualCordError("Existing assignment file is not private")
-        if destination.read_bytes() != payload:
-            raise ManualCordError("Assignment destination contains different evidence")
+        descriptor = os.open(destination, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+                raise ManualCordError("Existing assignment file is not private")
+            if stream.read() != payload:
+                raise ManualCordError("Assignment destination contains different evidence")
+            os.fsync(stream.fileno())
+        directory = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
         return
     descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
@@ -113,7 +121,7 @@ def send_result(client: Client, project: str, checkout: Path, worktree: Path, *,
     if result["head_sha"] != head or _git(worktree, "status", "--porcelain", "--untracked-files=all"):
         raise ManualCordError("Result must name a clean exact Git head")
     _git(worktree, "merge-base", "--is-ancestor", snapshot["base_sha"], head)
-    changed = subprocess.run(["git", "diff", "--name-only", "-z", snapshot["base_sha"], head],
+    changed = subprocess.run(["git", "diff", "--no-renames", "--name-only", "-z", snapshot["base_sha"], head],
                              cwd=worktree, capture_output=True, check=False)
     if changed.returncode:
         raise ManualCordError("Result changed paths are unavailable")

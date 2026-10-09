@@ -5,6 +5,7 @@ import subprocess
 
 import pytest
 
+import skybuild.manual_cord as manual_cord
 from skybuild.manual_cord import ManualCordError, receive_assignment, send_result
 from test_manual_assignment import pinned  # noqa: F401
 
@@ -45,6 +46,51 @@ def test_receive_checks_sender_and_committed_brief_before_receipt(pinned, tmp_pa
     assert len(client.actions) == 1
     assert receive_assignment(client, "skybuild", repo, worker="wonko", dispatcher="jeltz",
                               message_id="assignment-1", destination=destination) == result
+
+
+@pytest.mark.parametrize("first_failure_at", [1, 2])
+def test_receive_retry_syncs_existing_snapshot_before_receipt(pinned, tmp_path, monkeypatch,
+                                                                 first_failure_at):
+    repo, envelope = pinned
+    client = FakeClient([message(envelope)])
+    destination = tmp_path / "assignment.json"
+    actual_fsync = manual_cord.os.fsync
+    calls = []
+
+    def fail_first_sync(descriptor):
+        calls.append(descriptor)
+        if len(calls) == first_failure_at:
+            raise OSError("injected fsync failure")
+        actual_fsync(descriptor)
+
+    monkeypatch.setattr(manual_cord.os, "fsync", fail_first_sync)
+    with pytest.raises(OSError, match="injected fsync failure"):
+        receive_assignment(client, "skybuild", repo, worker="wonko", dispatcher="jeltz",
+                           message_id="assignment-1", destination=destination)
+    assert destination.exists()
+    assert client.actions == []
+    assert len(calls) == first_failure_at
+
+    def fail_retry_sync(descriptor):
+        raise OSError("injected fsync failure")
+
+    monkeypatch.setattr(manual_cord.os, "fsync", fail_retry_sync)
+    with pytest.raises(OSError, match="injected fsync failure"):
+        receive_assignment(client, "skybuild", repo, worker="wonko", dispatcher="jeltz",
+                           message_id="assignment-1", destination=destination)
+    assert client.actions == []
+
+    synced = []
+
+    def record_sync(descriptor):
+        synced.append(descriptor)
+        actual_fsync(descriptor)
+
+    monkeypatch.setattr(manual_cord.os, "fsync", record_sync)
+    receive_assignment(client, "skybuild", repo, worker="wonko", dispatcher="jeltz",
+                       message_id="assignment-1", destination=destination)
+    assert len(synced) == 2
+    assert len(client.actions) == 1
 
 
 @pytest.mark.parametrize("change", [{"sender": "impostor"}, {"recipient": "another"},
@@ -103,6 +149,28 @@ def test_result_refuses_changed_path_outside_scope(pinned, tmp_path):
     result = {"schema": "manual-work-v1", "assignment_id": envelope["assignment_id"],
               "phase": "ready-for-review", "branch": envelope["branch"], "head_sha": git(worktree, "rev-parse", "HEAD"),
               "checks": [], "changed_paths": ["outside.txt"], "risks": [], "next_action": "Review"}
+    client = FakeClient()
+    with pytest.raises(ManualCordError, match="scope"):
+        send_result(client, "skybuild", repo, worktree, worker="wonko",
+                    assignment=envelope, result=result)
+    assert client.sent == []
+
+
+def test_result_refuses_rename_from_outside_scope(pinned, tmp_path):
+    repo, envelope = pinned
+    (repo / "outside.txt").write_text("outside\n")
+    git(repo, "add", "outside.txt")
+    git(repo, "commit", "-m", "Add outside source")
+    envelope["base_sha"] = git(repo, "rev-parse", "HEAD")
+    worktree = tmp_path / "worker"
+    git(repo, "worktree", "add", "-b", envelope["branch"], str(worktree), envelope["base_sha"])
+    owned = worktree / "src/skybuild/client.py"
+    owned.parent.mkdir(parents=True)
+    git(worktree, "mv", "outside.txt", "src/skybuild/client.py")
+    git(worktree, "commit", "-m", "Rename outside source")
+    result = {"schema": "manual-work-v1", "assignment_id": envelope["assignment_id"],
+              "phase": "ready-for-review", "branch": envelope["branch"], "head_sha": git(worktree, "rev-parse", "HEAD"),
+              "checks": [], "changed_paths": ["src/skybuild/client.py"], "risks": [], "next_action": "Review"}
     client = FakeClient()
     with pytest.raises(ManualCordError, match="scope"):
         send_result(client, "skybuild", repo, worktree, worker="wonko",
