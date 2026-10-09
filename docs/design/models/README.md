@@ -1,5 +1,56 @@
 # Admission design model
 
+## Store-only CPU reservation slice
+
+`CPUReservation.tla` and `CPUReservation.cfg` model the unredeemable Store slice,
+separately from the future launch/redemption model below. English invariants:
+held unit reservations never exceed capacity; cancelled action identities never
+revive; unknown exposure retains its reservation; new reservations require current
+central/local generations, readiness/task revision and a live fenced claim.
+Expiry changes claim liveness without releasing capacity. Only explicit
+never-dispatched cancellation releases capacity. There is no dispatch operation.
+
+On 2026-10-08 SANY passed. TLC 2.19 exhaustive breadth-first checking with two
+actions, unit capacity one and generations/revision 1–2 passed all five invariants:
+6,985 generated states, 2,236 distinct states, depth 12. This is bounded safety
+evidence, not a liveness, physical-launch or implementation proof.
+
+Three negative controls were checked by copying the config to `/tmp` and changing
+exactly one `Broken*` constant to `TRUE`. `BrokenCapacity` produced two held actions
+at capacity one. `BrokenReplay` produced Check, Reserve, Cancel, Replay and violated
+`NoRevival`. `BrokenFence` admitted under a disabled central control and violated
+`NoStaleAdmission`. Each finished with invariant violation and exit 12. The first
+fence mutation exposed missing parentheses in a Boolean assignment; that model
+expression was corrected before the final positive and mutation checks.
+
+Reproduce from the repository root:
+
+~~~sh
+rtk proxy sany docs/design/models/CPUReservation.tla
+rtk proxy tlc -workers 2 -metadir /tmp/skybuild-cpu-reservation-check docs/design/models/CPUReservation.tla
+~~~
+
+Implementation mapping: graph lock serializes task/readiness/dependency changes;
+project CPU lock serializes controls, capacity and cancellation; global action and
+attempt locks serialize identity registration across projects. Task and claim row
+locks follow those locks. Reservation insertion repeats the live-lease predicate
+using `clock_timestamp()` after all checks. State and journal commit together.
+An idempotent action lookup returns current stored state, never cached admission.
+The model abstracts one immutable action and fixed claim identity per task, unit
+requests, and one revision representing task/readiness invalidation. Claim fence
+replacement is covered separately by `Claims.tla` and PostgreSQL checks. PostgreSQL
+tests additionally cover integer requests, identities, authorization, rollback and
+lease expiry during checks. No fairness, wall-clock model, process launch, provider
+meter, complete scoped-control hierarchy or DB-outage behavior is proved.
+
+Sources: architecture A34 section 8 and implementation plan section 5 at base
+`a454f09bcd5a634445790ad0df7ab8ddebf58ccf`. SHA-256:
+
+- architecture.md: `f4f2c2cbe93132a36177aa6baf6728c4a207af8f0254770c6b3e80f605533f85`
+- implementation_plan.md: `77e65bfaa6b0f64a4a44d9f069dca87a9936a88f062bcbe90d30461c74367260`
+- Admission.tla: `d362656e3755b8e9c88a918485da47f5e33ae4061b3f90b7928142813c458767`
+- Claims.tla: `d3a02dd2b15e20adb2c7cae93d9ad09975506e98e80ee72a729dd820f7442802`
+
 [MVPParallel.md](MVPParallel.md) records a later exhaustive two-worker/capacity-two check, a reachable parallel-work witness and the stale-capacity negative control. It does not extend the modeled physical-launch guarantees.
 
 For the separate A30 bundle publication audit, see [Publication.md](Publication.md). Its sampled results and external-enforcement assumptions are distinct from the admission model below.

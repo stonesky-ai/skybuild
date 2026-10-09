@@ -114,6 +114,9 @@ class Claims:
 
     @staticmethod
     def _require_no_external_exposure(connection, project_id, task_id):
+        if connection.execute("SELECT 1 FROM cpu_reservations WHERE project_id = %s AND task_id = %s AND state = 'reserved' LIMIT 1",
+                              (project_id, task_id)).fetchone():
+            raise DomainError('capacity_conflict', 'Task has a held CPU reservation', 409)
         if connection.execute('SELECT 1 FROM task_effects WHERE project_id = %s AND task_id = %s '
                               'AND exposure_held LIMIT 1', (project_id, task_id)).fetchone():
             raise DomainError('effect_conflict', 'Task has unresolved effect exposure', 409)
