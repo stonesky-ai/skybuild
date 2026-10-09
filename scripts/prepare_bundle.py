@@ -120,8 +120,8 @@ def _clean(root: Path) -> None:
 
 
 def _reserve() -> None:
-    if available_memory_bytes() < 8 * 1024**3:
-        raise PreparationError("Available memory is below the required 8 GiB reserve")
+    if available_memory_bytes() < 6 * 1024**3:
+        raise PreparationError("Available memory is below the required 6 GiB reserve")
 
 
 def _assert_candidate(root: Path, candidate: Path) -> None:
