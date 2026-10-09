@@ -267,6 +267,7 @@ class Store:
         return values
 
     def _replace_task(self, connection, principal, project_id, task_id, before, changes, *, operation, reason):
+        self._require_no_effect_exposure(connection, project_id, task_id)
         values = self._task_values(changes, before)
         self._advance_readiness(connection, project_id, task_id, values,
                                 acknowledge=operation in {'ready', 'completed'},
@@ -312,6 +313,7 @@ class Store:
             before = self._task(connection, project_id, dependent_id, lock=True)
             if before['status'] == 'superseded':
                 continue
+            self._require_no_effect_exposure(connection, project_id, dependent_id)
             values = self._task_values({}, before)
             metadata = json.loads(json.dumps(before['metadata']))
             workflow = metadata.setdefault('_skybuild_workflow', {})
@@ -792,6 +794,125 @@ class Store:
             "OR before_state->>'phase' IN ('working', 'integrating') OR after_state->>'phase' IN ('working', 'integrating')) LIMIT 1",
             (project_id, task_id),
         ).fetchone())
+
+    @staticmethod
+    def _require_no_effect_exposure(connection, project_id, task_id):
+        if connection.execute(
+            'SELECT 1 FROM task_effects WHERE project_id = %s AND task_id = %s '
+            'AND exposure_held LIMIT 1', (project_id, task_id)).fetchone():
+            raise DomainError('effect_conflict', 'Task has unresolved effect exposure', 409)
+
+    def create_effect_intent(self, principal, project_id, task_id, body, expected_revision, idempotency_key):
+        """Persist intent only. Caller-supplied references never grant launch authority."""
+        fields = {'operation_id', 'attempt_id', 'authority_epoch', 'authority_generation',
+                  'input_digest', 'policy_digest', 'allocation_refs'}
+        _body(body, fields)
+        if set(body) != fields:
+            _invalid('Effect intent requires all identity and allocation fields')
+        for field in ('operation_id', 'attempt_id'):
+            _identifier(body[field], field)
+        for field in ('authority_epoch', 'authority_generation'):
+            if type(body[field]) is not int or not 1 <= body[field] < 2**63:
+                _invalid(f'{field} must be a positive 64-bit integer')
+        for field in ('input_digest', 'policy_digest'):
+            value = body[field]
+            if not isinstance(value, str) or len(value) != 64 or any(c not in '0123456789abcdef' for c in value):
+                _invalid(f'{field} must be a SHA-256 hex digest')
+        refs = body['allocation_refs']
+        if not isinstance(refs, list) or not 1 <= len(refs) <= 100 or len(set(map(str, refs))) != len(refs):
+            _invalid('allocation_refs requires 1–100 distinct references')
+        for ref in refs:
+            _identifier(ref, 'allocation reference')
+        if type(expected_revision) is not int or not 1 <= expected_revision < 2**63:
+            _invalid('Effect intent requires a positive expected revision')
+        payload = {'task_id': task_id, 'revision': expected_revision, 'body': body}
+        digest = hashlib.sha256(_json({'project_id': project_id, **payload}).encode()).hexdigest()
+        with self._connection() as connection:
+            principal = self._authorize_effect_writer(connection, principal, project_id)
+            def mutation():
+                self._graph_lock(connection, project_id)
+                # Global operation identity must serialize even across projects and actors.
+                connection.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))',
+                                   ('skybuild:effect:' + body['operation_id'],))
+                prior = connection.execute('SELECT * FROM task_effects WHERE operation_id = %s',
+                                           (body['operation_id'],)).fetchone()
+                if prior:
+                    if prior['intent_hash'] != digest:
+                        raise DomainError('idempotency_conflict', 'Operation ID has different intent', 409)
+                    return _public(prior)
+                task = self._task(connection, project_id, task_id, lock=True)
+                if task['revision'] != expected_revision:
+                    raise DomainError('stale_revision', 'Task revision has changed', 409)
+                if task['status'] in {'superseded', 'done', 'deferred'}:
+                    raise DomainError('workflow_conflict', 'Task cannot register effect intent in this state', 409)
+                connection.execute(
+                    'INSERT INTO task_effects (operation_id, project_id, task_id, attempt_id, task_revision, '
+                    'authority_epoch, authority_generation, input_digest, policy_digest, allocation_refs, intent_hash) '
+                    'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)',
+                    (body['operation_id'], project_id, task_id, body['attempt_id'], expected_revision,
+                     body['authority_epoch'], body['authority_generation'], body['input_digest'],
+                     body['policy_digest'], refs, digest))
+                after = _public(connection.execute('SELECT * FROM task_effects WHERE operation_id = %s',
+                                                  (body['operation_id'],)).fetchone())
+                self._effect_journal(connection, principal, after, None, 'Intent registered; no dispatch authorized')
+                return after
+            return self._idempotent(connection, principal, project_id, 'effect.intent', idempotency_key, payload, mutation)
+
+    def observe_effect(self, principal, project_id, operation_id, state, reason, idempotency_key):
+        """Hold uncertainty durably or cancel an intent never exposed to external I/O.
+
+        Unknown is deliberately irreversible here. No adapter proof format is qualified.
+        This method neither dispatches nor authorizes an external operation.
+        """
+        _identifier(operation_id, 'operation_id')
+        if state not in ('unknown', 'cancelled'):
+            _invalid('Only unknown exposure or never-dispatched cancellation is supported')
+        reason = _text(reason, 'reason', 4096)
+        payload = {'operation_id': operation_id, 'state': state, 'reason': reason}
+        with self._connection() as connection:
+            principal = self._authorize_effect_writer(connection, principal, project_id)
+            def mutation():
+                self._graph_lock(connection, project_id)
+                before = connection.execute('SELECT * FROM task_effects WHERE operation_id = %s AND project_id = %s FOR UPDATE',
+                                            (operation_id, project_id)).fetchone()
+                if not before:
+                    raise DomainError('not_found', 'Effect operation not found', 404)
+                if before['state'] == state:
+                    return _public(before)
+                if before['state'] != 'intent':
+                    raise DomainError('effect_conflict', 'Unknown exposure cannot be cancelled or released', 409)
+                connection.execute('UPDATE task_effects SET state = %s, exposure_held = %s WHERE operation_id = %s',
+                                   (state, state != 'cancelled', operation_id))
+                after = _public(connection.execute('SELECT * FROM task_effects WHERE operation_id = %s',
+                                                  (operation_id,)).fetchone())
+                self._effect_journal(connection, principal, after, _public(before), reason)
+                return after
+            return self._idempotent(connection, principal, project_id, 'effect.observe', idempotency_key, payload, mutation)
+
+    def effect_history(self, principal, project_id, operation_id, *, limit=100, offset=0):
+        self._page(limit, offset)
+        _identifier(operation_id, 'operation_id')
+        with self._connection() as connection:
+            self._authorize(connection, principal, project_id, 'tasks:read')
+            if not connection.execute('SELECT 1 FROM task_effects WHERE operation_id = %s AND project_id = %s',
+                                      (operation_id, project_id)).fetchone():
+                raise DomainError('not_found', 'Effect operation not found', 404)
+            return _public(connection.execute('SELECT * FROM effect_journal WHERE operation_id = %s '
+                                             'ORDER BY created_at, event_id LIMIT %s OFFSET %s',
+                                             (operation_id, limit, offset)).fetchall())
+
+    def _authorize_effect_writer(self, connection, principal, project_id):
+        current = self._authorize(connection, principal, project_id, 'tasks:write')
+        if not current.is_admin:
+            raise DomainError('authorization', 'Only an owner/admin may record effect observations', 403)
+        return current
+
+    @staticmethod
+    def _effect_journal(connection, principal, after, before, reason):
+        connection.execute('INSERT INTO effect_journal (event_id, operation_id, actor, action, reason, before_state, '
+                           'after_state) VALUES (%s, %s, %s, %s, %s, %s, %s)',
+                           (uuid4(), after['operation_id'], principal.principal_id, after['state'], reason,
+                            Jsonb(before) if before else None, Jsonb(after)))
 
     def task_history(self, principal, project_id, task_id, *, limit=100, offset=0) -> list[dict]:
         self._page(limit, offset)
