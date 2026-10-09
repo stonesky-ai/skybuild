@@ -177,7 +177,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state", required=True, type=Path, help="Atomic JSON status path")
     parser.add_argument("--checkout", type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument("--reserve-gib", type=int, default=4)
+    parser.add_argument("--reserve-gib", type=int, default=8)
     parser.add_argument("--disk-reserve-gib", type=int, default=4)
     parser.add_argument("--disk-path", action="append", type=Path,
                         help="Disk path to check; defaults to checkout and /tmp")
