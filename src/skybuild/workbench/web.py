@@ -9,7 +9,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
-from . import fleet_inventory, marshalls, navigation
+from . import fleet_inventory, integrations, marshalls, navigation, worktree_cleaner
 from ..ledger import build_manifest
 from .source import page
 
@@ -28,6 +28,8 @@ def _revision() -> str:
     digest = hashlib.sha256()
     paths = [ROOT / "web.py", ROOT / "workbench" / "web.py", ROOT / "workbench" / "navigation.py",
              ROOT / "workbench" / "fleet_inventory.py", ROOT / "workbench" / "marshalls.py",
+             ROOT / "workbench" / "integrations.py",
+             ROOT / "workbench" / "worktree_cleaner.py",
              ROOT / "marshall_dunsel.py"]
     paths.extend(path for path in STATIC.iterdir() if path.is_file())
     paths.extend(path for path in (ROOT / "workbench" / "source").rglob("*") if path.is_file() and "__pycache__" not in path.parts)
@@ -47,7 +49,7 @@ def install_workbench(app: FastAPI, *, dev_reload: bool = False) -> None:
     @app.get("/workbench", include_in_schema=False)
     def workbench_home() -> HTMLResponse:
         body = (STATIC / "workbench.html").read_text(encoding="utf-8")
-        body = body.replace("<!--WORKBENCH_NAV-->", navigation.sidebar("workbench"))
+        body = body.replace("<!--WORKBENCH_NAV-->", navigation.sidebar("workbench", local_preview=dev_reload))
         if dev_reload:
             body = body.replace("</body>", _dev_script(_revision()) + "</body>")
         return HTMLResponse(body, headers={
@@ -66,13 +68,15 @@ def install_workbench(app: FastAPI, *, dev_reload: bool = False) -> None:
         ("/workbench/assets/project-dependency-design.md", "project-dependency-design.md", "text/markdown; charset=utf-8"),
         ("/workbench/assets/marshalls.css", "marshalls.css", "text/css"),
         ("/workbench/assets/marshalls.js", "marshalls.js", "text/javascript"),
+        ("/workbench/assets/integrations.css", "integrations.css", "text/css"),
+        ("/workbench/assets/integrations.js", "integrations.js", "text/javascript"),
     ):
         app.add_api_route(route, _asset_handler(filename, media_type), methods=["GET"], include_in_schema=False)
 
     @app.get("/workbench/tasks", include_in_schema=False)
     def tasks_page() -> HTMLResponse:
         body = (STATIC / "tasks.html").read_text(encoding="utf-8")
-        body = body.replace("<!--WORKBENCH_NAV-->", navigation.sidebar("tasks"))
+        body = body.replace("<!--WORKBENCH_NAV-->", navigation.sidebar("tasks", local_preview=dev_reload))
         if dev_reload:
             body = body.replace('<html lang="en">', '<html lang="en" data-skybuild-preview="true">')
             body = body.replace("</body>", _dev_script(_revision()) + "</body>")
@@ -84,7 +88,7 @@ def install_workbench(app: FastAPI, *, dev_reload: bool = False) -> None:
     @app.get("/workbench/milestones", include_in_schema=False)
     def milestones_page() -> HTMLResponse:
         body = (STATIC / "milestones.html").read_text(encoding="utf-8")
-        body = body.replace("<!--WORKBENCH_NAV-->", navigation.sidebar("milestones"))
+        body = body.replace("<!--WORKBENCH_NAV-->", navigation.sidebar("milestones", local_preview=dev_reload))
         if dev_reload:
             body = body.replace("</body>", _dev_script(_revision()) + "</body>")
         return HTMLResponse(body, headers={
@@ -95,8 +99,19 @@ def install_workbench(app: FastAPI, *, dev_reload: bool = False) -> None:
     @app.get("/workbench/marshalls", include_in_schema=False)
     def marshalls_page() -> HTMLResponse:
         body = (STATIC / "marshalls.html").read_text(encoding="utf-8")
-        body = body.replace("<!--WORKBENCH_NAV-->", navigation.sidebar("marshalls"))
+        body = body.replace("<!--WORKBENCH_NAV-->", navigation.sidebar("marshalls", local_preview=dev_reload))
         body = body.replace("<!--MARSHALLS_CONTROLS-->", "true" if dev_reload else "false")
+        if dev_reload:
+            body = body.replace("</body>", _dev_script(_revision()) + "</body>")
+        return HTMLResponse(body, headers={
+            **HEADERS,
+            "Content-Security-Policy": "default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'",
+        })
+
+    @app.get("/workbench/integrations", include_in_schema=False)
+    def integrations_page() -> HTMLResponse:
+        body = (STATIC / "integrations.html").read_text(encoding="utf-8")
+        body = body.replace("<!--WORKBENCH_NAV-->", navigation.sidebar("integrations", local_preview=dev_reload))
         if dev_reload:
             body = body.replace("</body>", _dev_script(_revision()) + "</body>")
         return HTMLResponse(body, headers={
@@ -110,7 +125,7 @@ def install_workbench(app: FastAPI, *, dev_reload: bool = False) -> None:
         if view_name not in {item["key"] for item in page.PAGES}:
             raise HTTPException(404)
         body = page.PAGE_HTML
-        body = body.replace("<!--WORKBENCH_NAV-->", navigation.sidebar(view_name))
+        body = body.replace("<!--WORKBENCH_NAV-->", navigation.sidebar(view_name, local_preview=dev_reload))
         body = re.sub(r'<nav id="rail"[\s\S]*?</nav>', '', body, count=1)
         if dev_reload:
             body = body.replace("<body>", '<body data-fleet-inventory="enabled">')
@@ -148,6 +163,61 @@ def install_workbench(app: FastAPI, *, dev_reload: bool = False) -> None:
                 marshalls.require_local_request(request, mutation=mutation)
             except PermissionError as error:
                 raise HTTPException(403, detail=str(error)) from None
+
+        @app.get("/workbench/api/integrations/worktrees", include_in_schema=False)
+        def integrations_worktrees(request: Request) -> JSONResponse:
+            local_marshall_request(request)
+            try:
+                result = integrations.snapshot(PROJECT_ROOT)
+            except (OSError, RuntimeError, ValueError):
+                raise HTTPException(503, detail="Local worktree inventory is unavailable.") from None
+            return JSONResponse(result, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+        @app.get("/workbench/api/marshalls/worktree-cleaner/preview", include_in_schema=False)
+        def worktree_cleaner_preview(request: Request) -> JSONResponse:
+            local_marshall_request(request)
+            try:
+                result = worktree_cleaner.preview(PROJECT_ROOT)
+            except (OSError, RuntimeError, ValueError):
+                raise HTTPException(503, detail="Worktree Cleaner could not inspect local worktrees.") from None
+            return JSONResponse(result, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+        @app.post("/workbench/api/marshalls/worktree-cleaner/clean", include_in_schema=False)
+        def worktree_cleaner_clean(request: Request, body: dict) -> JSONResponse:
+            local_marshall_request(request, mutation=True)
+            candidate_id = body.get("candidate_id")
+            if not isinstance(candidate_id, str) or not re.fullmatch(r"[0-9a-f]{64}", candidate_id):
+                raise HTTPException(422, detail="Invalid Worktree Cleaner candidate.")
+            try:
+                result = worktree_cleaner.clean(PROJECT_ROOT, candidate_id)
+            except ValueError as error:
+                raise HTTPException(409, detail=str(error)) from None
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                raise HTTPException(503, detail="Worktree Cleaner could not remove the verified worktree.") from None
+            return JSONResponse(result, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+        @app.post("/workbench/api/marshalls/worktree-cleaner/clean-selected", include_in_schema=False)
+        def worktree_cleaner_clean_selected(request: Request, body: dict) -> JSONResponse:
+            local_marshall_request(request, mutation=True)
+            candidate_ids = body.get("candidate_ids")
+            if (not isinstance(candidate_ids, list) or not candidate_ids
+                    or len(candidate_ids) > 100
+                    or not all(isinstance(item, str) and re.fullmatch(r"[0-9a-f]{64}", item)
+                               for item in candidate_ids)):
+                raise HTTPException(422, detail="Select between 1 and 100 valid worktrees.")
+            try:
+                result = worktree_cleaner.clean_selected(PROJECT_ROOT, candidate_ids)
+            except ValueError as error:
+                raise HTTPException(409, detail=str(error)) from None
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                raise HTTPException(503, detail="Worktree Cleaner could not remove the verified worktrees.") from None
+            return JSONResponse(result, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+        @app.get("/workbench/api/marshalls/worktree-cleaner/log", include_in_schema=False)
+        def worktree_cleaner_log(request: Request) -> JSONResponse:
+            local_marshall_request(request)
+            return JSONResponse({"entries": worktree_cleaner.cleanup_log_tail(PROJECT_ROOT)},
+                                headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
         @app.get("/workbench/api/marshalls/dunsel", include_in_schema=False)
         def dunsel_status(request: Request) -> JSONResponse:

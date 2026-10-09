@@ -22,17 +22,66 @@
     architecture_refs: ["FAKE-ARCH-REF"], revision: 3, created_at: "2026-10-01T14:10:00Z", updated_at: fakeTimestamp,
     metadata: {fake: true, waiting_on: ["FAKE-SKYBUILD-BOOTSTRAP"], will_enable: "TBD"}, fake: true,
   };
-  const fakeHistory = [
-    {event_id: "FAKE-EVENT-001", task_id: fakeTask.task_id, actor: "fake-owner", operation: "created", revision: 1,
-      created_at: "2026-10-01T14:10:00Z", reason: "Fake preview task created", after_state: {...fakeTask, revision: 1}, fake: true},
-    {event_id: "FAKE-EVENT-002", task_id: fakeTask.task_id, actor: "fake-worker", operation: "updated", revision: 2,
-      created_at: "2026-10-01T15:00:00Z", reason: "Fake implementation commit recorded", after_state: {...fakeTask, revision: 2},
-      commits: [fakeCommit], fake: true},
-    {event_id: "FAKE-EVENT-003", task_id: fakeTask.task_id, actor: "fake-reviewer", operation: "reviewed", revision: 3,
-      created_at: fakeTimestamp, reason: "Fake independent review passed", after_state: {...fakeTask, revision: 3},
-      review: {reviewer: "fake-reviewer", result: "passed", findings: 0}, fake: true},
+  const workflowSample = (taskId, title, current, steps) => {
+    const task = {...fakeTask, task_id: taskId, title, status: current.status, phase: current.phase,
+      next_action: current.next_action, blocker: current.blocker || "", revision: steps.length, fake: true};
+    const history = steps.map((step, index) => ({
+      event_id: `FAKE-${taskId}-${String(index + 1).padStart(3, "0")}`, task_id: taskId,
+      actor: step.actor || "fake-preview", operation: step.operation, revision: index + 1,
+      created_at: `2026-10-0${Math.min(index + 1, 9)}T15:00:00Z`, reason: step.reason,
+      after_state: {...task, status: step.status, phase: step.phase, revision: index + 1},
+      outcome: step.outcome, fake: true,
+    }));
+    return {task, history};
+  };
+  const fakeCases = [
+    {task: fakeTask, history: [
+      {event_id: "FAKE-EVENT-001", task_id: fakeTask.task_id, actor: "fake-owner", operation: "created", revision: 1,
+        created_at: "2026-10-01T14:10:00Z", reason: "Fake preview task created", after_state: {...fakeTask, status: "proposed", phase: "planned", revision: 1}, fake: true},
+      {event_id: "FAKE-EVENT-002", task_id: fakeTask.task_id, actor: "fake-owner", operation: "readied", revision: 2,
+        created_at: "2026-10-01T14:30:00Z", reason: "Definition and acceptance are sufficient", after_state: {...fakeTask, status: "ready", phase: "ready", revision: 2}, fake: true},
+      {event_id: "FAKE-EVENT-003", task_id: fakeTask.task_id, actor: "fake-worker", operation: "claimed", revision: 3,
+        created_at: fakeTimestamp, reason: "Fake implementation started; commit evidence attached", after_state: {...fakeTask, status: "in-progress", phase: "working", revision: 3},
+        commits: [fakeCommit], fake: true},
+    ]},
+    workflowSample("FAKE-REVIEW-READY", "Review passed; integration assessment next", {status: "in-progress", phase: "assessing"}, [
+      {operation: "created", status: "proposed", phase: "planned", reason: "Fake task created"},
+      {operation: "readied", status: "ready", phase: "ready", reason: "Definition accepted"},
+      {operation: "claimed", status: "in-progress", phase: "working", reason: "Author claimed task"},
+      {operation: "validated", status: "in-progress", phase: "validating", reason: "Required checks passed"},
+      {operation: "reviewed", status: "in-progress", phase: "reviewing", outcome: "passed", reason: "Independent review passed"},
+      {operation: "assessment_started", status: "in-progress", phase: "assessing", reason: "Assessing integration readiness"},
+    ]),
+    workflowSample("FAKE-REWORK-BLOCKED", "Rework blocked on dependency", {status: "blocked", phase: "blocked", blocker: "Dependency evidence missing", next_action: "Owner resolves dependency"}, [
+      {operation: "created", status: "proposed", phase: "planned", reason: "Fake task created"},
+      {operation: "readied", status: "ready", phase: "ready", reason: "Definition accepted"},
+      {operation: "claimed", status: "in-progress", phase: "working", reason: "Author started implementation"},
+      {operation: "check_failed", status: "in-progress", phase: "needs-rework", outcome: "failed", reason: "A required check found a code failure"},
+      {operation: "rework_started", status: "in-progress", phase: "working", reason: "Bounded correction started"},
+      {operation: "implementation_result", status: "in-progress", phase: "validating", reason: "Correction committed for validation"},
+      {operation: "checks_passed", status: "in-progress", phase: "reviewing", reason: "Required checks now pass"},
+      {operation: "review_passed", status: "in-progress", phase: "assessing", reason: "Independent review passed; assess dependency"},
+      {operation: "blocked", status: "blocked", phase: "blocked", outcome: "blocked", reason: "Dependency evidence missing; owner action required"},
+    ]),
+    workflowSample("FAKE-DEFERRED", "Deferred until prerequisite completes", {status: "deferred", phase: "deferred", next_action: "Resume after prerequisite completes"}, [
+      {operation: "created", status: "proposed", phase: "planned", reason: "Fake task created"},
+      {operation: "readied", status: "ready", phase: "ready", reason: "Definition accepted"},
+      {operation: "deferred", status: "deferred", phase: "deferred", reason: "Waiting for prerequisite milestone"},
+    ]),
+    workflowSample("FAKE-DONE", "Published and accepted", {status: "done", phase: "done", next_action: "Complete"}, [
+      {operation: "created", status: "proposed", phase: "planned", reason: "Fake task created"},
+      {operation: "readied", status: "ready", phase: "ready", reason: "Definition accepted"},
+      {operation: "claimed", status: "in-progress", phase: "working", reason: "Author completed implementation"},
+      {operation: "validated", status: "in-progress", phase: "validating", reason: "Required checks passed"},
+      {operation: "reviewed", status: "in-progress", phase: "reviewing", outcome: "passed", reason: "Independent review passed"},
+      {operation: "assessment_started", status: "in-progress", phase: "assessing", reason: "Head and prerequisites assessed"},
+      {operation: "bundle_ready", status: "in-progress", phase: "ready-for-bundle", reason: "Exact head accepted for bundle"},
+      {operation: "integrating", status: "in-progress", phase: "integrating", reason: "Bundle gates passed and publication started"},
+      {operation: "completed", status: "done", phase: "done", outcome: "passed", reason: "Publication and acceptance confirmed"},
+    ]),
   ];
-  const fakeTasks = [fakeTask];
+  const fakeHistoryByTask = new Map(fakeCases.map(sample => [sample.task.task_id, sample.history]));
+  const fakeTasks = fakeCases.map(sample => sample.task);
 
   let token = previewMode ? "local-preview" : "", project = previewMode ? "skybuild" : "", tasks = [], selectedTask = null, selectedHistory = [], cursor = null;
   let historyOffset = 0, historyHasMore = false, busy = false, epoch = 0;
@@ -589,12 +638,233 @@
     parent.append(block);
   }
 
+  const workflowPlaces = [
+    {id: "planned", label: "Planned", x: 30, y: 58}, {id: "ready", label: "Ready for work", x: 160, y: 58},
+    {id: "working", label: "Working", x: 290, y: 58}, {id: "validating", label: "Validating", x: 420, y: 58},
+    {id: "reviewing", label: "Reviewing", x: 550, y: 58}, {id: "assessing", label: "Assessing integration", x: 680, y: 58},
+    {id: "bundle", label: "Ready for bundle", x: 810, y: 58}, {id: "integrating", label: "Integrating", x: 940, y: 58},
+    {id: "done", label: "Done", x: 1070, y: 58},
+    {id: "rework", label: "Needs rework", x: 420, y: 218}, {id: "rebase", label: "Needs rebase", x: 680, y: 218},
+    {id: "blocked", label: "Blocked", x: 810, y: 218}, {id: "reassess", label: "Reassess", x: 940, y: 218},
+    {id: "deferred", label: "Deferred", x: 1070, y: 218}, {id: "superseded", label: "Superseded", x: 160, y: 218},
+    {id: "replacement", label: "Replacement", x: 290, y: 218},
+  ];
+  const workflowTransitions = [
+    {id: "T1", from: "planned", to: "ready", label: "Definition sufficient", actor: "Owner"},
+    {id: "T2", from: "ready", to: "working", label: "Admitted and claimed", actor: "Admission / worker"},
+    {id: "T3", from: "working", to: "validating", label: "Implementation result", actor: "Author"},
+    {id: "T4", from: "validating", to: "reviewing", label: "Required checks pass", actor: "Check runner"},
+    {id: "T5", from: "reviewing", to: "assessing", label: "Required reviews pass", actor: "Independent reviewer"},
+    {id: "T6", from: "assessing", to: "bundle", label: "Head and prerequisites ready", actor: "Integrator"},
+    {id: "T7", from: "bundle", to: "integrating", label: "Fixed bundle selected", actor: "Integrator"},
+    {id: "T8", from: "integrating", to: "done", label: "Publication and acceptance confirmed", actor: "Publisher / acceptance owner"},
+    {id: "T9", from: "validating", to: "rework", label: "Diagnosed code failure", actor: "Check runner / author"},
+    {id: "T10", from: "reviewing", to: "rework", label: "Actionable fixes requested", actor: "Independent reviewer"},
+    {id: "T11", from: "rework", to: "working", label: "Rework admitted", actor: "Admission / author"},
+    {id: "T12", from: "assessing", to: "rebase", label: "Base conflict or rebase required", actor: "Integrator"},
+    {id: "T13", from: "rebase", to: "validating", label: "Rebase done; evidence invalidated", actor: "Author / reconciler"},
+    {id: "T14", from: "assessing", to: "blocked", label: "Prerequisite missing or cause unknown", actor: "Resolver"},
+    {id: "T15", from: "blocked", to: "reassess", label: "Blocker resolved", actor: "Resolver"},
+    {id: "T16", from: "deferred", to: "reassess", label: "Trigger reached or owner resumes", actor: "Owner / CPU reconciler"},
+    {id: "T17", from: "assessing", to: "done", label: "Acceptance met without integration", actor: "Acceptance owner"},
+    {id: "T18", from: "integrating", to: "rework", label: "Diagnosed integration correction", actor: "Integrator / author"},
+    {id: "T19", from: "integrating", to: "assessing", label: "Candidate changed or excluded", actor: "Integrator"},
+    {id: "T20", from: "integrating", to: "integrating", label: "Gate running or publication uncertain", actor: "Integrator"},
+    {id: "T21", from: "done", to: "rework", label: "Rework requested", actor: "Owner / author"},
+    {id: "T22", from: "replacement", to: "reassess", label: "Assess replacement task", actor: "Owner / reconciler"},
+    {id: "T23", from: "reassess", to: "planned", label: "Definition incomplete", actor: "Owner / reconciler"},
+    {id: "T24", from: "reassess", to: "ready", label: "Implementation needed", actor: "Owner / reconciler"},
+    {id: "T25", from: "reassess", to: "validating", label: "Checks stale or missing", actor: "CPU reconciler"},
+    {id: "T26", from: "reassess", to: "reviewing", label: "Review stale or missing", actor: "CPU reconciler"},
+    {id: "T27", from: "reassess", to: "assessing", label: "Ready to assess integration", actor: "CPU reconciler"},
+    {id: "T28", from: "reassess", to: "blocked", label: "Known blocker remains", actor: "Resolver"},
+    {id: "T29", from: "planned", outputs: ["superseded", "replacement"], label: "Split or merge proposed work", actor: "Owner"},
+    {id: "T30", from: "ready", to: "deferred", label: "Defer until date or milestone", actor: "Owner"},
+    {id: "T31", from: "ready", to: "reassess", label: "Definition or dependency changed", actor: "Owner / reconciler"},
+    {id: "T32", from: "planned", to: "planned", label: "Planning scan proposes changes", actor: "CPU / qualified model"},
+  ];
+  const workflowPlaceNotes = {
+    planned: "Definition or acceptance still needs work.", ready: "Definition is sufficient; admission is still separate.",
+    working: "Work is admitted and claimed.", validating: "Current required checks are running or need evidence.",
+    reviewing: "Independent review is running or needs evidence.", assessing: "Check current head, prerequisites, and integration readiness.",
+    bundle: "Current head and prerequisites qualify for a fixed bundle.", integrating: "Bundle gate or publication is in progress or uncertain.",
+    done: "Configured acceptance and any required publication are confirmed.", rework: "A diagnosed correction or requested change remains.",
+    rebase: "Base conflict requires rebase; old evidence is invalidated.", blocked: "Wait condition with a named resolver; underlying phase may be retained.",
+    reassess: "Re-evaluate the earliest unmet requirement after inputs change.", deferred: "Wait for a recorded date, milestone, or owner resume.",
+    superseded: "This task was replaced; retain history and lineage.", replacement: "Linked task created by split or merge; reassess its definition.",
+  };
+  const workflowAliases = new Map([
+    ["planned", "planned"], ["proposed", "planned"], ["created", "planned"],
+    ["ready", "ready"], ["ready_for_work", "ready"], ["ready-for-work", "ready"],
+    ["working", "working"], ["claimed", "working"], ["in-progress", "working"], ["in_progress", "working"],
+    ["validating", "validating"], ["in-testing", "validating"], ["in_testing", "validating"], ["testing", "validating"], ["validated", "reviewing"],
+    ["reviewing", "reviewing"], ["in-review", "reviewing"], ["in_review", "reviewing"], ["ready-for-review", "reviewing"], ["ready_for_review", "reviewing"],
+    ["assessing", "assessing"], ["assessing-integration-readiness", "assessing"], ["assessment", "assessing"],
+    ["ready-for-bundle", "bundle"], ["ready_for_bundle", "bundle"], ["bundle-ready", "bundle"],
+    ["integrating", "integrating"], ["done", "done"], ["completed", "done"],
+    ["needs-rework", "rework"], ["needs_rework", "rework"], ["rework", "rework"],
+    ["needs-rebase", "rebase"], ["needs_rebase", "rebase"], ["rebase", "rebase"],
+    ["blocked", "blocked"], ["deferred", "deferred"], ["reassessing", "reassess"], ["reassess", "reassess"],
+    ["superseded", "superseded"], ["split", "split"], ["merged", "replacement"],
+  ]);
+
+  function workflowStage(value) {
+    if (value === null || value === undefined) return null;
+    const key = String(value).trim().toLowerCase().replaceAll(" ", "-");
+    return workflowAliases.get(key) || workflowAliases.get(key.replaceAll("-", "_")) || null;
+  }
+
+  function journalStage(event) {
+    const state = event.after_state || event.state || {};
+    const phase = workflowStage(state.phase) || workflowStage(event.phase);
+    if (phase) return phase;
+    const status = workflowStage(state.status) || workflowStage(event.status);
+    if (status) return status;
+    const operation = String(event.operation || "").toLowerCase().replaceAll("_", "-");
+    return workflowStage(operation);
+  }
+
+  function renderWorkflowTables() {
+    const placeRows = byId("workflow-place-rows");
+    const transitionRows = byId("workflow-transition-rows");
+    if (!placeRows || !transitionRows) return;
+    placeRows.replaceChildren(); transitionRows.replaceChildren();
+    for (const place of workflowPlaces) {
+      const row = document.createElement("tr");
+      for (const value of [`${place.id} · ${place.label}`, workflowPlaceNotes[place.id]]) {
+        const cell = document.createElement("td"); cell.textContent = value; row.append(cell);
+      }
+      placeRows.append(row);
+    }
+    const labels = new Map(workflowPlaces.map(place => [place.id, `${place.id} · ${place.label}`]));
+    for (const transition of workflowTransitions) {
+      const row = document.createElement("tr");
+      const outputs = transition.outputs || [transition.to];
+      const values = [labels.get(transition.from) || transition.from, `${transition.id} · ${transition.label}`,
+        outputs.map(id => labels.get(id) || id).join(" + "), transition.actor];
+      for (const value of values) { const cell = document.createElement("td"); cell.textContent = value; row.append(cell); }
+      transitionRows.append(row);
+    }
+  }
+
+  function renderWorkflowChart() {
+    const target = byId("workflow-chart");
+    target.replaceChildren();
+    renderWorkflowTables();
+    if (!selectedTask) {
+      byId("workflow-caption").textContent = "Select a task to see its journaled path through the workflow.";
+      target.textContent = "Select a task to load its workflow history.";
+      return;
+    }
+    const ordered = [...selectedHistory].sort((a, b) => Number(a.revision || 0) - Number(b.revision || 0));
+    const reached = new Set(), failed = new Set(), failedTransitions = new Set(), traversedTransitions = new Set();
+    let previousStage = null;
+    for (const event of ordered) {
+      const stage = journalStage(event);
+      if (!stage) continue;
+      reached.add(stage);
+      const outcome = String(event.outcome || event.result || event.review?.result || "").toLowerCase();
+      const transition = previousStage && workflowTransitions.find(item => item.from === previousStage && (item.to === stage || item.outputs?.includes(stage)));
+      if (transition) traversedTransitions.add(transition.id);
+      if (["failed", "failure", "rejected"].includes(outcome) || ["rework", "rebase"].includes(stage)) {
+        failed.add(stage);
+        if (transition) failedTransitions.add(transition.id);
+      }
+      previousStage = stage;
+    }
+    const currentState = [...ordered].reverse().find(event => event.after_state || event.state);
+    const state = currentState?.after_state || currentState?.state || selectedTask;
+    let current = workflowStage(state.phase) || workflowStage(state.status) || workflowStage(selectedTask.phase) || workflowStage(selectedTask.status);
+    if ((state.status === "blocked" || selectedTask.status === "blocked") && !workflowStage(state.phase)) current = "blocked";
+    if ((state.status === "deferred" || selectedTask.status === "deferred") && !workflowStage(state.phase)) current = "deferred";
+    if (state.status === "superseded" || selectedTask.status === "superseded") current = "superseded";
+    if (state.status === "done" || selectedTask.status === "done") current = "done";
+    if (current && !reached.has(current)) reached.add(current);
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 1220 310");
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-labelledby", "workflow-svg-title workflow-svg-desc");
+    const title = document.createElementNS(svg.namespaceURI, "title"); title.id = "workflow-svg-title";
+    title.textContent = `Workflow path for ${selectedTask.task_id}`;
+    const desc = document.createElementNS(svg.namespaceURI, "desc"); desc.id = "workflow-svg-desc";
+    desc.textContent = `Petri-net sketch. Circles are task-state places; bars are named action transitions. Current state: ${workflowPlaces.find(node => node.id === current)?.label || "not mapped"}.`;
+    svg.append(title, desc);
+    const defs = document.createElementNS(svg.namespaceURI, "defs");
+    const marker = document.createElementNS(svg.namespaceURI, "marker");
+    marker.id = "workflow-arrow"; marker.setAttribute("viewBox", "0 0 10 10"); marker.setAttribute("refX", "8");
+    marker.setAttribute("refY", "5"); marker.setAttribute("markerWidth", "5"); marker.setAttribute("markerHeight", "5"); marker.setAttribute("orient", "auto-start-reverse");
+    const arrow = document.createElementNS(svg.namespaceURI, "path"); arrow.setAttribute("d", "M 0 0 L 10 5 L 0 10 z"); arrow.setAttribute("fill", "context-stroke");
+    marker.append(arrow); defs.append(marker); svg.append(defs);
+    const nodeMap = new Map(workflowPlaces.map(node => [node.id, node]));
+    const transitionPositions = workflowTransitions.map(transition => {
+      const from = nodeMap.get(transition.from), outputs = transition.outputs || [transition.to];
+      const targets = outputs.map(id => nodeMap.get(id)).filter(Boolean);
+      const cx = from.x + 58, cy = from.y + 24;
+      const tx = targets.reduce((sum, node) => sum + node.x + 58, 0) / targets.length;
+      const ty = targets.reduce((sum, node) => sum + node.y + 24, 0) / targets.length;
+      const loop = transition.from === outputs[0];
+      return {...transition, x: loop ? cx + 44 : (cx + tx) / 2, y: loop ? cy - 42 : (cy + ty) / 2, outputs};
+    });
+    const transitionMap = new Map(transitionPositions.map(item => [item.id, item]));
+    const edgeGroup = document.createElementNS(svg.namespaceURI, "g"); edgeGroup.setAttribute("class", "workflow-edges");
+    const drawArc = (from, to, className) => {
+      const path = document.createElementNS(svg.namespaceURI, "path");
+      path.setAttribute("d", `M ${from.x} ${from.y} L ${to.x} ${to.y}`);
+      path.setAttribute("class", className); path.setAttribute("marker-end", "url(#workflow-arrow)"); edgeGroup.append(path);
+    };
+    for (const transition of transitionPositions) {
+      const source = nodeMap.get(transition.from);
+      const tc = {x: transition.x, y: transition.y};
+      const dx = tc.x - (source.x + 58), dy = tc.y - (source.y + 24), length = Math.hypot(dx, dy) || 1;
+      const sourcePort = {x: source.x + 58 + dx / length * 37, y: source.y + 24 + dy / length * 37};
+      const transitionPort = {x: tc.x - Math.sign(dx || 1) * 8, y: tc.y};
+      const past = traversedTransitions.has(transition.id);
+      const color = failedTransitions.has(transition.id) ? "failed" : past ? "reached" : "";
+      drawArc(sourcePort, transitionPort, `workflow-edge ${color}`);
+      for (const output of transition.outputs) {
+        const destination = nodeMap.get(output);
+        if (!destination) continue;
+        const ox = destination.x + 58 - tc.x, oy = destination.y + 24 - tc.y, olen = Math.hypot(ox, oy) || 1;
+        const actionPort = {x: tc.x + Math.sign(ox || 1) * 8, y: tc.y};
+        const placePort = {x: destination.x + 58 - ox / olen * 37, y: destination.y + 24 - oy / olen * 37};
+        drawArc(actionPort, placePort, `workflow-edge ${color}`);
+      }
+    }
+    svg.append(edgeGroup);
+    for (const transition of transitionPositions) {
+      const stateClass = failedTransitions.has(transition.id) ? "failed"
+        : traversedTransitions.has(transition.id) ? "done" : "waiting";
+      const group = document.createElementNS(svg.namespaceURI, "g"); group.setAttribute("class", `workflow-transition ${stateClass}`);
+      group.setAttribute("aria-label", `${transition.id}: ${transition.label}; actor ${transition.actor}`);
+      const rect = document.createElementNS(svg.namespaceURI, "rect");
+      rect.setAttribute("x", transition.x - 7); rect.setAttribute("y", transition.y - 19); rect.setAttribute("width", "14"); rect.setAttribute("height", "38"); rect.setAttribute("rx", "2");
+      const text = document.createElementNS(svg.namespaceURI, "text"); text.setAttribute("x", transition.x); text.setAttribute("y", transition.y + 31); text.textContent = transition.id;
+      group.append(rect, text); svg.append(group);
+    }
+    for (const node of workflowPlaces) {
+      const group = document.createElementNS(svg.namespaceURI, "g");
+      const stateClass = node.id === current ? "current" : failed.has(node.id) ? "failed" : reached.has(node.id) ? "done" : "waiting";
+      group.setAttribute("class", `workflow-place ${stateClass}`);
+      group.setAttribute("aria-label", `${node.label}: ${stateClass}`);
+      const circle = document.createElementNS(svg.namespaceURI, "circle");
+      circle.setAttribute("cx", node.x + 58); circle.setAttribute("cy", node.y + 24); circle.setAttribute("r", "36");
+      const text = document.createElementNS(svg.namespaceURI, "text");
+      text.setAttribute("x", node.x + 58); text.setAttribute("y", node.y + 72); text.textContent = node.label;
+      group.append(circle, text); svg.append(group);
+    }
+    target.append(svg);
+    const currentLabel = workflowPlaces.find(node => node.id === current)?.label || "State not mapped";
+    const waitState = selectedTask.status === "blocked" ? "BLOCKED · " : selectedTask.status === "deferred" ? "DEFERRED · " : "";
+    byId("workflow-caption").textContent = `${selectedTask.fake ? "FAKE JOURNAL · " : "Journal-derived · "}${waitState}${currentLabel}${selectedTask.blocker ? ` · ${selectedTask.blocker}` : ""}`;
+  }
+
   function renderHistory() {
     byId("history-task").textContent = selectedTask
       ? `${selectedTask.fake ? "[FAKE PREVIEW] " : ""}${selectedTask.task_id} · ${selectedTask.title}`
       : "Choose a task from Task List.";
     const list = byId("history-list");
     list.replaceChildren();
+    renderWorkflowChart();
     for (const event of selectedHistory) {
       const item = document.createElement("li");
       if (event.fake) {
@@ -633,9 +903,7 @@
     const listed = tasks.find(item => item.task_id === taskId);
     if (listed?.fake) {
       task = listed;
-      history = task.task_id === fakeTask.task_id
-        ? fakeHistory.map(event => ({...event, after_state: {...event.after_state, ...task}}))
-        : [{event_id: `FAKE-${task.task_id}-SNAPSHOT`, task_id: task.task_id, actor: "fake-preview",
+      history = fakeHistoryByTask.get(task.task_id) || [{event_id: `FAKE-${task.task_id}-SNAPSHOT`, task_id: task.task_id, actor: "fake-preview",
           operation: "previewed", revision: task.revision, created_at: "mastertodo.md snapshot",
           reason: "FAKE: Read-only task record parsed from mastertodo.md. This is not API journal history.",
           after_state: task, fake: true}];

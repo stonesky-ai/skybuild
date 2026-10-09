@@ -55,6 +55,17 @@
     </section>
 
     <section id="panel-history" class="tab-panel panel" role="tabpanel" aria-labelledby="tab-history" hidden>
+      <section class="workflow-panel" aria-labelledby="workflow-title">
+        <div class="workflow-heading"><div><h2 id="workflow-title">Task workflow</h2><p id="workflow-caption" class="hint">Select a task to see its journaled path through the workflow.</p></div>
+          <ul class="workflow-legend" aria-label="Workflow net legend"><li><span class="workflow-swatch place"></span>Place · task state</li><li><span class="workflow-swatch transition"></span>Bar · action</li><li><span class="workflow-swatch done"></span>Visited</li><li><span class="workflow-swatch current"></span>Current marking</li><li><span class="workflow-swatch waiting"></span>Not yet visited</li><li><span class="workflow-swatch failed"></span>Failed path</li></ul>
+        </div>
+        <div id="workflow-chart" class="workflow-chart" role="img" aria-label="Task workflow chart"></div>
+        <p class="workflow-note">Circles are task workflow places (phases). Bars are actions (transitions); actors name who or what may perform each action. Blocked and deferred are wait conditions; the journal may retain the underlying phase. Color records journal history, not permission to act. Creation starts in Planned. Edits, dependency or policy changes, and deferral can originate from more than one phase; the diagram shows representative guarded routes. Planning scans, stale or duplicate messages, and rejected actions can add journal evidence without changing phase. This is the proposed workflow from the architecture, not a live workflow engine.</p>
+        <details class="workflow-definitions"><summary>Show state and action definitions</summary>
+          <div class="table-scroll"><table class="workflow-table"><thead><tr><th>Places · task states</th><th>Meaning</th></tr></thead><tbody id="workflow-place-rows"></tbody></table></div>
+          <div class="table-scroll"><table class="workflow-table"><thead><tr><th>From</th><th>Action / transition</th><th>To</th><th>Responsible actor</th></tr></thead><tbody id="workflow-transition-rows"></tbody></table></div>
+        </details>
+      </section>
       <div class="section-heading"><div><h2>Task History</h2><p id="history-task" class="hint">Choose a task from Task List.</p></div><button id="refresh-history" type="button" disabled>Refresh journal</button></div>
       <p class="journal-note">Journal shows recorded revisions and evidence. Commit time, author, box, and review appear when the task record contains them.</p>
       <ol id="history-list" class="task-journal"></ol>

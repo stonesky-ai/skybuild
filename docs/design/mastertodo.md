@@ -84,6 +84,13 @@ Each task ID lives in exactly one ledger. Related ledgers: [deferred](deferred.m
 - Acceptance: the local preview launches the fixed script with nohup and prevents duplicate Dunsel starts; graceful stop creates the named flag and the worker removes/logs it before exit; immediate kill uses a Dunsel-specific `pkill` pattern and never targets unrelated processes. Disable prevents future starts without silently stopping a current run; enable permits starts again. The page refreshes status once per minute and shows enabled/running state, PID, process descendants, the matching `top` process row, latest log line and logfile modification time when stopped. Control routes accept loopback/same-origin requests only and are absent from the normal service. The UI and worker use no task API, database, model or credential.
 - Architecture: sections 2, 8–9. This local preview adapter reports component state from the process table and log; it does not grant execution admission or expand the managed worker lifecycle.
 
+## SKYBUILD-WORKTREE-CLEANER — Safely remove completed local task worktrees
+
+- Status: in-progress (owner-authorized implementation). Phase: local Workbench preview. Responsible: lead. Next action: manually review candidates and confirm only worktrees intended for removal. Priority: P5. Area: developer tooling. Dependencies: SKYBUILD-WORKBENCH-MARSHALLS-DUNSEL (local marshall controls and request guard).
+- Brief: add a one-shot Worktree Cleaner marshall to the Integrations page. Show registered worktree total. Preview only clean, unlocked, inactive task worktrees whose HEAD is contained in a local main/dev ref, or whose branch reflog proves no commit occurred after creation from main/dev. Recheck immediately before deletion; require explicit per-worktree confirmation. Remove worktree through Git without force, then delete only the exact verified local branch tip. Keep dirty, active, shared, detached and uncertain worktrees protected.
+- Acceptance: local-preview-only endpoints scan read-only, identify eligible paths with reasons, and revalidate before cleanup; confirmation removes the worktree and safely deletes its local branch when the verified tip still matches. Updated inventory excludes removed worktree and reports completion. The normal service exposes no cleaner route.
+- Architecture: sections 2 and 8–9. This local utility performs only explicitly confirmed worktree cleanup; it does not grant task execution authority.
+
 ## SKYBUILD-LEGACY-MIGRATION — Extract and port every legacy build API writer
 
 - Status: proposed.

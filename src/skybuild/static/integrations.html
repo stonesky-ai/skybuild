@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Integrations · SkyBuild Workbench</title>
+  <link rel="stylesheet" href="/workbench/assets/workbench-shell.css">
+  <link rel="stylesheet" href="/workbench/assets/integrations.css">
+  <script src="/workbench/assets/integrations.js" defer></script>
+</head>
+<body class="integrations-page">
+  <!--WORKBENCH_NAV-->
+  <header class="integrations-header">
+    <p class="eyebrow">SkyBuild · Workbench</p>
+    <h1>Integrations</h1>
+    <p>Local task worktrees, commit activity, bundle destinations, and safe cleanup candidates.</p>
+    <div class="worktree-count" aria-live="polite"><strong id="worktree-total">—</strong><span>registered worktrees</span></div>
+  </header>
+  <main class="integrations-main">
+    <nav class="integration-tabs" role="tablist" aria-label="Integration views">
+      <button id="tab-worktrees" type="button" role="tab" aria-selected="true" aria-controls="panel-worktrees">Worktrees</button>
+    </nav>
+    <section id="panel-worktrees" class="integration-panel" role="tabpanel" aria-labelledby="tab-worktrees">
+      <div class="panel-heading">
+        <div><h2>Worktrees</h2><p id="inventory-meta" class="hint">Loading local Git worktrees…</p></div>
+        <button id="refresh-worktrees" type="button">Refresh</button>
+      </div>
+      <section class="cleaner-box" aria-labelledby="cleaner-title">
+        <div class="cleaner-heading">
+          <div><h3 id="cleaner-title">Worktree Cleaner marshall</h3><p>Find merged worktrees and failed starts with no commits. Review each candidate before removal.</p></div>
+          <div class="cleaner-actions"><button id="scan-cleaner" type="button">Find cleanup candidates</button><button id="toggle-select" type="button" disabled>Select multiple</button><button id="cleanup-selected" type="button" disabled>Cleanup selected</button></div>
+        </div>
+        <p id="cleaner-status" role="status" aria-live="polite">No cleanup scan run yet.</p>
+        <div id="cleaner-results" class="cleaner-results"></div>
+        <section class="cleaner-log" aria-labelledby="cleaner-log-title"><h2 id="cleaner-log-title">Recent cleanup log</h2><p class="hint">Tail of local cleanup history with the proof recorded before each removal. Stored at <code>.workbench-state/worktree-cleaner.jsonl</code> in this checkout.</p><pre id="cleanup-log-tail">No worktrees cleaned yet.</pre></section>
+        <details class="cleaner-blocked"><summary>Protected worktrees and failed proof</summary><div id="cleaner-blocked-results" class="cleaner-results"></div></details>
+        <p class="cleaner-safety">Cleaner never force-removes files. Dirty, locked, active, detached, or uncertain worktrees stay protected. It checks process working directories.</p>
+      </section>
+      <p class="evidence-note">Commit counts and activity use commits unique to each worktree against its known PR destination, or dev-002 when no PR is known. Bundle destinations use open or closed GitHub pull request metadata when available. Rebase counts come from each worktree’s local HEAD reflog.</p>
+      <p id="inventory-status" role="status" aria-live="polite">Loading…</p>
+      <div class="table-scroll">
+        <table class="worktree-table">
+          <thead><tr>
+            <th scope="col" data-key="task"><button type="button" class="sort-button" data-key="task">Task <span aria-hidden="true"></span></button></th>
+            <th scope="col" data-key="worktree"><button type="button" class="sort-button" data-key="worktree">Worktree / branch <span aria-hidden="true"></span></button></th>
+            <th scope="col" data-key="activity"><button type="button" class="sort-button" data-key="activity">Last activity <span aria-hidden="true"></span></button></th>
+            <th scope="col" data-key="commits"><button type="button" class="sort-button" data-key="commits">Commits <span aria-hidden="true"></span></button></th>
+            <th scope="col" data-key="bundle"><button type="button" class="sort-button" data-key="bundle">Bundle / destination <span aria-hidden="true"></span></button></th>
+            <th scope="col" data-key="rebases"><button type="button" class="sort-button" data-key="rebases">Rebases <span aria-hidden="true"></span></button></th>
+            <th scope="col" data-key="state"><button type="button" class="sort-button" data-key="state">Current task state <span aria-hidden="true"></span></button></th>
+          </tr></thead>
+          <tbody id="worktree-rows"><tr><td colspan="7">Loading worktrees…</td></tr></tbody>
+        </table>
+      </div>
+      <p class="table-footnote">Only worktrees registered in this checkout are listed. A removed worktree or missing reflog cannot provide activity or rebase evidence.</p>
+    </section>
+  </main>
+</body>
+</html>
