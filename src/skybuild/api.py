@@ -1,5 +1,6 @@
 """Validated, launch-free HTTP interface to the transaction-owning Store."""
 
+import asyncio
 import json
 import re
 from typing import Annotated, Any, Literal
@@ -8,6 +9,7 @@ from fastapi import Depends, FastAPI, Header, Path, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field, StrictBool, StrictInt, StringConstraints, field_validator
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
 
 from . import __version__
@@ -370,8 +372,21 @@ def create_app(store: Any) -> FastAPI:
         return store.send_message(actor, project_id, body.model_dump(mode="json", exclude_unset=True), idem)
 
     @app.get(base + "/cord/inbox")
-    def inbox(project_id: ProjectPath, actor: Actor, limit: Limit = 100, offset: Offset = 0) -> list:
-        return store.inbox(actor, project_id, limit=limit, offset=offset)
+    async def inbox(project_id: ProjectPath, actor: Actor, request: Request, limit: Limit = 100,
+                    offset: Offset = 0, wait_seconds: Annotated[int, Query(ge=0, le=25)] = 0) -> list:
+        """Wait for a pending page without claiming, receiving, or handling messages."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + wait_seconds
+        while True:
+            messages = await run_in_threadpool(store.inbox, actor, project_id, limit=limit, offset=offset)
+            remaining = deadline - loop.time()
+            if messages or remaining <= 0 or await request.is_disconnected():
+                return messages
+            await asyncio.sleep(min(0.5, remaining))
+            # Token rotation and grant revocation also apply to outstanding waits.
+            if await request.is_disconnected():
+                return []
+            actor = await run_in_threadpool(principal, request.headers.get("authorization"))
 
     @app.post(base + "/cord/messages/{message_id}/receipt")
     def receipt(project_id: ProjectPath, message_id: RecordPath, body: Input, actor: Actor, idem: Key) -> dict:

@@ -5,6 +5,8 @@ import socket
 import subprocess
 import sys
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
 import httpx
@@ -47,6 +49,52 @@ def headers(token, key=None, revision=None):
     if revision is not None:
         result["If-Match"] = str(revision)
     return result
+
+
+def test_http_cord_wait_observes_committed_message(service, monkeypatch):
+    client, store, project, _, worker, owner_token, worker_token = service
+    read = threading.Event()
+    original = store.inbox
+    def observed(*args, **kwargs):
+        result = original(*args, **kwargs)
+        read.set()
+        return result
+    monkeypatch.setattr(store, "inbox", observed)
+    base = f"/api/v1/projects/{project}/cord"
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        waiting = executor.submit(client.get, base + "/inbox", params={"wait_seconds": 2},
+                                  headers=headers(worker_token))
+        assert read.wait(2)
+        sent = client.post(base + "/messages", headers=headers(owner_token, "wait-arrival"),
+                           json={"recipient": worker, "subject": "Pinned assignment", "body": "Data only"})
+        assert sent.status_code == 201, sent.text
+        response = waiting.result(timeout=3)
+    assert response.status_code == 200
+    assert response.json() == [sent.json()]
+    assert response.json()[0]["handled_at"] is None
+    assert client.get(base + "/inbox", headers=headers(worker_token)).json() == response.json()
+
+
+@pytest.mark.parametrize("revoke_token,status", [(True, 401), (False, 403)])
+def test_http_cord_wait_enforces_live_revocation(service, monkeypatch, revoke_token, status):
+    client, store, project, _, worker, _, worker_token = service
+    read = threading.Event()
+    original = store.inbox
+    def observed(*args, **kwargs):
+        result = original(*args, **kwargs)
+        read.set()
+        return result
+    monkeypatch.setattr(store, "inbox", observed)
+    dsn = os.environ["SKYBUILD_HTTP_TEST_DSN"]
+    registry = Store(dsn, conninfo_to_dict(dsn)["dbname"])
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        waiting = executor.submit(client.get, f"/api/v1/projects/{project}/cord/inbox",
+                                  params={"wait_seconds": 2}, headers=headers(worker_token))
+        assert read.wait(2)
+        registry.provision_principal(worker, uuid4().hex + uuid4().hex if revoke_token else worker_token,
+                                     grants={project: ["cord:read"]} if revoke_token else {})
+        response = waiting.result(timeout=3)
+    assert response.status_code == status
 
 
 def test_http_task_revision_replay_and_scope(service):

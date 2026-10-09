@@ -56,6 +56,8 @@ def main(argv: list[str] | None = None) -> int:
     provision.add_argument("--token-stdin", action="store_true")
     serve = commands.add_parser("serve", help="Serve an already migrated database on loopback")
     serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument("--host", choices=("127.0.0.1", "0.0.0.0"), default="127.0.0.1",
+                       help="Bind inside a private container; keep the published host port on loopback")
     for command in ("tasks", "get", "history"):
         view = commands.add_parser(command, help="Read tasks through the authenticated API")
         view.add_argument("project_id")
@@ -68,6 +70,8 @@ def main(argv: list[str] | None = None) -> int:
     inbox.add_argument("project_id")
     inbox.add_argument("--limit", type=int, default=100)
     inbox.add_argument("--offset", type=int, default=0)
+    inbox.add_argument("--wait-seconds", type=int, choices=range(26), default=0,
+                       help="Wait once for a pending inbox page, up to 25 seconds; never execute messages")
     for command in ("cord-send", "cord-reply"):
         message = commands.add_parser(command, help="Send a Cord JSON message from a UTF-8 file or standard input")
         message.add_argument("project_id")
@@ -136,7 +140,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command.startswith("cord-"):
             with Client(_environment("SKYBUILD_API_URL"), _environment("SKYBUILD_TOKEN")) as client:
                 if args.command == "cord-inbox":
-                    result = client.inbox(args.project_id, limit=args.limit, offset=args.offset)
+                    result = client.inbox(args.project_id, limit=args.limit, offset=args.offset,
+                                          **({"wait_seconds": args.wait_seconds} if args.wait_seconds else {}))
                 elif args.command == "cord-send":
                     result = client.send_message(args.project_id, _cord_payload(args),
                                                  idempotency_key=args.idempotency_key)
@@ -222,7 +227,7 @@ def main(argv: list[str] | None = None) -> int:
             from .api import create_app
             import uvicorn
 
-            uvicorn.run(create_app(store), host="127.0.0.1", port=args.port)
+            uvicorn.run(create_app(store), host=args.host, port=args.port)
         return 0
     except (ValueError, DomainError, ClientError) as error:
         # Driver failures may contain connection strings; never print arbitrary exceptions.
