@@ -63,6 +63,13 @@ python scripts/prepare_bundle.py \
 Git commands run at nice 10. Before fetch/worktree creation and each merge,
 available memory must be at least 8 GiB. The helper uses no model, REST endpoint,
 daemon, PostgreSQL process, test gate, publisher or runtime deployment.
+Inherited `GIT_*` environment variables other than RTK's inert `GIT_PAGER` are
+rejected before even the repository guard runs. The helper's Git subprocesses
+discard `GIT_PAGER` too. Invoke with a clean Git environment; this prevents
+repository-routing and environment-config injection from redirecting candidate
+operations. Every merge explicitly selects Git's `ort` strategy, regardless of
+inherited `pull.twohead` configuration. The candidate's actual top-level,
+common Git directory and detached HEAD are checked before each merge.
 
 The output contains `inputs.json`, `report.json`, an invocation lock and the
 retained `candidate` worktree. A successful rerun with identical frozen inputs

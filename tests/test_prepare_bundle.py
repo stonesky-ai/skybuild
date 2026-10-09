@@ -245,3 +245,89 @@ def test_repository_identity_guard_is_required(tmp_path):
     git(foreign, "init")
     with pytest.raises(bundle.RepoGuardError):
         bundle.prepare(foreign, tmp_path / "absent.json", tmp_path / "output")
+
+
+@pytest.mark.parametrize("configuration", [
+    [("pull.twohead", "ours")],
+    [("pull.twohead", "subtree")],
+    [("pull.twohead", "ours"), ("branch.dev-002.mergeOptions", "--strategy=ours")],
+    [("merge.renormalize", "true"), ("merge.defaultToUpstream", "true")],
+])
+def test_inherited_strategy_configuration_cannot_drop_member_content(repository, configuration):
+    root, manifest, output, _, member, _ = repository
+    member("one", "one.txt", "first member content\n")
+    member("two", "two.txt", "second member content\n")
+    for name, value in configuration:
+        git(root, "config", name, value)
+    source_refs = git(root, "show-ref")
+    source_index = git(root, "ls-files", "--stage")
+    result = bundle.prepare(root, manifest, output)
+    candidate = Path(result["candidate"])
+    assert (candidate / "one.txt").read_text() == "first member content\n"
+    assert (candidate / "two.txt").read_text() == "second member content\n"
+    assert result["candidate_tree"] != git(root, "rev-parse", "HEAD^{tree}")
+    assert git(root, "show-ref") == source_refs
+    assert git(root, "ls-files", "--stage") == source_index
+    assert not (root / "one.txt").exists() and not (root / "two.txt").exists()
+
+
+@pytest.mark.parametrize("names", [
+    ("GIT_DIR", "GIT_WORK_TREE"),
+    ("GIT_COMMON_DIR",),
+    ("GIT_INDEX_FILE",),
+    ("GIT_OBJECT_DIRECTORY",),
+    ("GIT_ALTERNATE_OBJECT_DIRECTORIES",),
+    ("GIT_CONFIG",),
+    ("GIT_CONFIG_SYSTEM",),
+    ("GIT_CONFIG_GLOBAL",),
+    ("GIT_CONFIG_PARAMETERS",),
+    ("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"),
+    ("GIT_NAMESPACE",),
+    ("GIT_CEILING_DIRECTORIES",),
+    ("GIT_EXEC_PATH",),
+])
+def test_git_environment_refused_before_guard_and_preserves_source(repository, monkeypatch, names):
+    root, manifest, output, _, member, _ = repository
+    member("one")
+    refs_before = git(root, "show-ref")
+    index_before = (root / ".git" / "index").read_bytes()
+    files_before = {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*")
+                    if path.is_file() and ".git" not in path.relative_to(root).parts}
+    guard_calls = []
+    monkeypatch.setattr(bundle, "verify_skybuild", lambda checkout: guard_calls.append(checkout))
+    values = {"GIT_DIR": str(root / ".git"), "GIT_WORK_TREE": str(root),
+              "GIT_COMMON_DIR": str(root / ".git"), "GIT_INDEX_FILE": str(root / ".git" / "index"),
+              "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.worktree",
+              "GIT_CONFIG_VALUE_0": str(root)}
+    with monkeypatch.context() as hostile:
+        for name in names:
+            hostile.setenv(name, values.get(name, str(root / ".git")))
+        with pytest.raises(bundle.PreparationError, match=r"Inherited GIT_\*"):
+            bundle.prepare(root, manifest, output)
+    assert not guard_calls
+    assert not output.exists()
+    assert git(root, "show-ref") == refs_before
+    assert (root / ".git" / "index").read_bytes() == index_before
+    files_after = {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*")
+                   if path.is_file() and ".git" not in path.relative_to(root).parts}
+    assert files_after == files_before
+
+
+def test_attached_candidate_refused_before_first_merge(repository, monkeypatch):
+    root, manifest, output, _, member, _ = repository
+    member("one")
+    original_git = bundle.git
+
+    def attach_candidate(checkout, *arguments):
+        result = original_git(checkout, *arguments)
+        if "worktree" in arguments and "add" in arguments:
+            git(output / "candidate", "checkout", "-b", "unexpectedly-attached")
+        return result
+
+    monkeypatch.setattr(bundle, "git", attach_candidate)
+    before = git(root, "show-ref")
+    with pytest.raises(bundle.PreparationError, match="no longer detached"):
+        bundle.prepare(root, manifest, output)
+    assert not (output / "candidate" / "one.txt").exists()
+    assert git(root, "rev-parse", "HEAD") == json.loads(manifest.read_text())["base_sha"]
+    assert "refs/heads/dev-002" in before

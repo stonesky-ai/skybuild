@@ -19,10 +19,20 @@ class PreparationError(RuntimeError):
     """The supplied frozen inputs cannot produce a reusable candidate."""
 
 
+def _git_environment() -> dict[str, str]:
+    # Reject before the shared repository guard, which uses inherited environment.
+    # This also covers Git's expandable config/environment injection interfaces.
+    # RTK sets GIT_PAGER; it cannot route the guard's nonpaged read commands.
+    if any(name.startswith("GIT_") and name != "GIT_PAGER" for name in os.environ):
+        raise PreparationError("Inherited GIT_* environment is unsupported; use a clean Git environment")
+    clean = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+    return dict(clean, GIT_TERMINAL_PROMPT="0")
+
+
 def git(root: Path, *arguments: str) -> str:
     process = subprocess.run(["nice", "-n", "10", "git", *arguments], cwd=root,
                              text=True, capture_output=True, timeout=120,
-                             env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+                             env=_git_environment())
     if process.returncode:
         raise PreparationError(f"git {arguments[0]} failed: "
                                + (process.stdout + process.stderr)[-12000:])
@@ -109,7 +119,17 @@ def _reserve() -> None:
         raise PreparationError("Available memory is below the required 8 GiB reserve")
 
 
+def _assert_candidate(root: Path, candidate: Path) -> None:
+    if (git(candidate, "rev-parse", "--show-toplevel") != str(candidate)
+            or git(candidate, "rev-parse", "--path-format=absolute", "--git-common-dir")
+            != git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")):
+        raise PreparationError("Candidate no longer belongs to the owned repository")
+    if git(candidate, "rev-parse", "--abbrev-ref", "HEAD") != "HEAD":
+        raise PreparationError("Candidate is no longer detached")
+
+
 def prepare(checkout: Path, manifest: Path, output: Path) -> dict:
+    _git_environment()
     root = verify_skybuild(checkout)
     _clean(root)
     inputs = frozen_inputs(root, manifest.resolve())
@@ -157,17 +177,11 @@ def prepare(checkout: Path, manifest: Path, output: Path) -> dict:
                 if (previous.get("fingerprint") != fingerprint or previous.get("inputs") != inputs
                         or previous.get("candidate") != str(candidate)):
                     raise PreparationError("Candidate report does not match frozen ownership")
-                if (git(candidate, "rev-parse", "--show-toplevel") != str(candidate)
-                        or git(candidate, "rev-parse", "--path-format=absolute", "--git-common-dir")
-                        != git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")):
-                    raise PreparationError("Candidate no longer belongs to the owned repository")
+                _assert_candidate(root, candidate)
                 _clean(candidate)
                 if (git(candidate, "rev-parse", "HEAD") != previous["candidate_head"]
                         or git(candidate, "rev-parse", "HEAD^{tree}") != previous["candidate_tree"]):
                     raise PreparationError("Candidate changed since preparation")
-                # Detached ownership is checked without treating expected exit 1 as an error.
-                if git(candidate, "rev-parse", "--abbrev-ref", "HEAD") != "HEAD":
-                    raise PreparationError("Candidate is no longer detached")
                 for item in [inputs["target"], *inputs["members"]]:
                     git(candidate, "merge-base", "--is-ancestor", item["sha"], "HEAD")
                 return previous
@@ -183,10 +197,11 @@ def prepare(checkout: Path, manifest: Path, output: Path) -> dict:
                 str(candidate), inputs["target"]["sha"])
             for member in inputs["members"]:
                 _reserve()
+                _assert_candidate(root, candidate)
                 git(candidate, "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false",
                     "-c", "rerere.enabled=false",
                     "-c", "user.name=SkyBuild bundle preparation", "-c", "user.email=candidate@localhost",
-                    "merge", "--no-ff", "--no-edit", member["sha"])
+                    "merge", "--strategy=ort", "--no-ff", "--no-edit", member["sha"])
                 git(candidate, "merge-base", "--is-ancestor", member["sha"], "HEAD")
                 paths = git(candidate, "diff", "--name-only", "-z", "--no-renames",
                             inputs["target"]["sha"] + "..." + member["sha"]).split("\0")[:-1]
