@@ -1,6 +1,6 @@
 # SkyBuild current tasks
 
-Authority: Git-backed planning ledger, revision A39, 2026-10-09. API cutover has not occurred. See [architecture section 4](architecture.md#4-temporary-task-authority-and-transition) for the lifecycle. Order below is proposed priority. The owner authorizes repository implementation and isolated validation toward the parallel MVP; live authority cutover, unqualified inference, paid starts and deployment retain separate controls.
+Authority: Git-backed planning ledger, revision A40, 2026-10-09. API cutover has not occurred. See [architecture section 4](architecture.md#4-temporary-task-authority-and-transition) for the lifecycle. Order below is proposed priority. The owner authorizes repository implementation and isolated validation toward the parallel MVP; live authority cutover, unqualified inference, paid starts and deployment retain separate controls.
 
 Each task ID lives in exactly one ledger. Related ledgers: [deferred](deferred.md), [alreadydone](alreadydone.md). These are new SkyBuild project records, not updates to the old SkyKeep queue. Until claims/fencing exist, coordinate any later authorized execution manually and serially.
 
@@ -110,10 +110,24 @@ Each task ID lives in exactly one ledger. Related ledgers: [deferred](deferred.m
 - A30 refinement: union required checks; qualify remote head/base enforcement and trusted result origin. Preserve unresolved publication intents across owner changes/timeouts. Journal every member's inclusion, exclusion, failure and final outcome with a known next action. Adapt mergeprep facts/reasons rather than reproducing its old Git/JSON authority.
 - Architecture: sections 2, 5, 8–10, 13 and 15. Plan: area 5a. ADRs: [0028](../adr/integration.md#adr-0028), [0030](../adr/integration.md#adr-0030), [0031](../adr/tasks.md#adr-0031). No PR/branch merge is performed during planning.
 
+## SKYBUILD-MVP-ROUTE-QUALIFICATION — Qualify one author and reviewer route
+
+- Status: ready. Priority: high. Area: MVP qualification. Dependencies: SKYBUILD-BOOTSTRAP, SKYBUILD-TASK-CUTOVER, applicable SKYBUILD-EXECUTION-CONTROLS slice, and SKYBUILD-SHARED-INFERENCE for the selected profile.
+- Brief: qualify one permitted author/reviewer route for representative SkyBuild feature tasks. Treat authoring and review as separate sessions and capabilities. Reuse shared-inference and Brodson evidence where applicable, but do not treat synthetic tests, a model-list response, or three bounded coding examples as proof of review competence. Define the task classes, evidence, budget/usage constraints, independent checks, correction limits and stop conditions. Do not access credentials, call a live model, or incur usage without the separate authority required by the selected profile.
+- Acceptance: an immutable qualification record identifies exact profile/build/template and reviewed source; shows separate author and reviewer sessions; includes representative feature authoring and adversarial exact-head review with independently checked findings; demonstrates applicable authorization, usage/budget enforcement, context and cutoff limits, bounded correction and failure handling; records evidence and limitations. Unsupported task classes remain unavailable. A synthetic-only result is explicitly marked as preparation, not qualification.
+- Architecture: sections 8–9 and 13–16. Plan: MVP delivery target and area 5.
+
+## SKYBUILD-MVP-CONTROLLER-UPDATE — Prove compatible controller update and recovery
+
+- Status: ready. Priority: high. Area: MVP acceptance. Dependencies: SKYBUILD-BOOTSTRAP, applicable SKYBUILD-EXECUTION-CONTROLS and SKYBUILD-KEEPER-ADOPTION slices; use SKYBUILD-BUNDLED-INTEGRATION's accepted candidate evidence.
+- Brief: define and implement a bounded update path for the accepted SkyBuild controller that preserves its task/API authority while it builds and validates a compatible candidate. Prove recovery from candidate failure without silently downgrading incompatible schema, losing task/Cord history, replacing credentials, or creating a second writer. Use an isolated disposable runtime; no live deployment or authority switch is implied.
+- Acceptance: on a pinned accepted controller and isolated database, build and identify a candidate from an accepted published bundle; keep the accepted controller responsive during candidate preparation; verify protocol/schema compatibility before promotion; exercise a failed candidate and the documented manual recovery path; confirm one writable authority, preserved task/Cord state, explicit candidate/controller identities and an actionable journal record. Recovery evidence names any limits and cannot claim production disaster recovery. No live deployment occurs under this task.
+- Architecture: sections 3, 7–10 and 16. Plan: MVP delivery target, steps 5–6.
+
 ## SKYBUILD-SELF-BUILD-MVP — Rebuild and extend SkyBuild with parallel workers
 
 - Status: proposed. Priority: high. Area: MVP acceptance.
-- Dependencies: useful SKYBUILD-BOOTSTRAP and SKYBUILD-TASK-CUTOVER, minimal SKYBUILD-TASK-WORKBENCH, applicable SKYBUILD-EXECUTION-CONTROLS and SKYBUILD-KEEPER-ADOPTION slices, SKYBUILD-BUNDLED-INTEGRATION and one qualified author/reviewer profile. SKYBUILD-SHARED-INFERENCE applies only when selected; disjoint SkyBuild authority does not require unrelated legacy migration.
+- Dependencies: useful SKYBUILD-BOOTSTRAP and SKYBUILD-TASK-CUTOVER, minimal SKYBUILD-TASK-WORKBENCH, applicable SKYBUILD-EXECUTION-CONTROLS and SKYBUILD-KEEPER-ADOPTION slices, SKYBUILD-BUNDLED-INTEGRATION, SKYBUILD-MVP-ROUTE-QUALIFICATION and SKYBUILD-MVP-CONTROLLER-UPDATE. SKYBUILD-SHARED-INFERENCE applies only when selected; disjoint SkyBuild authority does not require unrelated legacy migration.
 - Brief: compose existing components into a running self-building product, rather than stopping at the launch-free API. Keep the accepted controller usable while at least two independent task attempts build features in isolated owned worktrees.
 - Acceptance: independently review, combine, test and publish accepted changes; demonstrate a compatible controlled update and one rework/interruption recovery with durable next action and no duplicate work. Shared budgets, slots, model cutoff and stable-controller authority hold. Dedicated complexity/size gates and GUI, all provider variants, complete extraction and cloud/HA features do not block this milestone.
 - A34 follow-on: once this milestone runs, prioritize SKYBUILD-QUALITY-GATES and SKYBUILD-QUALITY-DEBT-CLEANUP, then start the serialized SKYBUILD-REPO-REVIEW-CADENCE. These post-MVP tasks do not change this milestone's acceptance.
