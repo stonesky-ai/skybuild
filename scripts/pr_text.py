@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish literal UTF-8 PR text with gh; body writes are read back exactly."""
+"""Publish literal UTF-8 PR text through GitHub's REST API."""
 import argparse
 import json
 from pathlib import Path
@@ -7,8 +7,9 @@ import subprocess
 from _repo_guard import RepoGuardError, verify_skybuild
 
 
-def run(argv, cwd=None):
-    return subprocess.run(argv, cwd=cwd, check=True, text=True, capture_output=True).stdout
+def run(argv, cwd=None, input_text=None):
+    return subprocess.run(argv, cwd=cwd, input=input_text, check=True,
+                          text=True, capture_output=True).stdout
 
 
 def main(argv=None):
@@ -27,15 +28,21 @@ def main(argv=None):
         raise RuntimeError("Expected an explicit SkyBuild checkout with stonesky-ai/skybuild origin")
     # read_bytes avoids newline conversion and validates UTF-8 before publication.
     expected = args.file.read_bytes().decode("utf-8")
-    repo = ["--repo", "stonesky-ai/skybuild"]
-    action = "edit" if args.action == "body" else "comment"
-    run(["gh", "pr", action, str(args.pr), *repo, "--body-file", str(args.file.resolve())], checkout)
+    payload = json.dumps({"body": expected}, ensure_ascii=False)
     if args.action == "body":
-        actual = json.loads(run(["gh", "pr", "view", str(args.pr), *repo, "--json", "body"], checkout))["body"]
+        endpoint = f"repos/stonesky-ai/skybuild/pulls/{args.pr}"
+        run(["gh", "api", "--method", "PATCH", endpoint, "--input", "-"], checkout, payload)
+        actual = json.loads(run(["gh", "api", endpoint], checkout))["body"]
         if actual != expected:
             raise RuntimeError("Published PR body does not match the UTF-8 file")
+    else:
+        endpoint = f"repos/stonesky-ai/skybuild/issues/{args.pr}/comments"
+        actual = json.loads(run(["gh", "api", "--method", "POST", endpoint,
+                                 "--input", "-"], checkout, payload))["body"]
+        if actual != expected:
+            raise RuntimeError("Published PR comment does not match the UTF-8 file")
     print(json.dumps({"ok": True, "action": args.action, "pr": args.pr,
-                      "verified": args.action == "body"}, separators=(",", ":")))
+                      "verified": True}, separators=(",", ":")))
 
 
 if __name__ == "__main__":

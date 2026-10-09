@@ -25,12 +25,14 @@ def test_pr_body_preserves_literal_utf8_and_newlines(tmp_path, monkeypatch, caps
     body.write_bytes(text.encode())
     calls = []
     monkeypatch.setattr(module, "verify_skybuild", lambda path: path)
-    def fake_run(argv, cwd=None):
-        calls.append(argv)
-        return json.dumps({"body": text}) if "view" in argv else ""
+    def fake_run(argv, cwd=None, input_text=None):
+        calls.append((argv, input_text))
+        return json.dumps({"body": text})
     monkeypatch.setattr(module, "run", fake_run)
     module.main(["body", "--pr", "12", "--file", str(body), "--checkout", str(tmp_path)])
-    assert calls[0][-2:] == ["--body-file", str(body)]
+    assert calls[0][0] == ["gh", "api", "--method", "PATCH", "repos/stonesky-ai/skybuild/pulls/12", "--input", "-"]
+    assert json.loads(calls[0][1]) == {"body": text}
+    assert calls[1][0] == ["gh", "api", "repos/stonesky-ai/skybuild/pulls/12"]
     assert len(calls) == 2
     assert json.loads(capsys.readouterr().out)["verified"]
 
@@ -40,9 +42,27 @@ def test_pr_body_mismatch_fails(tmp_path, monkeypatch):
     body = tmp_path / "body.md"
     body.write_text("expected\n")
     monkeypatch.setattr(module, "verify_skybuild", lambda path: path)
-    monkeypatch.setattr(module, "run", lambda argv, cwd=None: '{"body":"wrong"}')
+    monkeypatch.setattr(module, "run", lambda argv, cwd=None, input_text=None: '{"body":"wrong"}')
     with pytest.raises(RuntimeError, match="does not match"):
         module.main(["body", "--pr", "12", "--file", str(body), "--checkout", str(tmp_path)])
+
+
+def test_pr_comment_uses_rest_and_verifies_response(tmp_path, monkeypatch, capsys):
+    module = load("pr_text")
+    body = tmp_path / "comment.md"
+    body.write_text("Summary\n\n- feature\n")
+    calls = []
+    monkeypatch.setattr(module, "verify_skybuild", lambda path: path)
+
+    def fake_run(argv, cwd=None, input_text=None):
+        calls.append((argv, input_text))
+        return input_text
+
+    monkeypatch.setattr(module, "run", fake_run)
+    module.main(["comment", "--pr", "12", "--file", str(body), "--checkout", str(tmp_path)])
+    assert calls[0][0] == ["gh", "api", "--method", "POST", "repos/stonesky-ai/skybuild/issues/12/comments", "--input", "-"]
+    assert json.loads(calls[0][1]) == {"body": body.read_text()}
+    assert json.loads(capsys.readouterr().out)["verified"]
 
 
 @pytest.mark.parametrize("change", ["gate_failure", "base_changed", "wrong_initial_base", "pass"])
