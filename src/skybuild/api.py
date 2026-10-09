@@ -87,6 +87,19 @@ class TaskAction(Input):
     milestone_task_id: Identifier | None = None
 
 
+class ClaimLease(Input):
+    lease_seconds: Annotated[StrictInt, Field(ge=1, le=300)] = 60
+
+
+class ClaimRenew(ClaimLease):
+    fence: Annotated[StrictInt, Field(ge=1, lt=2**63)]
+
+
+class ClaimRelease(Input):
+    fence: Annotated[StrictInt, Field(ge=1, lt=2**63)]
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4096)]
+
+
 class SplitChild(Input):
     task_id: Identifier
     title: ShortText
@@ -298,6 +311,31 @@ def create_app(store: Any) -> FastAPI:
     def complete_task(project_id: ProjectPath, task_id: RecordPath, body: dict[str, Any],
                       actor: Actor, idem: Key, expected: Revision) -> dict:
         return store.complete_task(actor, project_id, task_id, body, expected, idem)
+
+    @app.post(base + "/tasks/{task_id}/claim")
+    def claim_task(project_id: ProjectPath, task_id: RecordPath, body: ClaimLease,
+                   actor: Actor, idem: Key, expected: Revision) -> dict:
+        return store.claim_task(actor, project_id, task_id, expected, idem, lease_seconds=body.lease_seconds)
+
+    @app.post(base + "/tasks/{task_id}/claim/renew")
+    def renew_claim(project_id: ProjectPath, task_id: RecordPath, body: ClaimRenew,
+                    actor: Actor, idem: Key, expected: Revision) -> dict:
+        return store.renew_claim(actor, project_id, task_id, body.fence, expected, idem, lease_seconds=body.lease_seconds)
+
+    @app.post(base + "/tasks/{task_id}/claim/release")
+    def release_claim(project_id: ProjectPath, task_id: RecordPath, body: ClaimRelease,
+                      actor: Actor, idem: Key, expected: Revision) -> dict:
+        return store.release_claim(actor, project_id, task_id, body.fence, expected, idem, reason=body.reason)
+
+    @app.post(base + "/tasks/{task_id}/claim/reconcile")
+    def reconcile_claim(project_id: ProjectPath, task_id: RecordPath, body: ClaimRelease,
+                        actor: Actor, idem: Key, expected: Revision) -> dict:
+        return store.reconcile_claim(actor, project_id, task_id, body.fence, expected, idem, reason=body.reason)
+
+    @app.get(base + "/tasks/{task_id}/claim/history")
+    def claim_history(project_id: ProjectPath, task_id: RecordPath, actor: Actor,
+                      limit: Limit = 100, offset: Offset = 0) -> list:
+        return store.claim_history(actor, project_id, task_id, limit=limit, offset=offset)
 
     @app.post(base + "/tasks/{task_id}/split")
     def split_task(project_id: ProjectPath, task_id: RecordPath, body: TaskSplit,
