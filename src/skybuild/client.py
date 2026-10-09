@@ -99,6 +99,14 @@ class Client:
         return self.request("POST", self._path(project_id, f"tasks/{self._segment(task_id)}/actions/{action}"),
                             body=body, revision=expected_revision, idempotency_key=idempotency_key)
 
+    def split_task(self, project_id: str, task_id: str, body: dict, *, expected_revision: int,
+                   idempotency_key: str | None = None) -> dict:
+        return self.request("POST", self._path(project_id, f"tasks/{self._segment(task_id)}/split"),
+                            body=body, revision=expected_revision, idempotency_key=idempotency_key)
+
+    def task_lineage(self, project_id: str, task_id: str) -> list[dict]:
+        return self.request("GET", self._path(project_id, f"tasks/{self._segment(task_id)}/lineage"))
+
     def reconcile_due_deferrals(self, project_id: str, *, limit: int = 100, offset: int = 0,
                                 idempotency_key: str | None = None) -> dict:
         return self.request("POST", self._path(project_id, "tasks/reconcile-due"), body={},

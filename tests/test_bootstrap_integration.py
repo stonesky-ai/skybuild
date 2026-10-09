@@ -91,6 +91,25 @@ def test_http_manual_task_action_preserves_reason_and_revision(service):
                        headers=headers(owner_token, "invalid-date", 2)).status_code == 422
 
 
+def test_http_split_exposes_lineage_and_refuses_stale_revision(service):
+    client, _, project, _, _, owner_token, _ = service
+    base = f"/api/v1/projects/{project}/tasks"
+    created = client.post(base, json={"task_id": "parent", "title": "Parent", "description": "Two scopes",
+                                      "acceptance_criteria": ["first", "second"]},
+                          headers=headers(owner_token, "parent-create"))
+    assert created.status_code == 201
+    body = {"reason": "Separate independent scopes", "incoming": {}, "children": [
+        {"task_id": "first", "title": "First", "description": "First scope", "acceptance_criteria": ["first"], "dependencies": []},
+        {"task_id": "second", "title": "Second", "description": "Second scope", "acceptance_criteria": ["second"], "dependencies": []},
+    ]}
+    response = client.post(base + "/parent/split", json=body, headers=headers(owner_token, "parent-split", 1))
+    assert response.status_code == 200, response.text
+    assert response.json()["source"]["status"] == "superseded"
+    assert client.post(base + "/parent/split", json=body, headers=headers(owner_token, "parent-split", 1)).json() == response.json()
+    assert len(client.get(base + "/parent/lineage", headers=headers(owner_token)).json()) == 2
+    assert client.post(base + "/parent/split", json=body, headers=headers(owner_token, "stale-split", 1)).status_code == 409
+
+
 def test_http_cord_handling_and_transactional_reply(service):
     client, _, project, owner, worker, owner_token, worker_token = service
     base = f"/api/v1/projects/{project}/cord"

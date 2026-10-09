@@ -147,6 +147,88 @@ def test_due_reconciliation_pages_past_first_hundred(store, actors):
     assert second == {'scanned': 1, 'reassessed': ['due-later'], 'next_offset': None}
 
 
+def test_split_rewires_explicit_dependencies_and_keeps_lineage(store, actors):
+    project, people = actors
+    owner = people['owner']
+    create(store, owner, project, 'base')
+    source = create(store, owner, project, 'source', dependencies=['base'], acceptance_criteria=['one', 'two'], priority=7)
+    create(store, owner, project, 'dependent', dependencies=['source'])
+    children = [
+        {'task_id': 'child-one', 'title': 'First scope', 'description': 'First brief',
+         'acceptance_criteria': ['one'], 'dependencies': ['base']},
+        {'task_id': 'child-two', 'title': 'Second scope', 'description': 'Second brief',
+         'acceptance_criteria': ['two'], 'dependencies': []},
+    ]
+    result = store.split_task(owner, project, 'source', children,
+                              {'dependent': ['child-one', 'child-two']}, 'Separate acceptance', 1, 'split-key')
+    assert result['source']['status'] == 'superseded'
+    assert {child['task_id'] for child in result['children']} == {'child-one', 'child-two'}
+    assert all(child['priority'] == source['priority'] for child in result['children'])
+    assert result['rewired'][0]['dependencies'] == ['child-one', 'child-two']
+    assert result['rewired'][0]['phase'] == 'reassess'
+    assert store.split_task(owner, project, 'source', children,
+                            {'dependent': ['child-one', 'child-two']}, 'Separate acceptance', 1, 'split-key') == result
+    assert len(store.task_lineage(owner, project, 'source')) == 2
+    assert len(store.task_lineage(owner, project, 'child-one')) == 1
+    assert [row['operation'] for row in store.task_history(owner, project, 'source')] == ['created', 'split']
+    assert [row['operation'] for row in store.task_history(owner, project, 'dependent')] == ['created', 'dependency_rewired']
+    error('workflow_conflict', lambda: store.update_task(owner, project, 'source', {'title': 'Rewrite history'}, 2, 'edit-source'))
+    with store._connection() as connection:
+        with pytest.raises(psycopg.Error):
+            connection.execute("DELETE FROM task_lineage WHERE source_task_id = 'source'")
+
+
+def test_split_refuses_incomplete_map_and_cycle_without_partial_rows(store, actors):
+    project, people = actors
+    owner = people['owner']
+    create(store, owner, project, 'source')
+    create(store, owner, project, 'dependent', dependencies=['source'])
+    children = [
+        {'task_id': 'first', 'title': 'First', 'description': 'First', 'acceptance_criteria': ['one'], 'dependencies': []},
+        {'task_id': 'second', 'title': 'Second', 'description': 'Second', 'acceptance_criteria': ['two'], 'dependencies': []},
+    ]
+    error('workflow_conflict', lambda: store.split_task(owner, project, 'source', children, {}, 'Missing map', 1, 'missing-map'))
+    assert {task['task_id'] for task in store.list_tasks(owner, project)} == {'source', 'dependent'}
+    cyclic = [{**children[0], 'dependencies': ['dependent']}, children[1]]
+    error('dependency_cycle', lambda: store.split_task(owner, project, 'source', cyclic,
+                                                       {'dependent': ['first']}, 'Cycle', 1, 'cycle'))
+    assert {task['task_id'] for task in store.list_tasks(owner, project)} == {'source', 'dependent'}
+    assert len(store.task_history(owner, project, 'source')) == 1
+    error('validation', lambda: store.split_task(owner, project, 'source',
+                                                  [{**children[0], 'dependencies': 123}, children[1]],
+                                                  {'dependent': ['first']}, 'Invalid dependencies', 1, 'invalid-list'))
+
+
+def test_split_refuses_reworked_started_task(store, actors):
+    project, people = actors
+    owner = people['owner']
+    create(store, owner, project, 'started')
+    with store._connection() as connection:
+        connection.execute("UPDATE tasks SET status = 'in-progress', phase = 'working' WHERE project_id = %s AND task_id = 'started'", (project,))
+    store.task_action(owner, project, 'started', 'rework', {'reason': 'Interrupted work'}, 1, 'rework-started')
+    children = [
+        {'task_id': 'a', 'title': 'A', 'description': 'A', 'acceptance_criteria': ['a'], 'dependencies': []},
+        {'task_id': 'b', 'title': 'B', 'description': 'B', 'acceptance_criteria': ['b'], 'dependencies': []},
+    ]
+    error('workflow_conflict', lambda: store.split_task(owner, project, 'started', children, {}, 'Split', 2, 'unsafe-split'))
+    assert len(store.task_lineage(owner, project, 'started')) == 0
+
+
+def test_split_refuses_blocked_dependent_until_effect_reconciliation_exists(store, actors):
+    project, people = actors
+    owner = people['owner']
+    create(store, owner, project, 'source')
+    create(store, owner, project, 'dependent', dependencies=['source'])
+    store.task_action(owner, project, 'dependent', 'reassess', {'reason': 'Unknown prior work'}, 1, 'block-dependent')
+    children = [
+        {'task_id': 'a', 'title': 'A', 'description': 'A', 'acceptance_criteria': ['a'], 'dependencies': []},
+        {'task_id': 'b', 'title': 'B', 'description': 'B', 'acceptance_criteria': ['b'], 'dependencies': []},
+    ]
+    error('workflow_conflict', lambda: store.split_task(owner, project, 'source', children,
+                                                        {'dependent': ['a']}, 'Split', 1, 'blocked-dependent'))
+    assert len(store.task_lineage(owner, project, 'source')) == 0
+
+
 def error(code, call):
     with pytest.raises(DomainError) as caught:
         call()
@@ -159,7 +241,7 @@ def test_identity_guard_and_readiness(store):
     assert error('database_identity', wrong.migrate).status_code == 503
     error('database_identity', wrong.readiness)
     store.migrate()
-    assert store.readiness() == {'ready': True, 'schema_version': 3}
+    assert store.readiness() == {'ready': True, 'schema_version': 4}
 
 
 def test_upgrade_001_to_002_preserves_existing_records_and_is_repeatable(store):
@@ -183,7 +265,7 @@ def test_upgrade_001_to_002_preserves_existing_records_and_is_repeatable(store):
         error('schema_mismatch', upgraded.readiness)
         upgraded.migrate()
         upgraded.migrate()
-        assert upgraded.readiness() == {'ready': True, 'schema_version': 3}
+        assert upgraded.readiness() == {'ready': True, 'schema_version': 4}
         with upgraded._connection() as connection:
             assert connection.execute('SELECT * FROM tasks').fetchone() == task_before
             assert connection.execute('SELECT * FROM messages').fetchone() == message_before

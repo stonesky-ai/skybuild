@@ -27,7 +27,7 @@ ShortText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1
 LongText = Annotated[str, StringConstraints(min_length=1, max_length=32_768)]
 WorkflowText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 OptionalText = Annotated[str, StringConstraints(max_length=4096)]
-Status = Literal["proposed", "ready", "in-progress", "blocked", "deferred", "done"]
+Status = Literal["proposed", "ready", "in-progress", "blocked", "deferred", "done", "superseded"]
 IdList = Annotated[list[Identifier], Field(max_length=100)]
 TextList = Annotated[list[Annotated[str, StringConstraints(min_length=1, max_length=4096)]], Field(max_length=100)]
 ProjectPath = Annotated[Identifier, Path()]
@@ -85,6 +85,22 @@ class TaskAction(Input):
     responsible: WorkflowText | None = None
     until: AwareDatetime | None = None
     milestone_task_id: Identifier | None = None
+
+
+class SplitChild(Input):
+    task_id: Identifier
+    title: ShortText
+    description: LongText
+    acceptance_criteria: TextList
+    dependencies: IdList
+    responsible: WorkflowText | None = None
+    next_action: OptionalText | None = None
+
+
+class TaskSplit(Input):
+    reason: OptionalText
+    children: Annotated[list[SplitChild], Field(min_length=2, max_length=10)]
+    incoming: dict[str, IdList]
 
 
 class MessageCreate(Input):
@@ -267,6 +283,17 @@ def create_app(store: Any) -> FastAPI:
                     actor: Actor, idem: Key, expected: Revision) -> dict:
         return store.task_action(actor, project_id, task_id, action,
                                  body.model_dump(mode="json", exclude_unset=True), expected, idem)
+
+    @app.post(base + "/tasks/{task_id}/split")
+    def split_task(project_id: ProjectPath, task_id: RecordPath, body: TaskSplit,
+                   actor: Actor, idem: Key, expected: Revision) -> dict:
+        return store.split_task(actor, project_id, task_id,
+                                [child.model_dump(mode="json", exclude_unset=True) for child in body.children],
+                                body.incoming, body.reason, expected, idem)
+
+    @app.get(base + "/tasks/{task_id}/lineage")
+    def task_lineage(project_id: ProjectPath, task_id: RecordPath, actor: Actor) -> list[dict]:
+        return store.task_lineage(actor, project_id, task_id)
 
     @app.post(base + "/tasks/reconcile-due")
     def reconcile_due_deferrals(project_id: ProjectPath, actor: Actor, idem: Key,

@@ -20,7 +20,7 @@ TASK_FIELDS = frozenset({
     'title', 'description', 'status', 'priority', 'dependencies', 'acceptance_criteria',
     'architecture_refs', 'assignee', 'phase', 'next_action', 'blocker', 'responsible', 'metadata',
 })
-STATUSES = frozenset({'proposed', 'ready', 'in-progress', 'blocked', 'deferred', 'done'})
+STATUSES = frozenset({'proposed', 'ready', 'in-progress', 'blocked', 'deferred', 'done', 'superseded'})
 TASK_SELECT = ('SELECT *, ARRAY(SELECT dependency_id FROM task_dependencies d WHERE '
                'd.project_id = tasks.project_id AND d.task_id = tasks.task_id ORDER BY dependency_id) AS dependencies '
                'FROM tasks ')
@@ -266,6 +266,17 @@ class Store:
             _invalid('Unfinished tasks need a next action or blocker')
         return values
 
+    def _replace_task(self, connection, principal, project_id, task_id, before, changes, *, operation, reason):
+        values = self._task_values(changes, before)
+        columns = [key for key in values if key != 'dependencies']
+        parameters = [Jsonb(values[key]) if key == 'metadata' else values[key] for key in columns]
+        assignments = sql.SQL(', ').join(sql.SQL('{} = %s').format(sql.Identifier(key)) for key in columns)
+        connection.execute(sql.SQL('UPDATE tasks SET {}, revision = revision + 1, updated_at = now() WHERE project_id = %s AND task_id = %s').format(assignments), (*parameters, project_id, task_id))
+        self._dependencies(connection, project_id, task_id, values['dependencies'])
+        after = self._task(connection, project_id, task_id)
+        self._journal(connection, principal, after, before, operation=operation, reason=reason)
+        return after
+
     @staticmethod
     def _dependencies(connection, project_id, task_id, dependencies):
         if task_id in dependencies:
@@ -421,19 +432,133 @@ class Store:
                 before = self._task(connection, project_id, task_id, lock=True)
                 if before['revision'] != expected_revision:
                     raise DomainError('stale_revision', 'Task revision has changed', 409)
+                if before['status'] == 'superseded':
+                    raise DomainError('workflow_conflict', 'Superseded task cannot be edited or resumed', 409)
                 body = changes(before, connection)
-                values = self._task_values(body, before)
-                columns = [key for key in values if key != 'dependencies']
-                parameters = [Jsonb(values[key]) if key == 'metadata' else values[key] for key in columns]
-                assignments = sql.SQL(', ').join(sql.SQL('{} = %s').format(sql.Identifier(key)) for key in columns)
-                connection.execute(sql.SQL('UPDATE tasks SET {}, revision = revision + 1, updated_at = now() WHERE project_id = %s AND task_id = %s').format(assignments), (*parameters, project_id, task_id))
-                self._dependencies(connection, project_id, task_id, values['dependencies'])
-                after = self._task(connection, project_id, task_id)
-                self._journal(connection, principal, after, before,
-                              operation=operation.removeprefix('task.action.') if operation.startswith('task.action.') else None,
-                              reason=reason)
-                return after
+                return self._replace_task(connection, principal, project_id, task_id, before, body,
+                                          operation=operation.removeprefix('task.action.') if operation.startswith('task.action.') else 'updated',
+                                          reason=reason or 'Task updated')
             return self._idempotent(connection, principal, project_id, operation, idempotency_key, payload, mutation)
+
+    def split_task(self, principal, project_id, task_id, children: list[dict], incoming: dict[str, list[str]],
+                   reason: str, expected_revision: int, idempotency_key: str) -> dict:
+        """Replace one inactive task with explicit children and incoming edge mapping."""
+        _identifier(task_id, 'task_id')
+        reason = _text(reason, 'reason', 4096)
+        if type(expected_revision) is not int or expected_revision < 1:
+            _invalid('Split requires a positive expected revision')
+        if not isinstance(children, list) or not 2 <= len(children) <= 10 or not isinstance(incoming, dict):
+            _invalid('Split requires 2–10 children and an incoming dependency map')
+        allowed = {'task_id', 'title', 'description', 'acceptance_criteria', 'dependencies', 'responsible', 'next_action'}
+        child_ids = []
+        for child in children:
+            _body(child, allowed)
+            if not {'task_id', 'title', 'description', 'acceptance_criteria', 'dependencies'} <= set(child):
+                _invalid('Each child needs identity, scope, acceptance and dependency allocation')
+            child_ids.append(_identifier(child['task_id'], 'child task_id'))
+            if not child['acceptance_criteria']:
+                _invalid('Each child needs acceptance criteria')
+            self._task_values({key: value for key, value in child.items() if key != 'task_id'})
+            if task_id in child['dependencies']:
+                _invalid('A child cannot depend on its superseded source')
+        if len(set(child_ids)) != len(child_ids) or task_id in child_ids:
+            _invalid('Child IDs must be new and distinct')
+        for dependent, replacement_ids in incoming.items():
+            _identifier(dependent, 'dependent task_id')
+            if (not isinstance(replacement_ids, list) or not replacement_ids or len(replacement_ids) != len(set(replacement_ids))
+                    or any(item not in child_ids for item in replacement_ids)):
+                _invalid('Incoming dependencies need explicit child IDs')
+        payload = {'task_id': task_id, 'children': children, 'incoming': incoming,
+                   'reason': reason, 'revision': expected_revision}
+        _body(payload, set(payload))
+        with self._connection() as connection:
+            principal = self._authorize(connection, principal, project_id, 'tasks:write')
+            def mutation():
+                self._graph_lock(connection, project_id)
+                source = self._task(connection, project_id, task_id, lock=True)
+                if source['revision'] != expected_revision:
+                    raise DomainError('stale_revision', 'Task revision has changed', 409)
+                if source['status'] != 'proposed' or self._has_started_history(connection, project_id, task_id):
+                    raise DomainError('workflow_conflict', 'Split requires a proposed task with no execution history', 409)
+                dependents = connection.execute('SELECT task_id FROM task_dependencies WHERE project_id = %s AND dependency_id = %s ORDER BY task_id', (project_id, task_id)).fetchall()
+                if set(incoming) != {row['task_id'] for row in dependents}:
+                    raise DomainError('workflow_conflict', 'Incoming dependency mapping is incomplete or stale', 409)
+                for dependent in incoming:
+                    state = self._task(connection, project_id, dependent, lock=True)
+                    if state['status'] != 'proposed' or self._has_started_history(connection, project_id, dependent):
+                        raise DomainError('workflow_conflict', 'Cannot rewire a dependent unless proposed with no execution history', 409)
+                for child_id in child_ids:
+                    if connection.execute('SELECT 1 FROM tasks WHERE project_id = %s AND task_id = %s', (project_id, child_id)).fetchone():
+                        raise DomainError('conflict', 'Child task ID already exists', 409)
+                allocated_dependencies = {dependency for child in children for dependency in child['dependencies']}
+                if not set(source['dependencies']) <= allocated_dependencies:
+                    _invalid('Split cannot drop source prerequisites')
+                allocated_acceptance = {criterion for child in children for criterion in child['acceptance_criteria']}
+                if not set(source['acceptance_criteria']) <= allocated_acceptance:
+                    _invalid('Split cannot drop source acceptance criteria')
+                created = []
+                for child in children:
+                    child_id = child['task_id']
+                    values = self._task_values({key: value for key, value in child.items() if key != 'task_id'})
+                    values['priority'] = source['priority']
+                    values['metadata'] = {'_skybuild_workflow': {'generation': 0, 'split_from': task_id}}
+                    columns = [key for key in values if key != 'dependencies']
+                    parameters = [Jsonb(values[key]) if key == 'metadata' else values[key] for key in columns]
+                    connection.execute(sql.SQL('INSERT INTO tasks (project_id, task_id, {}) VALUES (%s, %s, {})').format(
+                        sql.SQL(', ').join(map(sql.Identifier, columns)), sql.SQL(', ').join(sql.Placeholder() for _ in columns)),
+                        (project_id, child_id, *parameters))
+                for child in children:
+                    self._dependencies(connection, project_id, child['task_id'], child['dependencies'])
+                    after = self._task(connection, project_id, child['task_id'])
+                    self._journal(connection, principal, after, operation='created', reason=f'Split from {task_id}: {reason}')
+                    connection.execute('INSERT INTO task_lineage (event_id, project_id, source_task_id, target_task_id, action) VALUES (%s, %s, %s, %s, %s)',
+                                       (uuid4(), project_id, task_id, child['task_id'], 'split'))
+                    created.append(after)
+                rewired = []
+                for dependent, replacement_ids in incoming.items():
+                    before = self._task(connection, project_id, dependent, lock=True)
+                    metadata = dict(before['metadata'])
+                    workflow = dict(metadata.get('_skybuild_workflow', {}))
+                    workflow['generation'] = workflow.get('generation', 0) + 1
+                    workflow.update({'last_action': 'dependency_rewired', 'reason': f'Split of {task_id}'})
+                    workflow.pop('deferral', None)
+                    metadata['_skybuild_workflow'] = workflow
+                    dependencies = sorted((set(before['dependencies']) - {task_id}) | set(replacement_ids))
+                    rewired.append(self._replace_task(connection, principal, project_id, dependent, before,
+                        {'dependencies': dependencies, 'status': 'blocked', 'phase': 'reassess',
+                         'blocker': f'Dependency {task_id} was split', 'next_action': 'Reassess replacement dependencies',
+                         'metadata': metadata}, operation='dependency_rewired', reason=f'Split of {task_id}: {reason}'))
+                metadata = dict(source['metadata'])
+                workflow = dict(metadata.get('_skybuild_workflow', {}))
+                workflow['generation'] = workflow.get('generation', 0) + 1
+                workflow.update({'last_action': 'split', 'reason': reason, 'replaced_by': child_ids})
+                workflow.pop('deferral', None)
+                metadata['_skybuild_workflow'] = workflow
+                superseded = self._replace_task(connection, principal, project_id, task_id, source,
+                    {'status': 'superseded', 'phase': 'superseded', 'blocker': 'Replaced by split tasks',
+                     'next_action': 'Review linked replacement tasks', 'metadata': metadata},
+                    operation='split', reason=reason)
+                return {'source': superseded, 'children': created, 'rewired': rewired}
+            return self._idempotent(connection, principal, project_id, 'task.split', idempotency_key, payload, mutation)
+
+    def task_lineage(self, principal, project_id, task_id) -> list[dict]:
+        _identifier(task_id, 'task_id')
+        with self._connection() as connection:
+            self._authorize(connection, principal, project_id, 'tasks:read')
+            self._task(connection, project_id, task_id)
+            return _public(connection.execute(
+                'SELECT * FROM task_lineage WHERE project_id = %s AND (source_task_id = %s OR target_task_id = %s) '
+                'ORDER BY created_at, event_id', (project_id, task_id, task_id),
+            ).fetchall())
+
+    @staticmethod
+    def _has_started_history(connection, project_id, task_id):
+        return bool(connection.execute(
+            "SELECT 1 FROM task_journal WHERE project_id = %s AND task_id = %s AND ("
+            "before_state->>'status' IN ('in-progress', 'done') OR after_state->>'status' IN ('in-progress', 'done') "
+            "OR before_state->>'phase' IN ('working', 'integrating') OR after_state->>'phase' IN ('working', 'integrating')) LIMIT 1",
+            (project_id, task_id),
+        ).fetchone())
 
     def task_history(self, principal, project_id, task_id, *, limit=100, offset=0) -> list[dict]:
         self._page(limit, offset)
