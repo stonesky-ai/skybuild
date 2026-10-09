@@ -1,5 +1,6 @@
 """Launch-free effect registry against task-owned disposable PostgreSQL."""
 from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from uuid import uuid4
 
 import psycopg
@@ -121,3 +122,66 @@ def test_effect_writes_require_admin_and_markdown_authority_guard(store, actors)
     with pytest.raises(DomainError) as caught:
         intent(store, people['owner'], project, task)
     assert caught.value.code == 'authority'
+
+
+def test_edit_waiting_on_intent_commit_cannot_publish(store, actors, monkeypatch):
+    project, people = actors
+    owner = people['owner']
+    task = create(store, owner, project)
+    registered, release = Event(), Event()
+    original = store._effect_journal
+    def pause(connection, principal, after, before, reason):
+        original(connection, principal, after, before, reason)
+        if after['project_id'] == project and after['state'] == 'intent':
+            registered.set()
+            assert release.wait(3)
+    monkeypatch.setattr(store, '_effect_journal', pause)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        registering = pool.submit(intent, store, owner, project, task)
+        assert registered.wait(3)
+        editing = pool.submit(store.update_task, owner, project, task['task_id'],
+                              {'description': 'Racing edit'}, 1, 'edit')
+        release.set()
+        registering.result(timeout=5)
+        with pytest.raises(DomainError, match='unresolved effect'):
+            editing.result(timeout=5)
+    assert store.get_task(owner, project, task['task_id']) == task
+
+
+def test_edit_committed_before_intent_rejects_stale_definition(store, actors):
+    project, people = actors
+    owner = people['owner']
+    original = create(store, owner, project)
+    changed = store.update_task(owner, project, original['task_id'], {'description': 'New definition'}, 1, 'edit')
+    with pytest.raises(DomainError) as caught:
+        intent(store, owner, project, original)
+    assert caught.value.code == 'stale_revision'
+    assert intent(store, owner, project, changed)['task_revision'] == changed['revision']
+
+
+@pytest.mark.parametrize('effect_on', ['source', 'dependent'])
+@pytest.mark.parametrize('action', ['split', 'merge'])
+def test_structural_guards_cover_sources_and_rewired_dependents(store, actors, effect_on, action):
+    project, people = actors
+    owner = people['owner']
+    a = create(store, owner, project, 'a', acceptance_criteria=['A'])
+    b = create(store, owner, project, 'b', acceptance_criteria=['B'])
+    dependent = create(store, owner, project, 'dependent', dependencies=['a'])
+    effect = intent(store, owner, project, a if effect_on == 'source' else dependent)
+    store.observe_effect(owner, project, effect['operation_id'], 'unknown', 'Uncertain start', 'unknown')
+    with pytest.raises(DomainError, match='unresolved effect'):
+        if action == 'split':
+            children = [{'task_id': name, 'title': name, 'description': name, 'acceptance_criteria': ['A'],
+                         'architecture_refs': [], 'dependencies': []} for name in ['c', 'd']]
+            store.split_task(owner, project, 'a', children, {'dependent': ['c', 'd']}, 'Separate', 1, 'split')
+        else:
+            store.merge_tasks(owner, project, ['a', 'b'],
+                {'task_id': 'c', 'title': 'C', 'description': 'A and B', 'acceptance_criteria': ['A', 'B'],
+                 'architecture_refs': [], 'dependencies': []}, ['dependent'], {'a': 1, 'b': 1}, 'Combine', 'merge')
+    assert store.get_task(owner, project, 'a') == a
+    assert store.get_task(owner, project, 'b') == b
+    assert store.get_task(owner, project, 'dependent') == dependent
+    assert store.task_lineage(owner, project, 'a') == []
+    with pytest.raises(DomainError) as caught:
+        store.get_task(owner, project, 'c')
+    assert caught.value.code == 'not_found'
