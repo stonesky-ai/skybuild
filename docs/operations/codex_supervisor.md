@@ -20,7 +20,8 @@ If the supervisor dies, a saved session ID without a terminal event is still
 uncertain and always parks. Cron cannot infer that the prior model turn ended
 or that its effects are safe to repeat. A crash between launch intent and
 recorded process identity also parks; it cannot launch a second process from
-the same request.
+the same request. Even a saved `turn.completed` event does not count as
+completion when the supervisor missed the process exit status.
 The resume command applies only to a recorded `codex exec` session. It cannot
 transparently take over the current interactive Codex app thread. It never uses
 `--last`, which could select another session.
@@ -63,6 +64,20 @@ python3 /home/kevin/my_code/skybuild/scripts/skybuild_codex_supervisor.py prepar
 Prepare refuses an active request and a persistent `STOP` file. A new run
 requires a new explicit `prepare` after prior run reaches a terminal state.
 No default prompt exists.
+An uncertain parked request cannot be overwritten by `prepare`. Inspect the
+worktree, Git state, live processes, logs, and any external effects first.
+After verified reconciliation, archive the request with:
+
+```bash
+python3 /home/kevin/my_code/skybuild/scripts/skybuild_codex_supervisor.py clear \
+  --state-dir /home/kevin/my_code/skybuild-codex-run \
+  --request-id skybuild-overnight-001 --ack-uncertain-effects
+```
+
+`clear` refuses a visible Codex process in the checkout and preserves the
+request, prompts, and bounded event log under `archive/`. The acknowledgment
+records the operator's verification; the script cannot prove every external
+effect itself. Keep the archive when preparing the next run.
 
 By default, an abnormal Codex exit also parks. For work confined to reversible
 local files, with no network writes, deployment, publication, or other external

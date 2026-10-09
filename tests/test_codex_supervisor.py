@@ -54,6 +54,15 @@ def test_prepare_rejects_duplicate_and_expired_request(tmp_path: Path):
         supervisor.prepare(args, state_file)
 
 
+def test_prepare_cannot_overwrite_parked_uncertain_request(tmp_path: Path):
+    _, state_file, args = prepared(tmp_path)
+    state = supervisor.load_json(state_file)
+    state["phase"] = "parked"
+    supervisor.atomic_json(state_file, state)
+    with pytest.raises(ValueError, match="active"):
+        supervisor.prepare(args, state_file)
+
+
 def test_tick_waits_for_memory_and_live_codex(tmp_path: Path, monkeypatch):
     checkout, state_file, _ = prepared(tmp_path)
     monkeypatch.setattr(supervisor, "available_gib", lambda: 9.9)
@@ -81,8 +90,27 @@ def test_completed_run_is_not_replayed(tmp_path: Path, monkeypatch):
                  session_id="12345678-1234-1234-1234-123456789abc", terminal_event="turn.completed")
     supervisor.atomic_json(state_file, state)
     monkeypatch.setattr(supervisor, "same_child", lambda value: False)
-    assert supervisor.tick(state_file, Path("/no/codex")) == "completed"
+    assert supervisor.tick(state_file, Path("/no/codex")) == "parked"
     assert supervisor.load_json(state_file)["runs"] == 1
+
+
+def test_clear_requires_ack_and_archives_parked_evidence(tmp_path: Path, monkeypatch):
+    _, state_file, args = prepared(tmp_path)
+    state = supervisor.load_json(state_file)
+    state["phase"] = "parked"
+    supervisor.atomic_json(state_file, state)
+    (state_file.parent / "codex.jsonl").write_text("evidence\n")
+    with pytest.raises(ValueError, match="ack-uncertain-effects"):
+        supervisor.clear_parked(state_file, args.request_id, False)
+    monkeypatch.setattr(supervisor, "same_child", lambda value: False)
+    monkeypatch.setattr(supervisor, "competing_codex", lambda path: [123])
+    with pytest.raises(ValueError, match="still visible"):
+        supervisor.clear_parked(state_file, args.request_id, True)
+    monkeypatch.setattr(supervisor, "competing_codex", lambda path: [])
+    assert supervisor.clear_parked(state_file, args.request_id, True) == "cleared"
+    cleared = supervisor.load_json(state_file)
+    assert Path(cleared["archive"]).joinpath("request.json").exists()
+    assert Path(cleared["archive"]).joinpath("codex.jsonl").read_text() == "evidence\n"
 
 
 def test_low_memory_stops_only_recorded_child(tmp_path: Path, monkeypatch):

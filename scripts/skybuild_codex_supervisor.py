@@ -14,7 +14,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import selectors
+import shutil
 import signal
 import subprocess
 import sys
@@ -168,8 +170,10 @@ def prepare(args: argparse.Namespace, state_file: Path) -> str:
         raise ValueError("STOP file is present; remove it deliberately before preparing a new request")
     if state_file.exists():
         previous = load_json(state_file)
-        if previous.get("phase") not in {"completed", "failed", "expired", "parked", "stopped", "memory_stop"}:
+        if previous.get("phase") not in {"completed", "failed", "expired", "stopped", "memory_stop", "cleared"}:
             raise ValueError("existing request is active; do not overwrite it")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", args.request_id):
+        raise ValueError("request ID must contain 1-64 safe filename characters")
     checkout = args.checkout.resolve(strict=True)
     if not (checkout / ".git").exists():
         raise ValueError("checkout must be a Git worktree")
@@ -221,15 +225,30 @@ def inspect_previous(state: dict, stop_file: Path) -> str | None:
             state["phase"] = "memory_stop"
             return "memory_stop"
         return "running"
-    if state.get("terminal_event") == "turn.completed":
-        state["phase"] = "completed"
-        return "completed"
-    if state.get("terminal_event") == "turn.failed":
-        state["phase"] = "failed"
-        return "failed"
     state["phase"] = "parked"
-    state["reason"] = "supervisor did not observe child exit; effects are uncertain"
+    state["reason"] = "supervisor did not observe child exit code; effects are uncertain"
     return "parked"
+
+
+def clear_parked(state_file: Path, request_id: str | None, acknowledged: bool) -> str:
+    """Archive uncertain evidence after explicit operator reconciliation."""
+    if not acknowledged:
+        raise ValueError("clear requires --ack-uncertain-effects after verifying prior effects")
+    state = load_json(state_file)
+    if state.get("phase") != "parked" or request_id != state.get("request_id"):
+        raise ValueError("clear requires matching parked request ID")
+    if same_child(state) or competing_codex(Path(state["checkout"])):
+        raise ValueError("Codex process still visible in checkout; do not clear")
+    archive = state_file.parent / "archive" / (request_id + "-" + uuid.uuid4().hex)
+    archive.mkdir(mode=0o700, parents=True)
+    for name in ("request.json", "prompt.txt", "resume.txt", "codex.jsonl"):
+        source = state_file.parent / name
+        if source.exists():
+            target = archive / name
+            shutil.copyfile(source, target)
+            target.chmod(0o600)
+    atomic_json(state_file, {"phase": "cleared", "request_id": request_id, "archive": str(archive)})
+    return "cleared"
 
 
 def run_child(state: dict, state_file: Path, codex: Path) -> str:
@@ -343,7 +362,7 @@ def tick(state_file: Path, codex: Path) -> str:
     if not state_file.exists():
         return "idle: no prepared request"
     state = load_json(state_file)
-    if state["phase"] in {"completed", "failed", "expired", "parked", "stopped", "memory_stop"}:
+    if state["phase"] in {"completed", "failed", "expired", "parked", "stopped", "memory_stop", "cleared"}:
         return state["phase"]
     if state["phase"] in {"resume_pending", "launching"}:
         state["phase"] = "parked"
@@ -372,7 +391,7 @@ def tick(state_file: Path, codex: Path) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("prepare", "tick", "status", "probe"))
+    parser.add_argument("command", choices=("prepare", "tick", "status", "probe", "clear"))
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--checkout", type=Path)
     parser.add_argument("--prompt-file", type=Path)
@@ -380,6 +399,7 @@ def main() -> int:
     parser.add_argument("--deadline-utc")
     parser.add_argument("--request-id")
     parser.add_argument("--reversible-local-only", action="store_true")
+    parser.add_argument("--ack-uncertain-effects", action="store_true")
     parser.add_argument("--codex", type=Path, default=Path("/home/kevin/.local/bin/codex"))
     args = parser.parse_args()
     state_dir = args.state_dir.resolve()
@@ -405,6 +425,11 @@ def main() -> int:
                 parser.error("probe needs --checkout or a prepared request")
             print(json.dumps({"checkout": str(checkout), "codex_pids": competing_codex(checkout),
                               "available_gib": round(available_gib(), 2)}, sort_keys=True))
+            return 0
+        if args.command == "clear":
+            if not state_file.exists():
+                parser.error("clear needs an existing parked request")
+            print(clear_parked(state_file, args.request_id, args.ack_uncertain_effects))
             return 0
         if args.command == "prepare":
             if not all((args.checkout, args.prompt_file, args.resume_file, args.deadline_utc, args.request_id)):
