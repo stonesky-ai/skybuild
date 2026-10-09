@@ -47,6 +47,7 @@ def dispatch_assignment(relay_assignment, tmp_path, client_factory, project="sky
 def test_dispatcher_message_is_accepted_by_worker(relay_assignment, tmp_path):
     repo, _, brief = relay_assignment
     sender = FakeClient()
+    sender.task["task_id"] = brief["task_id"]
     sent = dispatch_assignment(relay_assignment, tmp_path, lambda *_args, **_kwargs: sender)
     body = sender.calls[0][1]
     from test_manual_cord import FakeClient as WorkerClient
@@ -72,13 +73,13 @@ def test_authenticated_assignment_and_result_roundtrip(relay_assignment, restric
     admin.provision_principal(owner, owner_token, is_admin=True,
                               grants={project: ["tasks:read", "tasks:write"]})
     principal = admin.authenticate(owner_token)
-    admin.create_task(principal, project,
-                      {"task_id": brief["task_id"], "title": "Manual relay task",
-                       "description": "API-bound assignment fixture",
-                       "acceptance_criteria": ["Current task status and revision are checked"]},
-                      "create-relay-task")
-    admin.task_action(principal, project, brief["task_id"], "ready",
-                      {"reason": "Test fixture approval"}, 1, "ready-relay-task")
+    task = admin.create_task(principal, project,
+                             {"task_id": brief["task_id"], "title": "Manual relay task",
+                              "description": "API-bound assignment fixture",
+                              "acceptance_criteria": ["Current task status and revision are checked"]},
+                             "create-relay-task")
+    task = admin.task_action(principal, project, brief["task_id"], "ready",
+                             {"reason": "Test fixture approval"}, task["revision"], "ready-relay-task")
     dispatcher_token, worker_token = uuid4().hex + uuid4().hex, uuid4().hex + uuid4().hex
     admin.provision_principal(dispatcher, dispatcher_token, grants={project: scopes})
     admin.provision_principal(worker, worker_token, grants={project: scopes})
@@ -97,6 +98,9 @@ def test_authenticated_assignment_and_result_roundtrip(relay_assignment, restric
             receive_assignment(receiver, project, repo, worker=worker, dispatcher=dispatcher,
                                message_id=sent["message_id"], destination=destination)
             assignment = json.loads(destination.read_text())
+            assert assignment["schema"] == "manual-work-v2"
+            assert assignment["task_revision"] == task["revision"]
+            assert assignment["task_status"] == "ready"
             worktree = tmp_path / "worker"
             _git(repo, "worktree", "add", "-b", assignment["branch"], str(worktree), assignment["base_sha"])
             result = {"schema": "manual-work-v1", "assignment_id": assignment["assignment_id"],
