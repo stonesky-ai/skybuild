@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 from .client import Client, ClientError
@@ -238,6 +239,9 @@ def main(argv=None):
     args = _parse_args(argv)
     failure = {'ok': False, 'reason': 'Result collection failed; preserve local evidence'}
     try:
+        if (threading.current_thread() is not threading.main_thread() or
+                threading.active_count() != 1 or signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL):
+            raise ResultError('Collection requires standalone default child reaping')
         if not 1 <= args.duration <= 120 or not 1 <= args.max_pages <= 10:
             raise ResultError("Collection bounds are invalid")
         cutoff = datetime.fromisoformat(args.approval_until.replace('Z', '+00:00'))
@@ -252,6 +256,7 @@ def main(argv=None):
                                      stdin=subprocess.DEVNULL, stdout=captured,
                                      stderr=subprocess.DEVNULL, start_new_session=True)
             expired = False
+            leader_reserved = True
             try:
                 # Observe exit without reaping: the owned session/group identifier
                 # stays reserved until all final group signals have been sent.
@@ -261,24 +266,30 @@ def main(argv=None):
                         expired = True
                         break
                     time.sleep(min(0.01, remaining))
+            except ChildProcessError:
+                # An unexpected reaper invalidates group ownership. Never signal
+                # a numeric identifier after its leader has been reaped.
+                leader_reserved = False
+                raise ResultError('Collector child ownership is unknown') from None
             finally:
-                # Run on success, failure and interruption, including an inner Git
-                # timeout that leaves an SSH descendant after its caller exits.
-                try:
-                    os.killpg(child.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                try:
-                    time.sleep(_TERMINATION_GRACE / 2)
-                finally:
+                if leader_reserved:
+                    # Run on success, failure and interruption, including an inner Git
+                    # timeout that leaves an SSH descendant after its caller exits.
                     try:
-                        os.killpg(child.pid, signal.SIGKILL)
+                        os.killpg(child.pid, signal.SIGTERM)
                     except ProcessLookupError:
                         pass
                     try:
-                        child.wait(timeout=_TERMINATION_GRACE / 2)
-                    except subprocess.TimeoutExpired:
-                        pass  # Kernel completion is unknown; never wait forever.
+                        time.sleep(_TERMINATION_GRACE / 2)
+                    finally:
+                        try:
+                            os.killpg(child.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        try:
+                            child.wait(timeout=_TERMINATION_GRACE / 2)
+                        except subprocess.TimeoutExpired:
+                            pass  # Kernel completion is unknown; never wait forever.
             if expired:
                 failure.update(receipt_state='unknown',
                                child_termination='confirmed' if child.poll() is not None else 'unknown',

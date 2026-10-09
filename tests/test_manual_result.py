@@ -337,7 +337,14 @@ def test_cli_supervisor_bounds_progressing_http_body(collection, monkeypatch):
         argv = cli_args(collection)
         argv[argv.index('--url') + 1] = 'http://127.0.0.1:' + str(server.server_port)
         started = time.monotonic()
-        assert module.main(argv) == 2
+        # Server thread belongs to the test process, not the standalone CLI.
+        script = ('import sys; sys.path.insert(0,' +
+                  repr(str(module.Path(module.__file__).resolve().parents[1])) +
+                  '); import skybuild.manual_result as m; m._CHILD_CODE=' + repr(code) +
+                  '; raise SystemExit(m.main(' + repr(argv) + '))')
+        outcome = subprocess.run([module.sys.executable, '-c', script],
+                                 capture_output=True, timeout=2)
+        assert outcome.returncode == 2
         assert time.monotonic() - started < 1.8
         assert reached.is_set()  # An unrelated preflight error cannot satisfy this test.
     finally:
@@ -426,3 +433,29 @@ def test_cli_all_exit_paths_clean_owned_group_and_preserve_unrelated_child(colle
                 os.kill(owned, 9)  # Test-owned cleanup if the regression fails.
             except ProcessLookupError:
                 pass
+
+
+@pytest.mark.parametrize('handler', ['ignore', 'custom'])
+def test_cli_refuses_incompatible_child_reaping_before_launch(collection, monkeypatch, handler):
+    import signal
+    import skybuild.manual_result as module
+    previous = signal.getsignal(signal.SIGCHLD)
+    try:
+        signal.signal(signal.SIGCHLD, signal.SIG_IGN if handler == 'ignore' else lambda *args: None)
+        monkeypatch.setattr(module.subprocess, 'Popen', lambda *args, **kwargs: pytest.fail('Child launched'))
+        monkeypatch.setattr(module.os, 'killpg', lambda *args: pytest.fail('Group signaled'))
+        assert module.main(cli_args(collection)) == 2
+    finally:
+        signal.signal(signal.SIGCHLD, previous)
+
+
+def test_cli_unexpected_reaping_never_signals_unreserved_group(collection, monkeypatch):
+    import os
+    import skybuild.manual_result as module
+    monkeypatch.setattr(module, '_CHILD_CODE', 'pass')
+    def externally_reaped(kind, pid, flags):
+        os.waitpid(pid, 0)
+        raise ChildProcessError('synthetic external reaping')
+    monkeypatch.setattr(os, 'waitid', externally_reaped)
+    monkeypatch.setattr(os, 'killpg', lambda *args: pytest.fail('Unreserved group signaled'))
+    assert module.main(cli_args(collection)) == 2
