@@ -34,4 +34,6 @@ button:disabled { opacity: .5; cursor: default; }
 .history { padding-left: 1.4rem; }
 .history li { margin-bottom: .8rem; }
 .history pre { white-space: pre-wrap; font-size: .8rem; max-height: 24rem; overflow: auto; background: #f3f7f8; padding: .75rem; }
+#structure-preview { white-space: pre-wrap; overflow-wrap: anywhere; background: #f3f7f8; padding: .75rem; max-height: 20rem; overflow: auto; }
+#structure-form details pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f3f7f8; padding: .75rem; }
 @media (max-width: 800px) { .workspace { grid-template-columns: 1fr; } header, main { padding: 1rem; } .field-pair { grid-template-columns: 1fr; gap: 0; } }

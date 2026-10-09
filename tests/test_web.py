@@ -63,7 +63,7 @@ def test_browser_source_excludes_persistent_token_storage_and_html_injection_sin
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node is needed for the browser handler regression")
-def test_edit_handler_preserves_dependency_and_project_identifier_whitespace():
+def test_browser_handlers_preserve_ids_and_preview_structural_mapping():
     script = Path(__file__).parents[1] / "src" / "skybuild" / "static" / "workbench.js"
     # Execute the actual event handlers against a small DOM/transport boundary.
     harness = r'''
@@ -94,11 +94,15 @@ const get = id => {
 global.document = { getElementById: get, createElement: tag => new Element(tag) };
 const task = {task_id: " task ", title: "Title", description: "Brief", status: "proposed",
   phase: "triage", next_action: "Review", blocker: null, responsible: "owner",
-  dependencies: [" dep ", "dep"], revision: 7};
+  dependencies: [" dep ", "dep"], acceptance_criteria: ["one", "two"], architecture_refs: ["ref"], revision: 7};
+const other = {...task, task_id: "other", revision: 3, acceptance_criteria: ["three"], dependencies: ["dep"]};
 const requests = [];
 global.fetch = async (url, options) => {
   requests.push({url, options});
-  const data = url.includes("/history?") ? [] : url.includes("tasks?") ? [task] : task;
+  const data = url.endsWith("/split") ? {children: [{task_id: "child"}]} :
+    url.endsWith("/tasks/merge") ? {target: {task_id: "combined"}} :
+    url.includes("/history?") ? [] : url.includes("tasks?") ? [task] :
+    url.endsWith("/tasks/other") ? other : task;
   return {ok: true, status: 200, json: async () => data};
 };
 vm.runInThisContext(fs.readFileSync(process.argv[1], "utf8"));
@@ -116,6 +120,41 @@ async function run() {
   assert.equal(patches[0].options.headers["If-Match"], "7");
   assert.ok(patches[0].url.endsWith("/tasks/%20task%20"));
   assert.ok(requests.every(request => request.url.startsWith("/api/v1/projects/%20project%20/")));
+  const plan = {reason: "Separate scope", children: [
+    {task_id: " child ", title: "One", description: "One", acceptance_criteria: ["one"], dependencies: [" dep "]},
+    {task_id: "child-two", title: "Two", description: "Two", acceptance_criteria: ["two"], dependencies: []}
+  ], incoming: {" dependent ": [" child "]}};
+  get("structure-kind").value = "split";
+  get("structure-plan").value = JSON.stringify(plan);
+  get("preview-structure").listeners.click(); await tick();
+  assert.match(get("structure-preview").textContent, /dependent/);
+  assert.match(get("structure-preview").textContent, /" dependent ": \[\s*" child "\s*\]/);
+  assert.match(get("structure-preview").textContent, /"description": "One"/);
+  assert.equal(get("apply-structure").disabled, false);
+  get("structure-plan").value = JSON.stringify({...plan, incoming: {" dependent ": ["child-two"]}});
+  get("structure-plan").listeners.input();
+  assert.equal(get("apply-structure").disabled, true);
+  get("structure-form").listeners.submit({preventDefault() {}}); await tick();
+  assert.equal(requests.filter(request => request.url.endsWith("/split")).length, 0);
+  get("structure-plan").value = JSON.stringify(plan);
+  get("preview-structure").listeners.click(); await tick();
+  get("structure-form").listeners.submit({preventDefault() {}}); await tick();
+  const splits = requests.filter(request => request.url.endsWith("/tasks/%20task%20/split"));
+  assert.equal(splits.length, 1);
+  assert.deepEqual(JSON.parse(splits[0].options.body).incoming, {" dependent ": [" child "]});
+  assert.equal(splits[0].options.headers["If-Match"], "7");
+  const merge = {reason: "Combine scope", source_task_ids: [" task ", "other"],
+    expected_revisions: {" task ": 7, other: 3},
+    target: {task_id: "combined", title: "Combined", description: "All scope",
+      acceptance_criteria: ["one", "two", "three"], architecture_refs: ["ref"], dependencies: [" dep ", "dep"]},
+    incoming_dependents: [" dependent "]};
+  get("structure-kind").value = "merge";
+  get("structure-plan").value = JSON.stringify(merge);
+  get("preview-structure").listeners.click(); await tick();
+  assert.match(get("structure-preview").textContent, /"three"/);
+  assert.match(get("structure-preview").textContent, /"description": "All scope"/);
+  assert.match(get("structure-preview").textContent, /" dependent "/);
+  assert.equal(get("apply-structure").disabled, false);
 }
 run().catch(error => { console.error(error); process.exitCode = 1; });
 '''

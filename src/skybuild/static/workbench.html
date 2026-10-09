@@ -75,6 +75,15 @@
           <p class="hint">Deferral requires one trigger. Actions record a reason and leave work blocked for reassessment; they do not authorize execution.</p>
           <button id="submit-action" type="submit" disabled>Record action</button>
         </form>
+        <form id="structure-form">
+          <h3>Split or merge tasks</h3>
+          <p class="hint">Use exact task IDs and allocation arrays. Preview the plan before applying it. Only proposed tasks with no execution history can be replaced.</p>
+          <label for="structure-kind">Operation</label><select id="structure-kind" disabled><option value="split">Split selected task</option><option value="merge">Merge selected task with others</option></select>
+          <label for="structure-plan">Plan (JSON)</label><textarea id="structure-plan" rows="11" maxlength="65536" spellcheck="false" disabled></textarea>
+          <details><summary>Plan fields and example</summary><p>Split: reason, children (2–10 new task definitions), and incoming (each dependent ID mapped to child IDs). Merge: reason, source_task_ids, expected_revisions, one new target definition, and incoming_dependents. Each new task needs title, description, acceptance_criteria, dependencies and any source architecture_refs.</p><pre>{"reason":"Separate scope","children":[{"task_id":"CHILD-A","title":"First scope","description":"Full brief","acceptance_criteria":["Check A"],"architecture_refs":[],"dependencies":[]},{"task_id":"CHILD-B","title":"Second scope","description":"Full brief","acceptance_criteria":["Check B"],"architecture_refs":[],"dependencies":[]}],"incoming":{"DEPENDENT":["CHILD-A","CHILD-B"]}}</pre></details>
+          <div class="actions"><button id="preview-structure" type="button" disabled>Preview mapping</button><button id="apply-structure" type="submit" disabled>Apply reviewed mapping</button></div>
+          <pre id="structure-preview" aria-live="polite">No plan previewed.</pre>
+        </form>
         <h3>History</h3>
         <ol id="history" class="history"></ol>
       </section>
