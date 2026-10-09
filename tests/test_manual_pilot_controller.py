@@ -16,6 +16,16 @@ from manual_pilot_provision import init_secrets  # noqa: E402
 import manual_pilot_controller as controller  # noqa: E402
 
 
+def test_promotion_accepts_only_additive_012_authority_migration():
+    current = {f"migrations/{version:03d}_migration.sql": str(version) * 64
+               for version in range(1, 12)}
+    candidate = {**current, "migrations/012_api_task_authority.sql": "f" * 64}
+    controller._verify_schema_011_to_012(current, candidate)
+    changed = {**candidate, "migrations/011_migration.sql": "e" * 64}
+    with pytest.raises(ValueError, match="unchanged schema 001-011"):
+        controller._verify_schema_011_to_012(current, changed)
+
+
 def test_secret_initialization_is_private_and_never_rotates(tmp_path):
     state = tmp_path / "new-pilot-state"
     result = init_secrets(state)

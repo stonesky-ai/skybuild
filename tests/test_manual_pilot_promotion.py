@@ -29,10 +29,10 @@ def promotion(tmp_path, monkeypatch):
     provisioner._write_new(state / 'runtime.env', env, 0o600)
     (state / 'tls').mkdir(mode=0o700)
     (state / 'tls/ca.crt').write_bytes(b'retained fixture CA')
-    current = {f'migrations/{i:03}_migration.sql': hashlib.sha256(str(i).encode()).hexdigest() for i in range(1, 11)}
+    current = {f'migrations/{i:03}_migration.sql': hashlib.sha256(str(i).encode()).hexdigest() for i in range(1, 12)}
     current.update({f'static/workbench.{suffix}': hashlib.sha256(suffix.encode()).hexdigest()
                     for suffix in ('css', 'html', 'js')})
-    candidate = dict(current, **{'migrations/011_cpu_fake_dispatch.sql': 'f' * 64})
+    candidate = dict(current, **{'migrations/012_api_task_authority.sql': 'f' * 64})
     api_id, db_id, image = '1' * 64, '2' * 64, 'sha256:' + '3' * 64
     ip, hostname = '100.100.1.2', 'controller.tail.ts.net'
     ports = {'8000/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '8000'}, {'HostIp': ip, 'HostPort': '8443'}]}
@@ -47,9 +47,9 @@ def promotion(tmp_path, monkeypatch):
                        'RW': False} for name in ('server.crt', 'server.key')]}
     data = {'current': current, 'candidate': candidate, 'installed': current.copy(), 'api': api,
             'db': {'Id': db_id}, 'cluster': '123456', 'ready': {'status': 'ready'},
-            'findings': ['missing table: cpu_fake_dispatches', 'missing table: cpu_fake_receipts'],
+            'findings': [],
             'serve': {}, 'statements': [], 'calls': []}
-    data['applied'] = [(i, current[f'migrations/{i:03}_migration.sql']) for i in range(1, 11)]
+    data['applied'] = [(i, current[f'migrations/{i:03}_migration.sql']) for i in range(1, 12)]
     arguments = dict(checkout=tmp_path / 'checkout', expected_sha='b' * 40,
                      published_ref='refs/heads/dev-002', current_sha='a' * 40,
                      state_dir=state, hostname=hostname, tailnet_ip=ip,
@@ -110,7 +110,7 @@ def test_promotion_checks_are_read_only_and_refuse_binary_rollback(promotion):
     assert report['no_changes_made'] is True
     assert report['binary_rollback_after_migration'] is False
     assert report['candidate_role_audit_required'] is True
-    assert (report['current_schema'], report['candidate_schema']) == (10, 11)
+    assert (report['current_schema'], report['candidate_schema']) == (11, 12)
     assert all(statement.startswith(('SELECT ', 'SET TRANSACTION ')) for statement in data['statements'])
     assert not any(any(word in args for word in ('stop', 'start', 'build', 'up', 'restart', 'migrate')) for args in data['calls'])
     assert 'password' not in json.dumps(report)
@@ -132,7 +132,7 @@ def test_promotion_refuses_changed_boundary(promotion, boundary):
     elif boundary == 'changed-prefix': data['candidate']['migrations/001_migration.sql'] = 'changed'
     elif boundary == 'extra-migration': data['candidate']['migrations/012_other.sql'] = 'changed'
     elif boundary == 'applied-digest': data['applied'][0] = (1, 'changed')
-    elif boundary == 'already-migrated': data['applied'].append((11, 'f' * 64))
+    elif boundary == 'already-migrated': data['applied'].append((12, 'f' * 64))
     elif boundary == 'cluster': data['cluster'] = '999999'
     elif boundary == 'runtime-env': (arguments['state_dir'] / 'runtime.env').write_text('SKYBUILD_DSN=foreign')
     elif boundary == 'admin-env': data['api']['Config']['Env'].append('SKYBUILD_ROLE_ADMIN_DSN=secret')
@@ -294,6 +294,7 @@ def test_schema_010_role_audit_and_atomic_011_requalification(monkeypatch):
     migrations = sorted((Path(skybuild.__file__).parent / 'migrations').glob('*.sql'))
     old = [path for path in migrations if int(path.name.split('_', 1)[0]) <= 10]
     expansion = next(path for path in migrations if path.name == '011_cpu_fake_dispatch.sql')
+    authority = next(path for path in migrations if path.name == '012_api_task_authority.sql')
     with psycopg.connect(base, autocommit=True) as cluster:
         cluster.execute(sql.SQL('CREATE DATABASE {}').format(sql.Identifier(target)))
         cluster.execute(sql.SQL('CREATE ROLE {} LOGIN PASSWORD {}').format(sql.Identifier(role), sql.Literal(uuid4().hex)))
@@ -323,6 +324,10 @@ def test_schema_010_role_audit_and_atomic_011_requalification(monkeypatch):
             connection.execute('INSERT INTO schema_migrations VALUES (11, %s)',
                                (hashlib.sha256(expansion.read_bytes()).hexdigest(),))
             assert runtime_role.provision_runtime_role(connection, target, role)['ok'] is True
+            connection.execute(authority.read_text())
+            connection.execute('INSERT INTO schema_migrations VALUES (12, %s)',
+                               (hashlib.sha256(authority.read_bytes()).hexdigest(),))
+            assert runtime_role.provision_runtime_role(connection, target, role)['ok'] is True
 
         with pytest.raises(RuntimeError, match='Qualification boundary failure'):
             with psycopg.connect(dsn) as connection:
@@ -335,7 +340,7 @@ def test_schema_010_role_audit_and_atomic_011_requalification(monkeypatch):
                 'missing table: cpu_fake_dispatches', 'missing table: cpu_fake_receipts']
         with psycopg.connect(dsn) as connection:
             upgrade(connection)
-        assert store.readiness() == {'ready': True, 'schema_version': 11}
+        assert store.readiness() == {'ready': True, 'schema_version': 12}
         with psycopg.connect(dsn) as connection:
             assert runtime_role.audit_runtime_role(connection, target, role)['ok'] is True
     finally:

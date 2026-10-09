@@ -12,6 +12,7 @@ from skybuild.api import create_app
 from skybuild.completion import completion_change, current_completion
 from skybuild.contracts import DomainError
 from skybuild.store import Store
+from test_store import seed_api_authority
 
 
 def evidence():
@@ -80,6 +81,7 @@ def service():
     store = Store(dsn, database)
     store.migrate()
     project = "completion-" + uuid4().hex
+    seed_api_authority(store, project)
     tokens = {name: uuid4().hex * 2 for name in ("owner", "worker")}
     for name, token in tokens.items():
         store.provision_principal(name + "-" + project, token, is_admin=name == "owner",

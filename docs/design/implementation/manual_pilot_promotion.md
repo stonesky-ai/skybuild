@@ -1,6 +1,6 @@
-# Controlled manual pilot promotion from schema 010 to 011
+# Controlled manual pilot promotion from schema 011 to 012
 
-Task: `SKYBUILD-SELF-BUILD-MVP`, with `SKYBUILD-EXECUTION-CONTROLS` inspection support. Owner: main SkyBuild session. Phase: candidate preparation; no runtime promotion performed. Source base: published `42c3256`. Accepted runtime: `7d40df9fa7b26035736ffa613b5c5dad548269f5`, schema 010. Obtain the full candidate SHA from the independently reviewed publication record after this procedure is integrated.
+Task: `SKYBUILD-SELF-BUILD-MVP`, with `SKYBUILD-EXECUTION-CONTROLS` inspection support. Owner: main SkyBuild session. Phase: candidate preparation; no runtime promotion performed. The deployed source/image identity must come from retained deployment evidence and the read-only preflight; do not reuse the stale schema-010 source hash. Require an exact schema-011 runtime and reviewed candidate containing only migration 012 before proceeding.
 
 This procedure preserves the dedicated database, credentials, application CA/leaf, non-root API UID, private binds and manual Cord assignments. It changes neither ledger authority nor worker/model admission. Execute live steps only under explicit runtime-promotion authority. Do not use root, sudo, self-SSH, Docker host mounts, changed privileges, or another database to bypass a failed prerequisite.
 
@@ -16,7 +16,7 @@ export SKYBUILD_PILOT_TAILNET_IP='REPLACE_WITH_APPROVED_CURRENT_TAILSCALE_IPV4'
 export SKYBUILD_PILOT_TLS_UID="$(id -u)"
 export APPROVED_SHA='REPLACE_WITH_REVIEWED_PUBLISHED_40_HEX_SHA'
 export PYTHONPATH="$PWD/src"
-CURRENT_SHA='7d40df9fa7b26035736ffa613b5c5dad548269f5'
+CURRENT_SHA='REPLACE_WITH_RETAINED_FULL_40_HEX_SOURCE_SHA'
 CURRENT_API_CONTAINER='REPLACE_WITH_RETAINED_FULL_64_HEX_CONTAINER_ID'
 CURRENT_DB_CONTAINER='REPLACE_WITH_RETAINED_FULL_64_HEX_CONTAINER_ID'
 CURRENT_API_IMAGE='REPLACE_WITH_RETAINED_sha256_IMAGE_ID'
@@ -26,7 +26,7 @@ CONTROLLER_HOST='REPLACE_WITH_APPROVED_CURRENT_SELF_DNS_NAME'
 nice -n 10 ./.venv/bin/python scripts/manual_pilot_controller.py --promotion --checkout "$PWD" --expected-sha "$APPROVED_SHA" --published-ref refs/heads/dev-002 --current-sha "$CURRENT_SHA" --state-dir "$SKYBUILD_PILOT_STATE" --hostname "$CONTROLLER_HOST" --tailnet-ip "$SKYBUILD_PILOT_TAILNET_IP" --api-container-id "$CURRENT_API_CONTAINER" --db-container-id "$CURRENT_DB_CONTAINER" --api-image-id "$CURRENT_API_IMAGE" --database-system-id "$CURRENT_DB_SYSTEM_ID" --ca-pem-sha256 "$CURRENT_CA_PEM_SHA256"
 ```
 
-The guard checks published clean source/ancestry, installed package hashes against retained source, exact container/image/cluster identities, unchanged migration digests 001–010 and only expansion 011, private runtime environment, TLS/CA/readiness, binds/mounts/UID, resources, empty Serve/Funnel, niceness and headroom. PostgreSQL reads use a bounded repeatable-read/read-only administrator transaction. The candidate role auditor must find exactly the two absent simulator tables and no excess/mismatched privileges; this is not a passed schema-011 audit. A failure changes no services or database state. Remote worker reachability remains a separate qualification.
+The guard checks published clean source/ancestry, installed package hashes against retained source, exact container/image/cluster identities, unchanged migration digests 001–011 and only authority migration 012, private runtime environment, TLS/CA/readiness, binds/mounts/UID, resources, empty Serve/Funnel, niceness and headroom. PostgreSQL reads use a bounded repeatable-read/read-only administrator transaction. The current restricted-role audit must pass with no findings; the candidate role audit must pass after migration 012. A failure changes no services or database state. Remote worker reachability remains a separate qualification.
 
 ## Later build and recovery evidence
 
@@ -54,7 +54,13 @@ print(json.dumps({'candidate_image': image, 'package_matches_reviewed_source': T
 PY
 ```
 
-The verification container has no network, credentials, mounts, writable root, capabilities, service listener or model invocation. Use an existing private mode-0700 evidence directory outside Git and `umask 077` for new files. Save a custom-format dump of only `skybuild_pilot` to a new file through the dedicated container's ordinary PostgreSQL channel: `docker exec --user postgres skybuild-pilot-pg nice -n 10 pg_dump --format=custom --dbname=skybuild_pilot > "$PRIVATE_DUMP"`. Check exit status and a bounded dump manifest. No password belongs in arguments. The dump has not undergone a restore drill and is not an automatic rollback guarantee; never overwrite it.
+The verification container has no network, credentials, mounts, writable root, capabilities, service listener or model invocation. Use an existing private mode-0700 evidence directory outside Git and `umask 077` for new files. Create a new custom-format dump and private source-evidence manifest through the retained full PostgreSQL container ID; the helper checks the container labels, database name and system identifier before running `pg_dump`, then binds the evidence file to the dump's path, SHA-256 and byte count:
+
+```sh
+nice -n 10 ./.venv/bin/python scripts/create_pilot_backup.py --checkout "$PWD" --container-id "$CURRENT_DB_CONTAINER" --expected-system-identifier "$CURRENT_DB_SYSTEM_ID" --backup-file "$PRIVATE_DUMP" --evidence-file "$PRIVATE_BACKUP_EVIDENCE"
+```
+
+Record the returned dump and evidence digests privately. The live cutover requires both digests, the evidence file, and the same retained system identifier; it independently checks the archive database name and live cluster identity. No password belongs in arguments. The dump has not undergone a restore drill and is not an automatic rollback guarantee; never overwrite it.
 
 Keep the same base and TLS configuration and recheck the pinned image ID before use. Rerun the full preflight immediately before the stop and save its successful JSON in a new mode-0600 `$SKYBUILD_PROMOTION_REPORT` file. It contains no secrets. Parent-directory ownership and private modes remain operator prerequisites. The later replacement uses an exclusive-name Docker creation primitive, not Compose reconciliation, so a foreign replacement is never adopted or removed.
 
@@ -66,7 +72,7 @@ After authority, stop only `api`; leave PostgreSQL and storage running. Retain t
 nice -n 10 docker stop --time 30 "$CURRENT_API_CONTAINER"
 ```
 
-This explicit operator transaction checks the stopped container, cluster/database, exact 010 prefix, clean reviewed source and absence of runtime-role sessions. DDL, version digest, runtime grants and full candidate audit commit together. Do not substitute separate `migrate` and `provision-runtime-role` CLI calls; those commit independently.
+This explicit operator transaction checks the stopped container, cluster/database, exact 011 prefix, clean reviewed source and absence of runtime-role sessions. DDL, version digest, runtime grants and full candidate audit commit together. Do not substitute separate `migrate` and `provision-runtime-role` CLI calls; those commit independently.
 
 ```sh
 nice -n 10 ./.venv/bin/python - <<'PY'
@@ -99,10 +105,10 @@ try:
     old = controller._source_manifest(root, report['current_source'])
     expected = sorted((int(pathlib.Path(name).name.split('_', 1)[0]), digest)
                       for name, digest in old.items() if name.startswith('migrations/'))
-    migration = root / 'src/skybuild/migrations/011_cpu_fake_dispatch.sql'
+    migration = root / 'src/skybuild/migrations/012_api_task_authority.sql'
     digest = hashlib.sha256(migration.read_bytes()).hexdigest()
     candidate = controller._source_manifest(root, report['candidate_source'])
-    assert digest == candidate['migrations/011_cpu_fake_dispatch.sql']
+    assert digest == candidate['migrations/012_api_task_authority.sql']
     password = provisioner._read_secret(state / 'secrets/admin-password', mode=0o644)
     dsn = make_conninfo(provisioner._dsn(password, 'postgres', host='127.0.0.1', port=55432), dbname=provisioner.DATABASE)
     with psycopg.connect(dsn, connect_timeout=5) as connection:
@@ -117,21 +123,21 @@ try:
         assert connection.execute('SELECT count(*) FROM pg_stat_activity WHERE datname = %s AND usename = %s',
                                   (provisioner.DATABASE, provisioner.ROLE)).fetchone()[0] == 0
         connection.execute(migration.read_text())
-        connection.execute('INSERT INTO schema_migrations VALUES (11, %s)', (digest,))
+        connection.execute('INSERT INTO schema_migrations VALUES (12, %s)', (digest,))
         assert provision_runtime_role(connection, provisioner.DATABASE, provisioner.ROLE)['ok']
         assert audit_runtime_role(connection, provisioner.DATABASE, provisioner.ROLE)['ok']
-    print(json.dumps({'ok': True, 'schema_version': 11, 'runtime_role_audit': 'passed', 'migration_committed': True}))
+    print(json.dumps({'ok': True, 'schema_version': 12, 'runtime_role_audit': 'passed', 'migration_committed': True}))
 except Exception:
     print(json.dumps({'ok': False, 'migration_outcome': 'unconfirmed; inspect exact schema before any restart'}))
     raise SystemExit(2)
 PY
 ```
 
-A lost commit acknowledgment remains unconfirmed. Inspect exact digests/grants before deciding what committed; never rerun blindly. If the transaction definitely rolled back and 010 plus its role policy remain verified, the operator may restart the retained old API container with unchanged TLS. That is pre-migration recovery, not post-011 binary downgrade.
+A lost commit acknowledgment remains unconfirmed. Inspect exact digests/grants before deciding what committed; never rerun blindly. If the transaction definitely rolled back and 011 plus its role policy remain verified, the operator may restart the retained old API container with unchanged TLS. That is pre-migration recovery, not post-012 binary downgrade.
 
 ## Start the pinned candidate and requalify
 
-Only after confirmed 011 commit and full candidate role audit, replace only the retained stopped API. Recheck the retained API and database IDs and the existing network; remove only the immutable stopped ID. Creation must fail on any name collision, and startup targets only its returned full ID. Do not rebuild, pull, reconcile a Compose service name, restart PostgreSQL or replace credentials here. Coordinate exclusive maintenance with other operators; identity checks cannot prevent another authorized operator from changing the runtime independently.
+Only after confirmed 012 commit and full candidate role audit, replace only the retained stopped API. Recheck the retained API and database IDs and the existing network; remove only the immutable stopped ID. Creation must fail on any name collision, and startup targets only its returned full ID. Do not rebuild, pull, reconcile a Compose service name, restart PostgreSQL or replace credentials here. Coordinate exclusive maintenance with other operators; identity checks cannot prevent another authorized operator from changing the runtime independently.
 
 ```sh
 nice -n 10 ./.venv/bin/python - <<'PY'
@@ -187,12 +193,32 @@ PY
 curl --fail --silent --max-time 10 --cacert "$SKYBUILD_PILOT_STATE/tls/ca.crt" --resolve "$CONTROLLER_HOST:8000:127.0.0.1" "https://$CONTROLLER_HOST:8000/health/ready"
 ```
 
-Require HTTP readiness `{"status":"ready"}` and retain the separate transactional migration/role evidence for schema 11; the HTTP response does not expose a schema version. Require exact candidate image/container identity, unchanged runtime-only environment, TLS bindings/mounts/UID and CA fingerprint. Verify authenticated `/api/v1/me`, read-only task execution-status and owner CPU-control inspection with protected token files. Do not enable controls, reserve work, invoke a simulator, or switch ledger authority to populate a panel.
+Require HTTP readiness `{"status":"ready"}` and retain the separate transactional migration/role evidence for schema 12; the HTTP response does not expose a schema version. Require exact candidate image/container identity, unchanged runtime-only environment, TLS bindings/mounts/UID and CA fingerprint. Verify authenticated `/api/v1/me`, read-only task execution-status and owner CPU-control inspection with protected token files. Do not enable controls, reserve work, invoke a simulator, or switch ledger authority to populate a panel.
 
 On each qualified worker, rerun read-only `fleet_preflight` with existing scoped credentials and pinned `--ca-file` at the same private DNS endpoint. Then use the explicitly approved harmless Cord qualification procedure for send/receive/receipt/handle, retaining message IDs. No worker/inference starts follow. Record source/image/container/cluster IDs, schema digests, role audit, readiness, TLS expiry/fingerprint and remote outcomes privately. Declare success only when all required checks pass.
 
+## Follow-on task-authority cutover
+
+Perform this only after the candidate with migration 012 is deployed and healthy, the exact 34-task manifest below has passed the disposable rehearsal, and the owner has stopped Markdown task edits and all other ledger writers. Keep the stable deployment checkout clean at the reviewed published candidate. The live transaction independently checks the PostgreSQL system identifier, retained database container, backup archive database name and pinned backup evidence before it inserts all 34 tasks and the API-authority receipt atomically.
+
+```sh
+export SKYBUILD_EXPECTED_DATABASE='skybuild_pilot'
+# Load SKYBUILD_ROLE_ADMIN_DSN from the existing protected operator environment.
+nice -n 10 ./.venv/bin/python -m skybuild ledger-cutover \
+  --ledger-dir docs/design \
+  --contract docs/design/implementation/current_task_import.json \
+  --apply-live \
+  --expected-import-sha256 576d23f09d444e6d684b62481536ec24cb78a3feaeec092947fcb51936376710 \
+  --backup-file "$PRIVATE_DUMP" --backup-sha256 "$BACKUP_SHA256" \
+  --backup-evidence "$PRIVATE_BACKUP_EVIDENCE" --backup-evidence-sha256 "$BACKUP_EVIDENCE_SHA256" \
+  --expected-system-identifier "$CURRENT_DB_SYSTEM_ID" \
+  --database-container-id "$CURRENT_DB_CONTAINER"
+```
+
+After the transaction, verify the authenticated owner API returns exactly the 34 frozen task IDs and that `SKYBUILD-TASK-CUTOVER` history contains the `imported` event. Then use one idempotent owner update to set the next action to retire the Markdown ledgers; verify the updated revision and second history event. Preserve the workflow phase through its guarded task-action interface. Keep the retired Markdown snapshot in Git history and replace the old `mastertodo.md` contents with a generated/read-only retirement notice or API export in a subsequent reviewed change. Do not re-import the edited snapshot or add bidirectional synchronization.
+
 ## Rollback boundary and remaining gaps
 
-Migration 011 adds a column/tables, widens states and replaces guards. The accepted 7d40 binary's readiness requires the exact migration list and rejects schema 011; it also predates released/settled simulator records. **After confirmed 011 commit, the old image is not a qualified healthy rollback.** Failed candidate readiness requires evidence preservation and reviewed forward repair. Any restore must be isolated, explicitly authorized and tested, with acknowledged data-loss/effect reconciliation; never silently replace the live database or renew authority. Never delete 011's version record or objects to force old readiness.
+Migration 012 widens the ledger authority check and changes the row-lock helper so missing receipts fail closed while only an explicit API receipt permits writes and claims. The retained schema-011 image requires the exact migration list and rejects schema 012. **After confirmed 012 commit, the old image is not a qualified healthy rollback.** Failed candidate readiness requires evidence preservation and reviewed forward repair. Any restore must be isolated, explicitly authorized and tested, with acknowledged data-loss/effect reconciliation; never silently replace the live database or renew authority. Never delete 012's version record or objects to force old readiness.
 
-Old image/dump evidence is not tested disaster recovery. Builder memory qualification, later immutable image build, actual live preflight, migration and remote qualification remain unperformed by this source task. No credential/CA rotation, task cutover, model qualification or worker launch is included.
+Old image/dump evidence is not tested disaster recovery. Builder memory qualification, later immutable image build, actual live preflight, migration and remote qualification remain unperformed by this source task. No credential/CA rotation, task cutover or worker launch is included. Task cutover follows only after this authority migration is deployed and separately rehearsed against a fresh pinned ledger manifest.

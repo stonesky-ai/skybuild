@@ -1,6 +1,6 @@
 # SkyBuild deferred tasks
 
-Authority: Git-backed planning ledger, revision A35, 2026-10-08. API cutover has not occurred. Stable IDs occur in only one ledger. Deferral means deliberate postponement, not implementation failure. See [architecture](architecture.md) and [mastertodo](mastertodo.md).
+Authority: Git-backed planning ledger, revision A36, 2026-10-09. API cutover has not occurred. Stable IDs occur in only one ledger. Deferral means deliberate postponement, not implementation failure. See [architecture](architecture.md) and [mastertodo](mastertodo.md).
 
 ## SKYBUILD-MULTIPROJECT — Concurrent autonomous operation across products
 
@@ -138,3 +138,12 @@ Authority: Git-backed planning ledger, revision A35, 2026-10-08. API cutover has
 - Revisit: initial quality debt is cleared and the controlled review path can run background tasks within its budgets.
 - Acceptance: at most one whole-repository review is active. The next review waits until all actionable findings from the prior review have accepted published fixes. Accidental duplicate starts and findings coalesce under the same durable identity; a lost acknowledgment or unknown run does not release the hold. Crossing either threshold while held leaves a visible pending review, not a second launch. CPU threshold detection never grants model-spend authority.
 - Architecture: section 13 and [review policy](review_policy.md). Plan: early post-MVP follow-on. ADR: [0034](../adr/quality.md#adr-0034).
+
+## SKYBUILD-SHARED-INFERENCE — Use the friend's model pools for qualified build work
+
+- Status: deferred by explicit owner suspension (2026-10-09). Phase: parked. Responsible: owner and lead dispatcher. Next action: none until the owner explicitly re-enables Brodson; then reassess scope, authority, qualification and evidence before any use. Area: inference/project configuration. No Brodson endpoint, credential, capacity reservation, dispatch, or worker use while suspended.
+- Brief: only after explicit owner re-enablement, reassess whether a generic installation-local endpoint and external credential-file profile should be qualified. Prior owner-reported Qwen 4 / Recall 2 / BGE-M3 1 pool counts are historical claims, not current available capacity or permission. Any future qualification needs bounded task classes, project data scope, token/runtime limits, independent checks, review, and measured useful throughput. REST dispatch/inbox/result transport itself has no model-token cost; use CPU polling and batch results. Do not call a model for status, receipt, or progress; require the pinned-input model-work gate before any future project-managed model process. Other inference profiles retain their separate authorization and billing controls.
+- Reason: the owner disabled all Brodson use until further notice. Historical capability and cost evidence does not restore permission.
+- Revisit: the owner explicitly re-enables Brodson and selects new qualification scope, limits and authority.
+- Acceptance: remains deferred until explicit owner re-enablement; no capability claim or profile use is inferred from historical evidence. If re-enabled, implementation-plan area 5b qualification and failure cases must pass; aggregate limits hold across projects/workers, zero-charge quota is correctly not applicable, and frontier review/fallback cannot evade subscription caps. Outputs preserve source/profile evidence; useful throughput includes validation, correction and integration.
+- Architecture: sections 8 and 13–15. Plan: area 5b. ADR: [0032](../adr/inference-capacity.md#adr-0032).

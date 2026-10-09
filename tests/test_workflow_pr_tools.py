@@ -65,7 +65,7 @@ def test_pr_comment_uses_rest_and_verifies_response(tmp_path, monkeypatch, capsy
     assert json.loads(capsys.readouterr().out)["verified"]
 
 
-@pytest.mark.parametrize("change", ["gate_failure", "base_changed", "wrong_initial_base", "pass"])
+@pytest.mark.parametrize("change", ["gate_failure", "base_changed", "wrong_initial_base", "pass", "default_gate"])
 def test_candidate_gate_cleanup_and_ref_checks(tmp_path, monkeypatch, change):
     module = load("integrate_reviewed_pr")
     head, base = "a" * 40, "b" * 40
@@ -73,7 +73,7 @@ def test_candidate_gate_cleanup_and_ref_checks(tmp_path, monkeypatch, change):
     evidence.write_text("Independent reviewer approved " + head + " against " + base)
     args = SimpleNamespace(checkout=tmp_path, review_evidence=evidence, remote="origin",
                            repo=None, expected_head=head, expected_base=base, base="dev-002", pr=12,
-                           gate_argv=["fake-gate", "{checkout}"], merge=False)
+                           gate_argv=None if change == "default_gate" else ["fake-gate", "{checkout}"], merge=False)
     monkeypatch.setattr(module, "verify_skybuild", lambda path: path)
     monkeypatch.setattr(module, "verify_skybuild_remote", lambda *_: None)
     calls = []
@@ -96,17 +96,21 @@ def test_candidate_gate_cleanup_and_ref_checks(tmp_path, monkeypatch, change):
         if "rev-parse" in argv:
             return "d" * 40
         return ""
+    gate_commands = []
     def fake_gate(argv, cwd):
+        gate_commands.append(argv)
         if change == "gate_failure":
             raise RuntimeError("gate failed")
         return {"ok": True, "passed": 17}
     monkeypatch.setattr(module, "run", fake_run)
     monkeypatch.setattr(module, "run_gate", fake_gate)
-    if change == "pass":
+    if change in {"pass", "default_gate"}:
         result = module.integrate(args)
         assert result["merged"] is False
         assert result["gate"] == {"ok": True, "passed": 17}
         assert result["expected_base"] == base
+        if change == "default_gate":
+            assert gate_commands[0][-2:] == ["--min-available-gib", "10"]
     else:
         with pytest.raises(RuntimeError, match="gate failed|Remote refs changed|Remote base differs"):
             module.integrate(args)
