@@ -219,10 +219,24 @@ def test_current_38_task_cutover_rehearsal_serves_frozen_tasks(current_plan, fre
         store.migrate()
         token = uuid4().hex + uuid4().hex
         store.provision_principal("current-cutover-owner", token, is_admin=True)
+        dispatcher_token = uuid4().hex + uuid4().hex
+        store.provision_principal("cutover-dispatcher", dispatcher_token,
+                                  grants={"skybuild": {"cord:send", "cord:read", "cord:handle"}})
+        dispatcher = store.authenticate(dispatcher_token)
+        owner = store.authenticate(token)
+        message = store.send_message(dispatcher, "skybuild", {
+            "recipient": "current-cutover-owner", "subject": "Existing Cord message",
+            "body": "Cutover must preserve unrelated Cord history", "category": "pilot-preflight",
+        }, "pre-cutover-message")
+        receipt = store.message_action(owner, "skybuild", message["message_id"], "receipt", {},
+                                       "pre-cutover-receipt")
         result = cutover_live(store, LEDGERS, CURRENT_CONTRACT, current_plan["import_sha256"])
         assert result == {"result": "imported", "project_id": "skybuild",
                           "task_count": 38, "authority": "api"}
         assert cutover_live(store, LEDGERS, CURRENT_CONTRACT, current_plan["import_sha256"])["result"] == "unchanged"
+        assert store.inbox(owner, "skybuild") == [receipt]
+        assert store.message_action(owner, "skybuild", message["message_id"], "receipt", {},
+                                    "pre-cutover-receipt") == receipt
         with TestClient(create_app(store)) as client:
             headers = {"Authorization": "Bearer " + token}
             tasks = client.get("/api/v1/projects/skybuild/tasks", headers=headers)
@@ -266,8 +280,9 @@ def test_conflicting_source_and_changed_destination_are_refused(plan, fresh_stor
         original = next(record["description"] for record in plan["records"] if record["task_id"] == "SKYBUILD-REPOSITORY")
         connection.execute("UPDATE tasks SET description = %s WHERE task_id = 'SKYBUILD-REPOSITORY'", (original,))
         connection.execute("INSERT INTO messages (message_id, project_id, sender, recipient, subject, body, category, urgency) VALUES (%s, 'skybuild', 'skybuild-ledger-import', 'skybuild-ledger-import', 'extra', 'extra', 'misc', 'normal')", (uuid4(),))
-    with pytest.raises(DomainError, match="destination changed"):
-        apply(store, plan)
+    assert apply(store, plan)["result"] == "unchanged"
+    with store._connection() as connection:
+        assert connection.execute("SELECT count(*) AS count FROM messages").fetchone()["count"] == 1
 
 
 def test_nonempty_destination_and_mid_import_failure_roll_back(plan, fresh_store):
