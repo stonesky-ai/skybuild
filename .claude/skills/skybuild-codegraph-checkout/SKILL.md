@@ -5,7 +5,7 @@ description: Initialize or refresh CodeGraph for a SkyBuild checkout and verify 
 
 # Checkout-local CodeGraph
 
-Trigger on a new SkyBuild worktree, branch switch or large pull before graph queries. Run `scripts/codegraph_checkout.py --checkout <exact checkout>` to initialize or sync its ignored local index and verify the reported project path. Use the installed CodeGraph command-line CLI for graph queries; do not use the MCP server. The CLI takes a project path as a positional argument for `status`, and with `--path` (or `-p`) for `explore`, `query`, `context`, and `node`:
+Trigger on a new SkyBuild worktree, branch switch or large pull before graph queries. Run `scripts/codegraph_checkout.py --checkout <exact checkout>` to initialize or sync its ignored local index and verify the reported project path. Use the installed CodeGraph command-line CLI for all graph queries; do not use the MCP server. The CLI takes a project path as a positional argument for `status`, and with `--path` (or `-p`) for `explore`, `query`, `context`, and `node`:
 
 ```sh
 codegraph status /absolute/path/to/project
