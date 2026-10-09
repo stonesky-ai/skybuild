@@ -103,7 +103,7 @@ def integrate(args):
                  "merge", "--no-ff", "--no-edit", head], candidate)
             tree = run(["git", "rev-parse", "HEAD^{tree}"], candidate)
             gate = args.gate_argv or [sys.executable, str(root / "scripts/disposable_pg_gate.py"),
-                                      "--checkout", str(candidate), "--min-available-gib", "6"]
+                                      "--checkout", str(candidate), "--min-available-gib", "10"]
             gate = [word.replace("{checkout}", str(candidate)) for word in gate]
             gate_result = run_gate(gate, candidate)
             if run(["git", "status", "--porcelain"], candidate):
