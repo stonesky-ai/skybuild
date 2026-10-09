@@ -120,11 +120,16 @@ def scan(log_root: Path, minutes: int, *, stopped=None, deadline=None) -> dict:
             "note": "Candidate failures only; inspect relevant tool results before creating a prevention skill."}
 
 
-def watch(log_root: Path, minutes: int, seconds: float, cancelled: threading.Event) -> None:
+def watch(log_root: Path, minutes: int, seconds: float, cancelled: threading.Event, *, deadline=None) -> None:
     """Use a fixed monotonic cutoff; wall-clock rollback cannot extend the watch."""
     if type(seconds) not in (int, float) or not 0 <= seconds <= 28800:
         raise ValueError("Watch lifetime must be finite and at most eight hours")
-    deadline = time.monotonic() + seconds
+    if deadline is None:
+        deadline = time.monotonic() + seconds
+    elif type(deadline) not in (int, float) or not -float("inf") < deadline < float("inf"):
+        raise ValueError("Watch cutoff must be finite")
+    elif deadline > time.monotonic() + seconds:
+        raise ValueError("Watch cutoff exceeds the bounded lifetime")
 
     def stopped():
         return cancelled.is_set() or time.monotonic() >= deadline
@@ -161,6 +166,9 @@ def main(argv=None) -> None:
         parser.error("--watch requires --duration-minutes or --approval-deadline")
     if args.duration_minutes is not None and not 1 <= args.duration_minutes <= 480:
         parser.error("Watch duration must be from 1 to 480 minutes")
+    # Pin the monotonic reference before sampling UTC or installing handlers.
+    # Scheduling delays during setup consume the original lifetime.
+    started = time.monotonic()
     seconds = (args.duration_minutes or 480) * 60
     if args.approval_deadline is not None:
         try:
@@ -170,12 +178,13 @@ def main(argv=None) -> None:
         except ValueError:
             parser.error("Approval deadline requires an ISO-8601 timestamp with timezone")
         seconds = min(seconds, max(0, (deadline - datetime.now(timezone.utc)).total_seconds()))
+    cutoff = started + seconds
     cancelled = threading.Event()
     previous = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM)}
     try:
         for number in previous:
             signal.signal(number, lambda *_: cancelled.set())
-        watch(args.logs_root, args.minutes, seconds, cancelled)
+        watch(args.logs_root, args.minutes, seconds, cancelled, deadline=cutoff)
     finally:
         for number, handler in previous.items():
             signal.signal(number, handler)

@@ -83,7 +83,7 @@ def test_earliest_bound_and_eight_hour_maximum(monkeypatch):
 
     monkeypatch.setattr(scanner, "datetime", Clock)
     durations = []
-    monkeypatch.setattr(scanner, "watch", lambda _root, _minutes, seconds, _event: durations.append(seconds))
+    monkeypatch.setattr(scanner, "watch", lambda _root, _minutes, seconds, _event, **_kwargs: durations.append(seconds))
     scanner.main(["--watch", "--duration-minutes", "60", "--approval-deadline",
                   (now + timedelta(minutes=10)).isoformat()])
     scanner.main(["--watch", "--duration-minutes", "5", "--approval-deadline",
@@ -131,6 +131,41 @@ def test_wall_clock_rollback_cannot_extend_watch(monkeypatch, tmp_path, capsys):
     assert calls == [0, 1800]
     assert ticks[0] == 1900
     assert len(capsys.readouterr().out.splitlines()) == 2
+
+
+def test_delayed_watch_entry_and_rollback_cannot_renew_cutoff(monkeypatch, tmp_path, capsys):
+    ticks = [0.0]
+    wall = [datetime(2026, 10, 9, 10, tzinfo=timezone.utc)]
+    approval = wall[0] + timedelta(seconds=120)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            # Even delay between the monotonic reference and UTC sampling must
+            # not extend the original authority lifetime.
+            ticks[0] += 10
+            return wall[0]
+
+    class Event:
+        def __init__(self):
+            ticks[0] += 90  # Signal/cancellation setup before entering watch.
+            wall[0] -= timedelta(hours=1)
+
+        def is_set(self):
+            return False
+
+        def wait(self, seconds):
+            ticks[0] += seconds
+
+    calls = []
+    monkeypatch.setattr(scanner, "datetime", Clock)
+    monkeypatch.setattr(scanner.time, "monotonic", lambda: ticks[0])
+    monkeypatch.setattr(scanner.threading, "Event", Event)
+    monkeypatch.setattr(scanner, "scan", lambda *_args, **_kwargs: calls.append(ticks[0]) or {})
+    scanner.main(["--watch", "--logs-root", str(tmp_path), "--approval-deadline", approval.isoformat()])
+    assert calls == [100]
+    assert ticks[0] == 120  # Only the 20 remaining seconds are available.
+    assert len(capsys.readouterr().out.splitlines()) == 1
 
 
 def test_sigterm_wakes_owned_watch_without_another_scan(tmp_path):
