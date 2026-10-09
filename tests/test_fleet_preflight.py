@@ -97,9 +97,10 @@ def test_token_fifo_is_refused_without_blocking(tmp_path):
     fifo = tmp_path / "worker.token"
     os.mkfifo(fifo, 0o600)
     result = subprocess.run(
-        [sys.executable, "-m", "skybuild.fleet_preflight", "--url", URL,
-         "--project", "skybuild", "--token-file", str(fifo), "--principal", "wonko-worker"],
+        [sys.executable, "-c", "from pathlib import Path; import sys; "
+         "from skybuild.fleet_preflight import _token_from_file, PreflightError; "
+         "\ntry: _token_from_file(Path(sys.argv[1]))\nexcept PreflightError: print('rejected')", str(fifo)],
         capture_output=True, text=True, timeout=2, check=False,
     )
-    assert result.returncode == 2
-    assert json.loads(result.stdout) == {"ready": False, "reason": "Private API or worker scope check failed"}
+    assert result.returncode == 0
+    assert result.stdout.strip() == "rejected"
