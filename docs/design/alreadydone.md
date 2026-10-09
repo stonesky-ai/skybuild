@@ -1,6 +1,15 @@
 # SkyBuild completed tasks
 
-Authority: Git-backed planning ledger, revision A34, 2026-10-08. API cutover has not occurred. Record actual completion evidence, not planned milestones. Related ledgers: [mastertodo](mastertodo.md), [deferred](deferred.md).
+Authority: Git-backed planning ledger, revision A35, 2026-10-09. API cutover has not occurred. Record actual completion evidence, not planned milestones. Related ledgers: [mastertodo](mastertodo.md), [deferred](deferred.md).
+
+## SKYBUILD-TASK-WORKBENCH — Initial preview UI tranche
+
+- Status: done for now at the owner's direction. Closed: 2026-10-09.
+- Result: delivered the local Workbench UI tranche: task list/create/history/defer views, fake read-only task preview, a sortable and filterable task table with explicit waiting-on/will-enable fields, the manually refreshed Fleet page, and the Milestones design page with its roadmap graphic.
+- Evidence: local task branch `task/task-workbench`, commits `d87b6b0`, `9b553ca`, `58bd3b9`, `d7ef0c2`, `8290283`, `9cb25ca`, `f877185`, `587e66b`, `801c87c`, `baf6d93`, `5af2fd1`, and `0280b50`. The current preview task and static asset routes returned HTTP 200; `git diff --check` passed at closeout.
+- Limits: this closes the present preview/UI tranche only. The local preview still reads fake task records. Live task authority follows `SKYBUILD-TASK-CUTOVER`; the full workflow and immutable-journal acceptance in the original task contract are not claimed as satisfied by this tranche. The task API route is implemented, but live data and human authentication are not connected to this preview.
+- Follow-up: the owner plans more Workbench work later. Reopen or create a follow-up task before claiming live-data integration or the full original acceptance.
+- Preview boundary: the local preview uses an always-signed-in fake `user1` and read-only task records parsed from `mastertodo.md`. Each preview record is marked fake and has no live journal or write path. Real user accounts, browser sessions and human-to-API authentication remain deferred under [SKYBUILD-USER-LOGIN](deferred.md#skybuild-user-login). Demo credentials do not authorize API or database access.
 
 ## SKYBUILD-REPOSITORY — Establish the dedicated repository and first plan
 
