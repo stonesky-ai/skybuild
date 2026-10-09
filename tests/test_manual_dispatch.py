@@ -96,6 +96,58 @@ def _dispatch(tmp_path, monkeypatch, client):
     return repo, state, envelope, kwargs
 
 
+def test_dispatch_pins_ca_and_rejects_changed_or_removed_trust(tmp_path, monkeypatch):
+    client = FakeClient()
+    client.fail_once = True
+    repo, state, _, kwargs = _dispatch(tmp_path, monkeypatch, client)
+    ca = tmp_path / "installation-ca.pem"
+    ca.write_bytes(b"original test trust material")
+    captured = []
+    def factory(*args, **options):
+        captured.append(options)
+        return client
+    kwargs.update(ca_file=ca, client_factory=factory)
+    with pytest.raises(manual_dispatch.DispatchError, match="request failed"):
+        manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
+    path = next(state.glob("*.json"))
+    before = path.read_bytes()
+    fingerprint = hashlib.sha256(ca.read_bytes()).hexdigest()
+    assert json.loads(before)["ca_sha256"] == fingerprint
+    assert captured[0]["expected_ca_sha256"] == fingerprint
+    ca.write_bytes(b"changed test trust material")
+    with pytest.raises(manual_dispatch.DispatchError, match="durable intent"):
+        manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
+    kwargs["ca_file"] = None
+    with pytest.raises(manual_dispatch.DispatchError, match="durable intent"):
+        manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
+    assert path.read_bytes() == before
+    assert len(captured) == 1
+    ca.write_bytes(b"original test trust material")
+    kwargs["ca_file"] = ca
+    result = manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
+    assert result["status"] == "sent"
+    assert json.loads(path.read_text())["ca_sha256"] == fingerprint
+    assert client.calls[0] == client.calls[1]
+
+
+def test_existing_system_trust_intent_cannot_silently_add_ca(tmp_path, monkeypatch):
+    client = FakeClient()
+    client.fail_once = True
+    repo, state, _, kwargs = _dispatch(tmp_path, monkeypatch, client)
+    with pytest.raises(manual_dispatch.DispatchError):
+        manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
+    path = next(state.glob("*.json"))
+    before = path.read_bytes()
+    assert "ca_sha256" not in json.loads(before)
+    ca = tmp_path / "new-ca.pem"
+    ca.write_bytes(b"new test trust material")
+    with pytest.raises(manual_dispatch.DispatchError, match="durable intent"):
+        manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", ca_file=ca, **kwargs)
+    assert path.read_bytes() == before
+    # Existing intents retain their old endpoint binding and idempotency key.
+    assert manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)["status"] == "sent"
+
+
 def test_retry_uses_same_intent_and_key(tmp_path, monkeypatch):
     client = FakeClient()
     client.fail_once = True

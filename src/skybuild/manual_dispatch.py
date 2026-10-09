@@ -14,7 +14,7 @@ from typing import Callable, Iterable
 
 import httpx
 
-from .client import Client, ClientError
+from .client import Client, ClientError, ca_file_sha256
 from .contracts import valid_identifier
 from .fleet_preflight import _resolved_addresses, _token_from_file
 from .manual_assignment import AssignmentError, _path, verify_assignment
@@ -144,6 +144,7 @@ def _read_state(path: Path) -> dict | None:
 
 def dispatch(repo: Path, brief_path: str, *, worker: str, dispatcher: str, project: str,
              principal: str, url: str, token_file: Path, state_dir: Path,
+             ca_file: Path | None = None,
              resolve: Callable[[str], Iterable[str]] = _resolved_addresses,
              client_factory: Callable[..., Client] = Client) -> dict:
     """Record intent before I/O; retry only the same Cord body and key."""
@@ -159,6 +160,7 @@ def dispatch(repo: Path, brief_path: str, *, worker: str, dispatcher: str, proje
     if dispatcher != principal:
         raise DispatchError("Dispatcher must equal the authenticated principal")
     endpoint = _private_endpoint(url, resolve)
+    ca_sha256 = ca_file_sha256(ca_file) if ca_file is not None else None
     state_dir = _state_directory(state_dir, repo)
     slot = hashlib.sha256(f"{project}\0{brief_path}".encode()).hexdigest()
     path = state_dir / f"{slot}.json"
@@ -193,10 +195,13 @@ def dispatch(repo: Path, brief_path: str, *, worker: str, dispatcher: str, proje
             raise DispatchError("Cord assignment exceeds message size limit")
         intended = {"schema": "manual-dispatch-intent-v1", "project": project, "principal": principal,
                     "endpoint": endpoint, "idempotency_key": key, "message": body, "assignment": envelope}
+        if ca_sha256 is not None:
+            intended["ca_sha256"] = ca_sha256
         if state is None:
             state = {**intended, "status": "prepared", "result": None}
             _atomic_json(path, state)
-        elif any(state.get(field) != value for field, value in intended.items()):
+        elif (state.get("ca_sha256") != ca_sha256
+              or any(state.get(field) != value for field, value in intended.items())):
             raise DispatchError("Dispatch request differs from durable intent")
         if state.get("status") == "sent":
             return {"assignment_id": envelope["assignment_id"], "status": "sent",
@@ -206,7 +211,9 @@ def dispatch(repo: Path, brief_path: str, *, worker: str, dispatcher: str, proje
             raise DispatchError("Dispatch state needs manual reconciliation")
         token = _token_from_file(token_file)
         try:
-            with client_factory(url, token, retries=2, timeout=10, trust_env=False) as client:
+            with client_factory(url, token, retries=2, timeout=10, trust_env=False,
+                                **({"ca_file": ca_file, "expected_ca_sha256": ca_sha256}
+                                   if ca_file is not None else {})) as client:
                 if client.request("GET", "health/ready") != {"status": "ready"}:
                     raise DispatchError("Private SkyBuild API is not ready")
                 identity_response = client.whoami()
@@ -245,11 +252,13 @@ def main() -> int:
     parser.add_argument("--url", required=True)
     parser.add_argument("--token-file", type=Path, required=True)
     parser.add_argument("--state-dir", type=Path, required=True)
+    parser.add_argument("--ca-file", type=Path)
     args = parser.parse_args()
     try:
         print(json.dumps(dispatch(args.checkout, args.brief_path, worker=args.worker,
                                   dispatcher=args.dispatcher, project=args.project, principal=args.principal,
-                                  url=args.url, token_file=args.token_file, state_dir=args.state_dir), sort_keys=True))
+                                  url=args.url, token_file=args.token_file, state_dir=args.state_dir,
+                                  ca_file=args.ca_file), sort_keys=True))
         return 0
     except (DispatchError, AssignmentError, OSError, ValueError, UnicodeError, subprocess.TimeoutExpired) as error:
         reason = str(error) if isinstance(error, DispatchError) else "Dispatch input or environment is invalid"
