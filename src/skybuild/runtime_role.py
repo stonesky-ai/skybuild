@@ -23,12 +23,20 @@ PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", 
 LOCK_ROUTINES = {"lock_principal": "TABLE(principal_id text, is_admin boolean)", "lock_ledger_import": "boolean"}
 
 
-def _lock_body(name):
-    source = Path(__file__).with_name("migrations").joinpath("010_runtime_lock_helpers.sql").read_text()
-    match = re.search(r"CREATE FUNCTION " + name + r"\(.*?AS \$\$(.*?)\$\$;", source, re.DOTALL)
-    if not match:
+def _lock_body(name, through_version):
+    migrations = Path(__file__).with_name("migrations")
+    matches = []
+    for migration in sorted(migrations.glob("*.sql")):
+        if int(migration.name.split("_", 1)[0]) > through_version:
+            continue
+        source = migration.read_text()
+        matches.extend(re.findall(
+            r"CREATE(?: OR REPLACE)? FUNCTION " + name + r"\(.*?AS \$\$(.*?)\$\$;",
+            source, re.DOTALL,
+        ))
+    if not matches:
         raise ValueError("Missing canonical lock helper")
-    return " ".join(match.group(1).split())
+    return " ".join(matches[-1].split())
 
 
 def _identity(connection, expected_database, role):
@@ -146,6 +154,7 @@ def audit_runtime_role(connection, expected_database, role):
     ):
         findings.append(f"system catalog write: {table} {privilege}")
     seen_routines = set()
+    version = connection.execute("SELECT COALESCE(max(version), 0) FROM skybuild.schema_migrations").fetchone()[0]
     for oid, schema, name, body, definer, config, language, result, volatility in connection.execute(
         "SELECT p.oid, n.nspname, p.proname, p.prosrc, p.prosecdef, p.proconfig, l.lanname, "
         "pg_get_function_result(p.oid), p.provolatile FROM pg_proc p "
@@ -159,7 +168,7 @@ def audit_runtime_role(connection, expected_database, role):
             seen_routines.add(name)
             if (not definer or config != ["search_path=pg_catalog"] or language != "sql" or
                     result != LOCK_ROUTINES[name] or volatility != "v" or
-                    " ".join(body.split()) != _lock_body(name)):
+                    " ".join(body.split()) != _lock_body(name, version)):
                 findings.append("unsafe lock routine definition: " + name)
         if granted != bool(allowed):
             findings.append(f"{'excess' if granted else 'missing'} routine EXECUTE: {schema}.{name}")

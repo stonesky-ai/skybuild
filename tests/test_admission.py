@@ -7,7 +7,7 @@ import psycopg
 import pytest
 
 from skybuild.contracts import DomainError
-from test_store import actors, store
+from test_store import actors, seed_api_authority, store
 from test_claims import ready, expire
 
 
@@ -204,7 +204,7 @@ def test_markdown_authority_and_revoked_grants_block_replays(store, actors):
     failure('authorization', lambda: store.reserve_cpu(people['worker'], project, **request))
     failure('authorization', lambda: store.cancel_cpu_reservation(people['worker'], project, request['action_id'], reason='Revoked'))
     with store._connection() as connection:
-        connection.execute("INSERT INTO ledger_imports (project_id, commit_id, content_sha256, import_sha256, task_count, status_counts, authority) VALUES (%s, 'commit', %s, %s, 1, '{}'::jsonb, 'markdown')", (project, 'c' * 64, 'd' * 64))
+        connection.execute("UPDATE ledger_imports SET authority = 'markdown' WHERE project_id = %s", (project,))
     failure('authority', lambda: store.configure_cpu_pool(people['owner'], project, 2, True, 1, 'pool-again', reason='No cutover'))
     failure('authority', lambda: store.cancel_cpu_reservation(people['owner'], project, request['action_id'], reason='No cutover'))
 
@@ -229,6 +229,7 @@ def test_attempt_identity_serializes_across_project_pools(store, actors):
     from skybuild.store import OPERATIONS
     project, people = actors
     other_project = project + '-other'
+    seed_api_authority(store, other_project)
     store.provision_principal(people['worker'].principal_id, people['worker_token'],
                               grants={project: OPERATIONS, other_project: OPERATIONS})
     first = setup(store, people, project)

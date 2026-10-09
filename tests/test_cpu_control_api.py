@@ -14,6 +14,7 @@ from skybuild.client import Client
 from skybuild.contracts import DomainError
 from skybuild.store import Store
 from test_admission import setup
+from test_store import seed_api_authority
 
 assert Path(skybuild.__file__).resolve().parents[2] == Path(__file__).resolve().parents[1]
 
@@ -23,6 +24,7 @@ def controls(restricted_database):
     admin_dsn, runtime_dsn, database, _ = restricted_database
     admin, runtime = Store(admin_dsn, database), Store(runtime_dsn, database)
     project = 'cpu-controls-' + uuid4().hex
+    seed_api_authority(admin, project)
     people, tokens = {}, {}
     for name, grants in (('owner', {}), ('worker', {project: {'tasks:read', 'tasks:write', 'tasks:claim'}}),
                          ('outsider', {})):
@@ -65,8 +67,7 @@ def test_restricted_runtime_admin_auth_and_authority_fence(controls):
     assert client.get(base.replace(project, 'other-project'), headers=headers(tokens, 'worker')).status_code == 403
     assert events(admin, project) == []
     with admin._connection() as connection:
-        connection.execute("INSERT INTO ledger_imports (project_id, commit_id, content_sha256, import_sha256, task_count, status_counts, authority) "
-                           "VALUES (%s, 'commit', %s, %s, 0, '{}'::jsonb, 'markdown')", (project, 'a' * 64, 'b' * 64))
+        connection.execute("UPDATE ledger_imports SET authority = 'markdown' WHERE project_id = %s", (project,))
     for route, body in (('/central', central()), ('/local', {'enabled': True, 'expected_generation': 0, 'reason': 'No cutover'})):
         response = client.post(base + route, headers=headers(tokens, key=uuid4().hex), json=body)
         assert response.status_code == 409 and response.json()['error']['code'] == 'authority'
@@ -181,6 +182,7 @@ def test_control_read_is_scoped_coherent_and_does_not_write(controls, monkeypatc
     request = setup(admin, people, project, actor='owner')
     admin.reserve_cpu(people['owner'], project, **request)
     other_project = 'other-' + uuid4().hex
+    seed_api_authority(admin, other_project)
     other = setup(admin, people, other_project, actor='owner')
     admin.reserve_cpu(people['owner'], other_project, **other)
     # An unrelated pool contributes no capacity or held-unit data to this read.
