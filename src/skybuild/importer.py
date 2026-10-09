@@ -1,4 +1,4 @@
-"""Frozen, one-shot Markdown ledger import. This module never switches authority."""
+"""Frozen one-shot Markdown import and authority cutover; never maintain a live sync."""
 
 from __future__ import annotations
 
@@ -234,13 +234,13 @@ def import_frozen(store: Store, project_id: str, ledger_dir: Path, contract_path
 
 
 def cutover_live(store: Store, ledger_dir: Path, contract_path: Path,
-                 expected_import_sha256: str) -> dict:
-    """Atomically import current task ledgers and switch the canonical project to API authority."""
+                 expected_import_sha256: str, *, repository: Path | None = None) -> dict:
+    """Atomically import a pinned ledger source and switch the canonical project to API authority."""
     if store.expected_database != "skybuild_pilot":
         _refuse("Live task cutover requires the exact skybuild_pilot database")
     if store.expected_system_identifier is None:
         _refuse("Live task cutover requires the retained PostgreSQL system identifier")
-    plan = prepare_import(ledger_dir, contract_path)
+    plan = prepare_import(ledger_dir, contract_path, repository=repository)
     if plan["import_sha256"] != expected_import_sha256:
         _refuse("Live cutover plan hash differs from reviewed hash")
     return _apply_plan(store, "skybuild", plan, "api")

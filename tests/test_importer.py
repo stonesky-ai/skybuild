@@ -26,6 +26,7 @@ ROOT = Path(__file__).parents[1]
 LEDGERS = ROOT / "docs/design"
 CONTRACT = LEDGERS / "implementation/frozen_ledger_import.json"
 CURRENT_CONTRACT = LEDGERS / "implementation/current_task_import.json"
+CURRENT_LEDGER_COMMIT = "d79d2e1947d2c8e9edb577ab5f5093edfa3c94e3"
 
 
 def apply(store, plan, contract=CONTRACT, expected=None):
@@ -50,8 +51,19 @@ def plan(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def current_plan():
-    return prepare_import(LEDGERS, CURRENT_CONTRACT)
+def current_source(tmp_path):
+    source = tmp_path / "frozen-ledgers"
+    source.mkdir()
+    for name in ("mastertodo.md", "deferred.md", "alreadydone.md"):
+        blob = subprocess.run(["git", "show", f"{CURRENT_LEDGER_COMMIT}:docs/design/{name}"],
+                              cwd=ROOT, capture_output=True, check=True).stdout
+        (source / name).write_bytes(blob)
+    return source
+
+
+@pytest.fixture
+def current_plan(current_source):
+    return prepare_import(current_source, CURRENT_CONTRACT, repository=ROOT)
 
 
 def postgres_system_identifier(dsn):
@@ -205,7 +217,7 @@ def test_live_cutover_rehearsal_switches_authority_with_import(plan, fresh_store
             connection.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(database)))
 
 
-def test_current_38_task_cutover_rehearsal_serves_frozen_tasks(current_plan, fresh_store):
+def test_current_38_task_cutover_rehearsal_serves_frozen_tasks(current_plan, current_source, fresh_store):
     assert current_plan["task_count"] == 38
     assert current_plan["counts"] == {
         "in-progress": 8, "proposed": 12, "deferred": 16, "done": 2,
@@ -230,10 +242,11 @@ def test_current_38_task_cutover_rehearsal_serves_frozen_tasks(current_plan, fre
         }, "pre-cutover-message")
         receipt = store.message_action(owner, "skybuild", message["message_id"], "receipt", {},
                                        "pre-cutover-receipt")
-        result = cutover_live(store, LEDGERS, CURRENT_CONTRACT, current_plan["import_sha256"])
+        result = cutover_live(store, current_source, CURRENT_CONTRACT, current_plan["import_sha256"], repository=ROOT)
         assert result == {"result": "imported", "project_id": "skybuild",
                           "task_count": 38, "authority": "api"}
-        assert cutover_live(store, LEDGERS, CURRENT_CONTRACT, current_plan["import_sha256"])["result"] == "unchanged"
+        assert cutover_live(store, current_source, CURRENT_CONTRACT, current_plan["import_sha256"],
+                            repository=ROOT)["result"] == "unchanged"
         assert store.inbox(owner, "skybuild") == [receipt]
         assert store.message_action(owner, "skybuild", message["message_id"], "receipt", {},
                                     "pre-cutover-receipt") == receipt
