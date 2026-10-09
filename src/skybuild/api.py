@@ -313,8 +313,8 @@ def create_app(store: Any) -> FastAPI:
 
     @app.post(base + "/tasks/reconcile-due")
     def reconcile_due_deferrals(project_id: ProjectPath, actor: Actor, idem: Key,
-                                limit: Limit = 100, offset: Offset = 0) -> dict:
-        return store.reconcile_due_deferrals(actor, project_id, idem, limit=limit, offset=offset)
+                                limit: Limit = 100, after_task_id: Identifier | None = None) -> dict:
+        return store.reconcile_due_deferrals(actor, project_id, idem, limit=limit, after_task_id=after_task_id)
 
     @app.post(base + "/cord/messages", status_code=201)
     def send_message(project_id: ProjectPath, body: MessageCreate, actor: Actor, idem: Key) -> dict:

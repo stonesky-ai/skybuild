@@ -7,7 +7,7 @@
   const edit = byId("edit-form");
   const action = byId("action-form");
   const structure = byId("structure-form");
-  let token = "", project = "", selected = null, busy = false, stale = false, epoch = 0, controller = null, reconcileOffset = 0, structuralPlan = null, historyOffset = 0, historyHasMore = false, taskCursor = null, taskHasMore = false;
+  let token = "", project = "", selected = null, busy = false, stale = false, epoch = 0, controller = null, reconcileCursor = null, structuralPlan = null, historyOffset = 0, historyHasMore = false, taskCursor = null, taskHasMore = false;
 
   class ApiError extends Error {
     constructor(status) { super(`Request failed (${status})`); this.status = status; }
@@ -43,7 +43,7 @@
   function disconnect() {
     epoch += 1;
     if (controller) controller.abort();
-    token = ""; project = ""; selected = null; stale = false; busy = false; reconcileOffset = 0; structuralPlan = null; historyOffset = 0; historyHasMore = false; taskCursor = null; taskHasMore = false;
+    token = ""; project = ""; selected = null; stale = false; busy = false; reconcileCursor = null; structuralPlan = null; historyOffset = 0; historyHasMore = false; taskCursor = null; taskHasMore = false;
     byId("project").value = "";
     byId("token").value = "";
     create.reset(); edit.reset(); action.reset(); structure.reset();
@@ -193,13 +193,13 @@
   byId("reconcile-due").addEventListener("click", () => perform(async () => {
     let total = 0, pages = 0;
     do {
-      const result = await request(`tasks/reconcile-due?limit=100&offset=${reconcileOffset}`, {method: "POST", body: {}});
+      const result = await request(`tasks/reconcile-due?limit=100${reconcileCursor === null ? "" : `&after_task_id=${encodeURIComponent(reconcileCursor)}`}`, {method: "POST", body: {}});
       total += result.reassessed.length;
-      reconcileOffset = result.next_offset ?? 0;
+      reconcileCursor = result.next_after_task_id;
       pages += 1;
-      if (result.next_offset === null) break;
+      if (reconcileCursor === null) break;
     } while (pages < 20);
-    await loadTasks(); notice(`${total} due task(s) sent for reassessment.${reconcileOffset ? " Continue scan for more tasks." : ""}`);
+    await loadTasks(); notice(`${total} due task(s) sent for reassessment.${reconcileCursor ? " Continue scan for more tasks." : ""}`);
   }, true));
   byId("refresh-selected").addEventListener("click", () => perform(async () => { await selectTask(selected.task_id); notice("Task and history refreshed. Current revision loaded."); }));
   byId("load-more-history").addEventListener("click", () => perform(async () => {

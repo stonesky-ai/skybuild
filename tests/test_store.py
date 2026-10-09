@@ -176,14 +176,15 @@ def test_due_reconciliation_pages_past_first_hundred(store, actors):
     owner = people['owner']
     for index in range(100):
         create(store, owner, project, f'filler-{index:03}')
-    create(store, owner, project, 'due-later', priority=1)
-    store.task_action(owner, project, 'due-later', 'defer',
+    create(store, owner, project, 'z-due-later', priority=1)
+    store.task_action(owner, project, 'z-due-later', 'defer',
                       {'reason': 'Wait until date', 'until': '2030-01-01T00:00:00+00:00'}, 1, 'defer-later')
     now = datetime(2030, 1, 2, tzinfo=timezone.utc)
     first = store.reconcile_due_deferrals(owner, project, 'page-one', now=now)
-    assert first == {'scanned': 100, 'reassessed': [], 'next_offset': 100}
-    second = store.reconcile_due_deferrals(owner, project, 'page-two', offset=100, now=now)
-    assert second == {'scanned': 1, 'reassessed': ['due-later'], 'next_offset': None}
+    assert first == {'scanned': 100, 'reassessed': [], 'next_after_task_id': 'filler-099'}
+    store.update_task(owner, project, 'filler-000', {'priority': 1000}, 1, 'move-priority')
+    second = store.reconcile_due_deferrals(owner, project, 'page-two', after_task_id=first['next_after_task_id'], now=now)
+    assert second == {'scanned': 1, 'reassessed': ['z-due-later'], 'next_after_task_id': None}
 
 
 def test_split_rewires_explicit_dependencies_and_keeps_lineage(store, actors):
@@ -206,6 +207,10 @@ def test_split_rewires_explicit_dependencies_and_keeps_lineage(store, actors):
     result = store.split_task(owner, project, 'source', children,
                               {'dependent': ['child-one', 'child-two']}, 'Separate acceptance', 1, 'split-key')
     assert result['source']['status'] == 'superseded'
+    error('workflow_conflict', lambda: create(store, owner, project, 'late-dependent', dependencies=['source']))
+    create(store, owner, project, 'later-edit')
+    error('workflow_conflict', lambda: store.update_task(owner, project, 'later-edit',
+                                                         {'dependencies': ['source']}, 1, 'late-edge'))
     assert {child['task_id'] for child in result['children']} == {'child-one', 'child-two'}
     assert all(child['priority'] == source['priority'] for child in result['children'])
     assert {reference for child in result['children'] for reference in child['architecture_refs']} == {'architecture 5', 'plan 3a'}
@@ -299,6 +304,7 @@ def test_merge_preserves_prerequisites_acceptance_and_history(store, actors):
     assert result['target']['architecture_refs'] == ['architecture 5', 'plan 3a']
     assert result['rewired'][0]['dependencies'] == ['merged']
     assert {row['status'] for row in result['sources']} == {'superseded'}
+    error('workflow_conflict', lambda: create(store, owner, project, 'merge-late-dependent', dependencies=['left']))
     assert store.merge_tasks(*args) == result
     error('idempotency_conflict', lambda: store.merge_tasks(owner, project, ['left', 'right'], target,
                                                             ['dependent'], {'left': 1, 'right': 1}, 'Changed reason', 'merge-key'))

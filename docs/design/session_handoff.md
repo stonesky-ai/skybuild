@@ -1,5 +1,13 @@
 # SkyBuild session handoff
 
+## 2026-10-09 current checkpoint
+
+The frozen ledger importer and its disposable PostgreSQL rehearsal are complete and independently reviewed. The source remains pinned to commit `6d96075f88493d0b54577a2a8c9526f19a78a5ed`; a fresh dry run still projects 28 tasks and import SHA-256 `1d3400fc5ae31ddfbc9e7e55e3b231b070cf7456e11921728aac6e074cdbcdc0`. Replay checks the receipt, tasks, dependencies, history and later-added lineage. A paused-writer test verifies receipt-first lock ordering. The latest full disposable suite passed 146 tests with one existing Starlette TestClient deprecation warning; wheel and source distribution build. Implementation commits on `main` run through `8e5bd4f` with no push. The task-owned PostgreSQL container is pending cleanup at the end of this session.
+
+Follow-on isolated development added guarded manual workflow actions, due-deferral reconciliation and bounded CLI, proposed-only split/merge with immutable lineage, structural workbench preview/apply, lossless definition editing, record/lineage/history inspection, task-list cursor browsing, and a narrowly guarded definition-ready action. Each code slice received independent review. These are early task-management mechanics, not worker admission or automatic integration. Markdown remains the sole live SkyBuild task authority; the imported project is write-blocked, and no live database, deployment, worker or authority manifest changed.
+
+Next implementation boundaries are dependency-aware readiness with durable invalidation, acceptance/review/publication evidence before completion, active/unknown effect reconciliation before structural replacement, automatic due catch-up scheduling, and then fenced ownership/admission. A real cutover additionally requires source re-freeze, normalized-field reconciliation, recovery and an explicit authority switch under architecture section 4. Do not infer cutover from this rehearsal.
+
 ## 2026-10-08 frozen importer checkpoint
 
 SKYBUILD-TASK-CUTOVER preparation is implemented and independently reviewed. The importer pins the three ledger files to commit `6d96075f88493d0b54577a2a8c9526f19a78a5ed`, canonical manifest SHA-256 `292a94e84a98f2d4cd7170fe997d9ab9521a55edb16ad3af01556750f790a3a6`, and a reviewed projected import SHA-256 `1d3400fc5ae31ddfbc9e7e55e3b231b070cf7456e11921728aac6e074cdbcdc0`. The explicit dependency contract is [frozen_ledger_import.json](implementation/frozen_ledger_import.json); its interpretation, normalized-field limits and command sequence are in [frozen_ledger_import.md](implementation/frozen_ledger_import.md). The [separate review](implementation/frozen_import_review.md) records findings and corrections.
@@ -20,7 +28,7 @@ The [definition editor slice](implementation/definition_editor_slice.md) exposes
 
 Task detail now displays immutable split/merge lineage links from the API. Independent review accepted the read-only display and focused browser regression. No live task authority changed.
 
-The [bounded due-reconciliation CLI](implementation/due_reconciliation_cli.md) adds explicit `skybuild reconcile-due PROJECT_ID` pagination through the existing authenticated API action. It reports confirmed progress and an uncertain page on partial failure, with `--offset` continuation. No schedule or worker starts; imported SkyBuild task writes remain blocked while Markdown is authoritative.
+The [bounded due-reconciliation CLI](implementation/due_reconciliation_cli.md) adds explicit `skybuild reconcile-due PROJECT_ID` pagination through the existing authenticated API action. It reports confirmed progress and an uncertain page on partial failure, with `--after-task-id` continuation. No schedule or worker starts; imported SkyBuild task writes remain blocked while Markdown is authoritative.
 
 The workbench now offers a collapsible full API task record beside the editable summary, so imported metadata/provenance is inspectable as inert text. It clears on logout. No live task authority changed.
 
@@ -37,6 +45,8 @@ Importer replay now rejects changed receipt counts/authority, multiple receipts 
 The [task-list cursor slice](implementation/task_list_cursor.md) makes more than 100 tasks browsable in the workbench by immutable ID, avoiding offset shifts when priorities change. It does not alter task authority.
 
 Independent `structure_ui_review` accepted cursor paging. The full disposable suite passed 146 tests with the existing upstream warning; a final exact-100 browser regression keeps the last page visible. No live task authority changed.
+
+A final integrated review found two cross-slice gaps: new dependencies to superseded task IDs, and due reconciliation using priority/offset pages. The fixes reject new superseded edges while preserving historical source edges, and scan due tasks by stable ID cursor through Store, API, client, CLI and workbench. Independent `workflow_review` accepted the corrections; the full disposable suite passed 146 tests with the existing warning. No live task authority changed.
 
 Saved 2026-10-08 after architecture revision A33 and the subsequent implementation authorization below. Resume from /home/kevin/my_code with sibling skybuild and skykeep checkouts. This is context, not a competing design plan.
 

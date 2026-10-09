@@ -100,7 +100,10 @@ const requests = [];
 let endPage = false;
 global.fetch = async (url, options) => {
   requests.push({url, options});
-  const data = url.endsWith("/split") ? {children: [{task_id: "child"}]} :
+  const data = url.includes("/reconcile-due?") ? (url.includes("after_task_id=") ?
+      {scanned: 1, reassessed: ["due"], next_after_task_id: null} :
+      {scanned: 100, reassessed: [], next_after_task_id: "cursor-100"}) :
+    url.endsWith("/split") ? {children: [{task_id: "child"}]} :
     url.endsWith("/tasks/merge") ? {target: {task_id: "combined"}} :
     url.includes("/history?") ? (url.includes("offset=100") ? [{revision: 101, actor: "owner", operation: "updated"}] :
       Array.from({length: 100}, (_, index) => ({revision: index + 1, actor: "owner", operation: "updated"}))) :
@@ -116,6 +119,8 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 async function run() {
   get("project").value = " project "; get("token").value = "test-token";
   get("connection-form").listeners.submit({preventDefault() {}}); await tick();
+  get("reconcile-due").listeners.click(); await tick();
+  assert.ok(requests.some(request => request.url.includes("/reconcile-due?limit=100&after_task_id=cursor-100")));
   assert.match(get("task-list").querySelectorAll()[0].textContent, /proposed · triage/);
   assert.match(get("task-list").querySelectorAll()[0].textContent, /Review · owner/);
   get("task-list").querySelectorAll()[0].listeners.click(); await tick();

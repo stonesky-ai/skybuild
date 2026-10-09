@@ -281,9 +281,14 @@ class Store:
     def _dependencies(connection, project_id, task_id, dependencies):
         if task_id in dependencies:
             _invalid('A task cannot depend on itself')
-        found = connection.execute('SELECT task_id FROM tasks WHERE project_id = %s AND task_id = ANY(%s)', (project_id, dependencies)).fetchall()
+        found = connection.execute('SELECT task_id, status FROM tasks WHERE project_id = %s AND task_id = ANY(%s)', (project_id, dependencies)).fetchall()
         if len(found) != len(dependencies):
             _invalid('Dependencies must refer to existing tasks in this project')
+        existing = {row['dependency_id'] for row in connection.execute(
+            'SELECT dependency_id FROM task_dependencies WHERE project_id = %s AND task_id = %s',
+            (project_id, task_id)).fetchall()}
+        if any(row['status'] == 'superseded' and row['task_id'] not in existing for row in found):
+            raise DomainError('workflow_conflict', 'New dependencies cannot target superseded tasks', 409)
         cycle = connection.execute(
             'WITH RECURSIVE reachable(task_id) AS (SELECT unnest(%s::text[]) UNION '
             'SELECT d.dependency_id FROM task_dependencies d JOIN reachable r ON d.task_id = r.task_id WHERE d.project_id = %s) '
@@ -395,18 +400,20 @@ class Store:
                                  {'task_id': task_id, 'revision': expected_revision, 'body': body}, changes,
                                  reason=body.get('reason'))
 
-    def reconcile_due_deferrals(self, principal, project_id, idempotency_key: str, *, limit=100, offset=0, now=None) -> dict:
-        """Perform one bounded CPU-only catch-up page; caller may advance offset."""
+    def reconcile_due_deferrals(self, principal, project_id, idempotency_key: str, *, limit=100, after_task_id=None, now=None) -> dict:
+        """Perform one bounded CPU-only catch-up page by immutable task ID."""
         from .workflow import due_deferral
 
-        self._page(limit, offset)
+        self._page(limit, 0)
+        if after_task_id is not None:
+            _identifier(after_task_id, 'after_task_id')
         _text(idempotency_key, 'idempotency_key')
         now = now or datetime.now(timezone.utc)
         if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
             _invalid('Reconciliation time must include a timezone')
         with self._connection() as connection:
             self._authorize(connection, principal, project_id, 'tasks:write')
-        tasks = self.list_tasks(principal, project_id, limit=limit, offset=offset)
+        tasks = self.list_tasks(principal, project_id, limit=limit, after_task_id=after_task_id, by_id=True)
         changed = []
         for task in tasks:
             if task['status'] != 'deferred':
@@ -431,7 +438,8 @@ class Store:
                     raise
             else:
                 changed.append(task['task_id'])
-        return {'scanned': len(tasks), 'reassessed': changed, 'next_offset': offset + len(tasks) if len(tasks) == limit else None}
+        return {'scanned': len(tasks), 'reassessed': changed,
+                'next_after_task_id': tasks[-1]['task_id'] if len(tasks) == limit else None}
 
     def _change_task(self, principal, project_id, task_id, expected_revision, idempotency_key,
                      operation, payload, changes, *, reason=None):

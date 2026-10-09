@@ -119,10 +119,13 @@ class Client:
     def task_lineage(self, project_id: str, task_id: str) -> list[dict]:
         return self.request("GET", self._path(project_id, f"tasks/{self._segment(task_id)}/lineage"))
 
-    def reconcile_due_deferrals(self, project_id: str, *, limit: int = 100, offset: int = 0,
+    def reconcile_due_deferrals(self, project_id: str, *, limit: int = 100, after_task_id: str | None = None,
                                 idempotency_key: str | None = None) -> dict:
+        if after_task_id is not None and not valid_identifier(after_task_id):
+            raise ValueError("Cursor task ID is not addressable")
         return self.request("POST", self._path(project_id, "tasks/reconcile-due"), body={},
-                            params={"limit": limit, "offset": offset}, idempotency_key=idempotency_key)
+                            params={"limit": limit, **({"after_task_id": after_task_id} if after_task_id is not None else {})},
+                            idempotency_key=idempotency_key)
 
     def send_message(self, project_id: str, body: dict, *, idempotency_key: str | None = None) -> dict:
         return self.request("POST", self._path(project_id, "cord/messages"), body=body, idempotency_key=idempotency_key)

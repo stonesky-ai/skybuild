@@ -48,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
     due.add_argument("project_id")
     due.add_argument("--page-size", type=int, default=100)
     due.add_argument("--max-pages", type=int, default=20)
-    due.add_argument("--offset", type=int, default=0)
+    due.add_argument("--after-task-id")
     args = parser.parse_args(argv)
     try:
         if args.command == "ledger-manifest":
@@ -84,34 +84,35 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
         if args.command == "reconcile-due":
-            if not 1 <= args.page_size <= 100 or not 1 <= args.max_pages <= 100 or args.offset < 0:
+            if not 1 <= args.page_size <= 100 or not 1 <= args.max_pages <= 100:
                 raise ValueError("Reconciliation bounds are invalid")
-            offset, scanned, reassessed = args.offset, 0, []
+            cursor, scanned, reassessed = args.after_task_id, 0, []
             with Client(_environment("SKYBUILD_API_URL"), _environment("SKYBUILD_TOKEN")) as client:
                 for _ in range(args.max_pages):
                     try:
-                        result = client.reconcile_due_deferrals(args.project_id, limit=args.page_size, offset=offset)
-                        count, changed, next_offset = result["scanned"], result["reassessed"], result["next_offset"]
+                        result = client.reconcile_due_deferrals(args.project_id, limit=args.page_size, after_task_id=cursor)
+                        count, changed, next_cursor = result["scanned"], result["reassessed"], result["next_after_task_id"]
                         if (type(count) is not int or count < 0 or count > args.page_size or
                                 not isinstance(changed, list) or len(changed) > count or
                                 any(not isinstance(task_id, str) for task_id in changed)):
                             raise ValueError("Invalid reconciliation response")
-                        if next_offset is not None and (type(next_offset) is not int or
-                                                        next_offset != offset + count or count != args.page_size):
+                        if next_cursor is not None and (not isinstance(next_cursor, str) or
+                                                        not next_cursor or count != args.page_size or
+                                                        next_cursor == cursor):
                             raise ValueError("Invalid reconciliation cursor")
                     except (ClientError, ValueError, KeyError, TypeError):
                         print(json.dumps({"scanned": scanned, "reassessed": reassessed,
-                                          "complete": False, "next_offset": offset, "uncertain_page": True},
+                                          "complete": False, "next_after_task_id": cursor, "uncertain_page": True},
                                          ensure_ascii=False, indent=2))
-                        print("Reconciliation page unconfirmed; retry from next_offset", file=sys.stderr)
+                        print("Reconciliation page unconfirmed; retry from next_after_task_id", file=sys.stderr)
                         return 1
                     scanned += count
                     reassessed.extend(changed)
-                    if next_offset is None:
+                    if next_cursor is None:
                         break
-                    offset = next_offset
+                    cursor = next_cursor
             print(json.dumps({"scanned": scanned, "reassessed": reassessed,
-                              "complete": next_offset is None, "next_offset": next_offset}, ensure_ascii=False, indent=2))
+                              "complete": next_cursor is None, "next_after_task_id": next_cursor}, ensure_ascii=False, indent=2))
             return 0
         from .store import Store
 

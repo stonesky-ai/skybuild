@@ -5,3 +5,5 @@ The task API now offers an ID-ordered browsing mode: `GET .../tasks?by_id=true&l
 The workbench uses ID browsing with First/Next controls and keeps requests bounded to 100 records. A full page enables Next; a short page ends the scan. The browser handler, Store and HTTP regressions cover paging, exact cursor IDs and priority changes. Browsing changes no task authority.
 
 If exactly 100 tasks fill the final page, an empty Next response leaves that page visible and disables Next. Independent `structure_ui_review` accepted the final cursor and browser behavior. The full disposable PostgreSQL suite passed 146 tests with the existing Starlette TestClient deprecation warning.
+
+The due-deferral reconciler now uses the same immutable-ID cursor instead of priority/offset pages. A regression moves task priority between pages and still finds the due task. Existing split/merge source edges remain in superseded history, but new dependency edges to a superseded task are refused.

@@ -117,15 +117,17 @@ def test_cli_reconcile_due_is_bounded_and_reports_continuation(monkeypatch, caps
     monkeypatch.setenv("SKYBUILD_TOKEN", "secret-token")
     calls = []
 
-    def page(self, project_id, *, limit, offset):
-        calls.append((project_id, limit, offset))
-        return {"scanned": 2, "reassessed": [f"due-{offset}"], "next_offset": offset + 2}
+    def page(self, project_id, *, limit, after_task_id):
+        calls.append((project_id, limit, after_task_id))
+        return {"scanned": 2, "reassessed": [f"due-{after_task_id}"],
+                "next_after_task_id": "task-m" if after_task_id == "task-k" else "task-o"}
 
     monkeypatch.setattr(Client, "reconcile_due_deferrals", page)
-    assert main(["reconcile-due", "project", "--page-size", "2", "--max-pages", "2", "--offset", "10"]) == 0
+    assert main(["reconcile-due", "project", "--page-size", "2", "--max-pages", "2", "--after-task-id", "task-k"]) == 0
     result = json.loads(capsys.readouterr().out)
-    assert calls == [("project", 2, 10), ("project", 2, 12)]
-    assert result == {"scanned": 4, "reassessed": ["due-10", "due-12"], "complete": False, "next_offset": 14}
+    assert calls == [("project", 2, "task-k"), ("project", 2, "task-m")]
+    assert result == {"scanned": 4, "reassessed": ["due-task-k", "due-task-m"],
+                      "complete": False, "next_after_task_id": "task-o"}
     assert main(["reconcile-due", "project", "--max-pages", "0"]) == 1
     assert len(calls) == 2
 
@@ -136,13 +138,13 @@ def test_cli_reconcile_due_stops_after_final_page(monkeypatch, capsys):
     monkeypatch.setenv("SKYBUILD_TOKEN", "secret-token")
     calls = []
 
-    def page(self, project_id, *, limit, offset):
-        calls.append(offset)
-        return {"scanned": 1, "reassessed": ["due"], "next_offset": None}
+    def page(self, project_id, *, limit, after_task_id):
+        calls.append(after_task_id)
+        return {"scanned": 1, "reassessed": ["due"], "next_after_task_id": None}
 
     monkeypatch.setattr(Client, "reconcile_due_deferrals", page)
     assert main(["reconcile-due", "project"]) == 0
-    assert calls == [0]
+    assert calls == [None]
     assert json.loads(capsys.readouterr().out)["complete"] is True
 
 
@@ -151,16 +153,16 @@ def test_cli_reconcile_due_reports_confirmed_pages_after_later_failure(monkeypat
     monkeypatch.setenv("SKYBUILD_API_URL", "https://skybuild.test")
     monkeypatch.setenv("SKYBUILD_TOKEN", "secret-token")
 
-    def page(self, project_id, *, limit, offset):
-        if offset:
+    def page(self, project_id, *, limit, after_task_id):
+        if after_task_id:
             raise ClientError("unavailable", "secret-token")
-        return {"scanned": limit, "reassessed": ["first"], "next_offset": limit}
+        return {"scanned": limit, "reassessed": ["first"], "next_after_task_id": "task-b"}
 
     monkeypatch.setattr(Client, "reconcile_due_deferrals", page)
     assert main(["reconcile-due", "project", "--page-size", "2"]) == 1
     output = capsys.readouterr()
     assert json.loads(output.out) == {"scanned": 2, "reassessed": ["first"],
-                                     "complete": False, "next_offset": 2, "uncertain_page": True}
+                                     "complete": False, "next_after_task_id": "task-b", "uncertain_page": True}
     assert "secret-token" not in output.out + output.err
 
 
