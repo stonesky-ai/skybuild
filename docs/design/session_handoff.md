@@ -12,6 +12,8 @@ The next isolated implementation slice now adds [manual task actions](implementa
 
 A further [task split slice](implementation/task_split_slice.md) now provides atomic child creation, explicit incoming dependency rewiring, acceptance/prerequisite coverage, immutable lineage, idempotent replay and API/client access. It refuses anything except proposed source and dependents without execution history until effect reconciliation exists. Separate `split_review` challenged and accepted that boundary. The full disposable suite passed 130 tests with the existing upstream warning. Merge, automatic catch-up scheduling, broader phase transitions and structural workbench controls remain pending. No live task authority changed.
 
+The next [task merge slice](implementation/task_merge_slice.md) creates a new target from 2–10 proposed never-started sources, requiring exact source revisions, incoming dependent coverage and preservation of acceptance, architecture references and external prerequisites. It journals all affected rows and immutable lineage in one transaction. Separate `merge_review` found dropped architecture references; the corrected split/merge mapping passed independent re-review. The final full suite passed 134 tests with one existing upstream warning; wheel and source-distribution builds passed. Workbench structural controls, guarded completion, automatic due catch-up and active-effect reconciliation remain open. No live task authority changed.
+
 Saved 2026-10-08 after architecture revision A33 and the subsequent implementation authorization below. Resume from /home/kevin/my_code with sibling skybuild and skykeep checkouts. This is context, not a competing design plan.
 
 ## Committed checkpoint and immediate next task

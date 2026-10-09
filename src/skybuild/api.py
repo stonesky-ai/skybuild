@@ -92,6 +92,7 @@ class SplitChild(Input):
     title: ShortText
     description: LongText
     acceptance_criteria: TextList
+    architecture_refs: TextList | None = None
     dependencies: IdList
     responsible: WorkflowText | None = None
     next_action: OptionalText | None = None
@@ -101,6 +102,14 @@ class TaskSplit(Input):
     reason: OptionalText
     children: Annotated[list[SplitChild], Field(min_length=2, max_length=10)]
     incoming: dict[str, IdList]
+
+
+class TaskMerge(Input):
+    reason: OptionalText
+    source_task_ids: Annotated[list[Identifier], Field(min_length=2, max_length=10)]
+    target: SplitChild
+    incoming_dependents: IdList
+    expected_revisions: dict[str, StrictInt]
 
 
 class MessageCreate(Input):
@@ -290,6 +299,12 @@ def create_app(store: Any) -> FastAPI:
         return store.split_task(actor, project_id, task_id,
                                 [child.model_dump(mode="json", exclude_unset=True) for child in body.children],
                                 body.incoming, body.reason, expected, idem)
+
+    @app.post(base + "/tasks/merge")
+    def merge_tasks(project_id: ProjectPath, body: TaskMerge, actor: Actor, idem: Key) -> dict:
+        return store.merge_tasks(actor, project_id, body.source_task_ids,
+                                 body.target.model_dump(mode="json", exclude_unset=True),
+                                 body.incoming_dependents, body.expected_revisions, body.reason, idem)
 
     @app.get(base + "/tasks/{task_id}/lineage")
     def task_lineage(project_id: ProjectPath, task_id: RecordPath, actor: Actor) -> list[dict]:

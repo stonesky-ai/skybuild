@@ -104,6 +104,10 @@ class Client:
         return self.request("POST", self._path(project_id, f"tasks/{self._segment(task_id)}/split"),
                             body=body, revision=expected_revision, idempotency_key=idempotency_key)
 
+    def merge_tasks(self, project_id: str, body: dict, *, idempotency_key: str | None = None) -> dict:
+        return self.request("POST", self._path(project_id, "tasks/merge"), body=body,
+                            idempotency_key=idempotency_key)
+
     def task_lineage(self, project_id: str, task_id: str) -> list[dict]:
         return self.request("GET", self._path(project_id, f"tasks/{self._segment(task_id)}/lineage"))
 

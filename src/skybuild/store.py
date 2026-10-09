@@ -447,9 +447,10 @@ class Store:
         reason = _text(reason, 'reason', 4096)
         if type(expected_revision) is not int or expected_revision < 1:
             _invalid('Split requires a positive expected revision')
-        if not isinstance(children, list) or not 2 <= len(children) <= 10 or not isinstance(incoming, dict):
+        if not isinstance(children, list) or not 2 <= len(children) <= 10 or not isinstance(incoming, dict) or len(incoming) > 100:
             _invalid('Split requires 2–10 children and an incoming dependency map')
-        allowed = {'task_id', 'title', 'description', 'acceptance_criteria', 'dependencies', 'responsible', 'next_action'}
+        allowed = {'task_id', 'title', 'description', 'acceptance_criteria', 'architecture_refs',
+                   'dependencies', 'responsible', 'next_action'}
         child_ids = []
         for child in children:
             _body(child, allowed)
@@ -465,7 +466,9 @@ class Store:
             _invalid('Child IDs must be new and distinct')
         for dependent, replacement_ids in incoming.items():
             _identifier(dependent, 'dependent task_id')
-            if (not isinstance(replacement_ids, list) or not replacement_ids or len(replacement_ids) != len(set(replacement_ids))
+            if (not isinstance(replacement_ids, list) or not replacement_ids
+                    or any(not isinstance(item, str) for item in replacement_ids)
+                    or len(replacement_ids) != len(set(replacement_ids))
                     or any(item not in child_ids for item in replacement_ids)):
                 _invalid('Incoming dependencies need explicit child IDs')
         payload = {'task_id': task_id, 'children': children, 'incoming': incoming,
@@ -496,6 +499,9 @@ class Store:
                 allocated_acceptance = {criterion for child in children for criterion in child['acceptance_criteria']}
                 if not set(source['acceptance_criteria']) <= allocated_acceptance:
                     _invalid('Split cannot drop source acceptance criteria')
+                allocated_refs = {reference for child in children for reference in child.get('architecture_refs', [])}
+                if not set(source['architecture_refs']) <= allocated_refs:
+                    _invalid('Split cannot drop source architecture references')
                 created = []
                 for child in children:
                     child_id = child['task_id']
@@ -550,6 +556,110 @@ class Store:
                 'SELECT * FROM task_lineage WHERE project_id = %s AND (source_task_id = %s OR target_task_id = %s) '
                 'ORDER BY created_at, event_id', (project_id, task_id, task_id),
             ).fetchall())
+
+    def merge_tasks(self, principal, project_id, source_task_ids: list[str], target: dict,
+                    incoming_dependents: list[str], expected_revisions: dict[str, int], reason: str,
+                    idempotency_key: str) -> dict:
+        """Merge never-started proposed tasks into one new task in a transaction."""
+        reason = _text(reason, 'reason', 4096)
+        if (not isinstance(source_task_ids, list) or not 2 <= len(source_task_ids) <= 10
+                or any(not isinstance(item, str) for item in source_task_ids)
+                or len(set(source_task_ids)) != len(source_task_ids)):
+            _invalid('Merge requires 2–10 distinct source IDs')
+        for task_id in source_task_ids:
+            _identifier(task_id, 'source task_id')
+        if not isinstance(expected_revisions, dict) or set(expected_revisions) != set(source_task_ids):
+            _invalid('Expected revisions must cover every source')
+        if any(type(revision) is not int or revision < 1 for revision in expected_revisions.values()):
+            _invalid('Expected revisions must be positive integers')
+        if (not isinstance(incoming_dependents, list) or len(incoming_dependents) > 100
+                or any(not isinstance(item, str) for item in incoming_dependents)
+                or len(set(incoming_dependents)) != len(incoming_dependents)):
+            _invalid('Incoming dependents must be distinct task IDs')
+        for dependent in incoming_dependents:
+            _identifier(dependent, 'dependent task_id')
+        allowed = {'task_id', 'title', 'description', 'acceptance_criteria', 'architecture_refs',
+                   'dependencies', 'responsible', 'next_action'}
+        _body(target, allowed)
+        if not {'task_id', 'title', 'description', 'acceptance_criteria', 'dependencies'} <= set(target):
+            _invalid('Merged target needs identity, scope, acceptance and dependencies')
+        target_id = _identifier(target['task_id'], 'target task_id')
+        if target_id in source_task_ids or not target['acceptance_criteria']:
+            _invalid('Merged target must be new and have acceptance criteria')
+        self._task_values({key: value for key, value in target.items() if key != 'task_id'})
+        if set(target['dependencies']) & set(source_task_ids):
+            _invalid('Merged target cannot depend on replaced sources')
+        payload = {'source_task_ids': source_task_ids, 'target': target, 'incoming_dependents': incoming_dependents,
+                   'expected_revisions': expected_revisions, 'reason': reason}
+        _body(payload, set(payload))
+        with self._connection() as connection:
+            principal = self._authorize(connection, principal, project_id, 'tasks:write')
+            def mutation():
+                self._graph_lock(connection, project_id)
+                sources = [self._task(connection, project_id, task_id, lock=True) for task_id in sorted(source_task_ids)]
+                for source in sources:
+                    if source['revision'] != expected_revisions[source['task_id']]:
+                        raise DomainError('stale_revision', 'Source task revision has changed', 409)
+                    if source['status'] != 'proposed' or self._has_started_history(connection, project_id, source['task_id']):
+                        raise DomainError('workflow_conflict', 'Merge requires proposed sources with no execution history', 409)
+                rows = connection.execute(
+                    'SELECT DISTINCT task_id FROM task_dependencies WHERE project_id = %s AND dependency_id = ANY(%s) '
+                    'AND NOT (task_id = ANY(%s)) ORDER BY task_id',
+                    (project_id, source_task_ids, source_task_ids),
+                ).fetchall()
+                if set(incoming_dependents) != {row['task_id'] for row in rows}:
+                    raise DomainError('workflow_conflict', 'Incoming dependency list is incomplete or stale', 409)
+                for dependent in incoming_dependents:
+                    state = self._task(connection, project_id, dependent, lock=True)
+                    if state['status'] != 'proposed' or self._has_started_history(connection, project_id, dependent):
+                        raise DomainError('workflow_conflict', 'Cannot rewire a dependent with execution history', 409)
+                if connection.execute('SELECT 1 FROM tasks WHERE project_id = %s AND task_id = %s', (project_id, target_id)).fetchone():
+                    raise DomainError('conflict', 'Merged target task ID already exists', 409)
+                required_dependencies = set().union(*(set(source['dependencies']) for source in sources)) - set(source_task_ids)
+                required_acceptance = set().union(*(set(source['acceptance_criteria']) for source in sources))
+                required_refs = set().union(*(set(source['architecture_refs']) for source in sources))
+                if (not required_dependencies <= set(target['dependencies']) or not required_acceptance <= set(target['acceptance_criteria'])
+                        or not required_refs <= set(target.get('architecture_refs', []))):
+                    _invalid('Merge cannot drop source prerequisites, acceptance criteria or architecture references')
+                values = self._task_values({key: value for key, value in target.items() if key != 'task_id'})
+                values['priority'] = min(source['priority'] for source in sources)
+                values['metadata'] = {'_skybuild_workflow': {'generation': 0, 'merged_from': sorted(source_task_ids)}}
+                columns = [key for key in values if key != 'dependencies']
+                parameters = [Jsonb(values[key]) if key == 'metadata' else values[key] for key in columns]
+                connection.execute(sql.SQL('INSERT INTO tasks (project_id, task_id, {}) VALUES (%s, %s, {})').format(
+                    sql.SQL(', ').join(map(sql.Identifier, columns)), sql.SQL(', ').join(sql.Placeholder() for _ in columns)),
+                    (project_id, target_id, *parameters))
+                self._dependencies(connection, project_id, target_id, target['dependencies'])
+                merged = self._task(connection, project_id, target_id)
+                self._journal(connection, principal, merged, operation='created', reason=f'Merged from {", ".join(sorted(source_task_ids))}: {reason}')
+                rewired = []
+                for dependent in incoming_dependents:
+                    before = self._task(connection, project_id, dependent, lock=True)
+                    metadata = dict(before['metadata'])
+                    workflow = dict(metadata.get('_skybuild_workflow', {}))
+                    workflow['generation'] = workflow.get('generation', 0) + 1
+                    workflow.update({'last_action': 'dependency_rewired', 'reason': 'Source tasks merged'})
+                    metadata['_skybuild_workflow'] = workflow
+                    dependencies = sorted((set(before['dependencies']) - set(source_task_ids)) | {target_id})
+                    rewired.append(self._replace_task(connection, principal, project_id, dependent, before,
+                        {'dependencies': dependencies, 'status': 'blocked', 'phase': 'reassess',
+                         'blocker': 'Dependencies merged', 'next_action': 'Reassess merged dependency',
+                         'metadata': metadata}, operation='dependency_rewired', reason=f'Merge into {target_id}: {reason}'))
+                replaced = []
+                for source in sources:
+                    metadata = dict(source['metadata'])
+                    workflow = dict(metadata.get('_skybuild_workflow', {}))
+                    workflow['generation'] = workflow.get('generation', 0) + 1
+                    workflow.update({'last_action': 'merge', 'reason': reason, 'replaced_by': [target_id]})
+                    metadata['_skybuild_workflow'] = workflow
+                    replaced.append(self._replace_task(connection, principal, project_id, source['task_id'], source,
+                        {'status': 'superseded', 'phase': 'superseded', 'blocker': 'Replaced by merged task',
+                         'next_action': 'Review linked merged task', 'metadata': metadata},
+                        operation='merge', reason=reason))
+                    connection.execute('INSERT INTO task_lineage (event_id, project_id, source_task_id, target_task_id, action) VALUES (%s, %s, %s, %s, %s)',
+                                       (uuid4(), project_id, source['task_id'], target_id, 'merge'))
+                return {'sources': replaced, 'target': merged, 'rewired': rewired}
+            return self._idempotent(connection, principal, project_id, 'task.merge', idempotency_key, payload, mutation)
 
     @staticmethod
     def _has_started_history(connection, project_id, task_id):

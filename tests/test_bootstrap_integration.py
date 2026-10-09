@@ -110,6 +110,25 @@ def test_http_split_exposes_lineage_and_refuses_stale_revision(service):
     assert client.post(base + "/parent/split", json=body, headers=headers(owner_token, "stale-split", 1)).status_code == 409
 
 
+def test_http_merge_uses_all_expected_revisions(service):
+    client, _, project, _, _, owner_token, _ = service
+    base = f"/api/v1/projects/{project}/tasks"
+    for task_id in ("left", "right"):
+        created = client.post(base, json={"task_id": task_id, "title": task_id, "description": task_id,
+                                          "acceptance_criteria": [task_id]},
+                              headers=headers(owner_token, "create-" + task_id))
+        assert created.status_code == 201
+    body = {"reason": "Join scopes", "source_task_ids": ["left", "right"],
+            "expected_revisions": {"left": 1, "right": 1}, "incoming_dependents": [],
+            "target": {"task_id": "combined", "title": "Combined", "description": "Combined scope",
+                       "acceptance_criteria": ["left", "right"], "dependencies": []}}
+    response = client.post(base + "/merge", json=body, headers=headers(owner_token, "merge-key"))
+    assert response.status_code == 200, response.text
+    assert response.json()["target"]["task_id"] == "combined"
+    assert client.post(base + "/merge", json=body, headers=headers(owner_token, "merge-key")).json() == response.json()
+    assert len(client.get(base + "/combined/lineage", headers=headers(owner_token)).json()) == 2
+
+
 def test_http_cord_handling_and_transactional_reply(service):
     client, _, project, owner, worker, owner_token, worker_token = service
     base = f"/api/v1/projects/{project}/cord"

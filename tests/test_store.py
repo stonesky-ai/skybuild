@@ -151,19 +151,25 @@ def test_split_rewires_explicit_dependencies_and_keeps_lineage(store, actors):
     project, people = actors
     owner = people['owner']
     create(store, owner, project, 'base')
-    source = create(store, owner, project, 'source', dependencies=['base'], acceptance_criteria=['one', 'two'], priority=7)
+    source = create(store, owner, project, 'source', dependencies=['base'], acceptance_criteria=['one', 'two'],
+                    architecture_refs=['architecture 5', 'plan 3a'], priority=7)
     create(store, owner, project, 'dependent', dependencies=['source'])
     children = [
         {'task_id': 'child-one', 'title': 'First scope', 'description': 'First brief',
-         'acceptance_criteria': ['one'], 'dependencies': ['base']},
+         'acceptance_criteria': ['one'], 'architecture_refs': ['architecture 5'], 'dependencies': ['base']},
         {'task_id': 'child-two', 'title': 'Second scope', 'description': 'Second brief',
-         'acceptance_criteria': ['two'], 'dependencies': []},
+         'acceptance_criteria': ['two'], 'architecture_refs': ['plan 3a'], 'dependencies': []},
     ]
+    error('validation', lambda: store.split_task(owner, project, 'source',
+                                                  [{**children[0], 'architecture_refs': []}, children[1]],
+                                                  {'dependent': ['child-one', 'child-two']},
+                                                  'Dropped reference', 1, 'split-drop-ref'))
     result = store.split_task(owner, project, 'source', children,
                               {'dependent': ['child-one', 'child-two']}, 'Separate acceptance', 1, 'split-key')
     assert result['source']['status'] == 'superseded'
     assert {child['task_id'] for child in result['children']} == {'child-one', 'child-two'}
     assert all(child['priority'] == source['priority'] for child in result['children'])
+    assert {reference for child in result['children'] for reference in child['architecture_refs']} == {'architecture 5', 'plan 3a'}
     assert result['rewired'][0]['dependencies'] == ['child-one', 'child-two']
     assert result['rewired'][0]['phase'] == 'reassess'
     assert store.split_task(owner, project, 'source', children,
@@ -197,6 +203,8 @@ def test_split_refuses_incomplete_map_and_cycle_without_partial_rows(store, acto
     error('validation', lambda: store.split_task(owner, project, 'source',
                                                   [{**children[0], 'dependencies': 123}, children[1]],
                                                   {'dependent': ['first']}, 'Invalid dependencies', 1, 'invalid-list'))
+    error('validation', lambda: store.split_task(owner, project, 'source', children,
+                                                  {'dependent': [['first']]}, 'Invalid mapping', 1, 'invalid-map'))
 
 
 def test_split_refuses_reworked_started_task(store, actors):
@@ -227,6 +235,75 @@ def test_split_refuses_blocked_dependent_until_effect_reconciliation_exists(stor
     error('workflow_conflict', lambda: store.split_task(owner, project, 'source', children,
                                                         {'dependent': ['a']}, 'Split', 1, 'blocked-dependent'))
     assert len(store.task_lineage(owner, project, 'source')) == 0
+
+
+def test_merge_preserves_prerequisites_acceptance_and_history(store, actors):
+    project, people = actors
+    owner = people['owner']
+    create(store, owner, project, 'base')
+    create(store, owner, project, 'left', dependencies=['base'], acceptance_criteria=['left done'],
+           architecture_refs=['architecture 5'], priority=5)
+    create(store, owner, project, 'right', dependencies=['left'], acceptance_criteria=['right done'],
+           architecture_refs=['plan 3a'], priority=2)
+    create(store, owner, project, 'dependent', dependencies=['left', 'right'])
+    target = {'task_id': 'merged', 'title': 'Combined scope', 'description': 'Full combined brief',
+              'acceptance_criteria': ['left done', 'right done'],
+              'architecture_refs': ['architecture 5', 'plan 3a'], 'dependencies': ['base']}
+    error('validation', lambda: store.merge_tasks(owner, project, ['left', 'right'],
+                                                  {**target, 'architecture_refs': ['architecture 5']},
+                                                  ['dependent'], {'left': 1, 'right': 1},
+                                                  'Dropped reference', 'merge-drop-ref'))
+    args = (owner, project, ['left', 'right'], target, ['dependent'], {'left': 1, 'right': 1}, 'Combine related work', 'merge-key')
+    result = store.merge_tasks(*args)
+    assert result['target']['dependencies'] == ['base']
+    assert result['target']['priority'] == 2
+    assert result['target']['architecture_refs'] == ['architecture 5', 'plan 3a']
+    assert result['rewired'][0]['dependencies'] == ['merged']
+    assert {row['status'] for row in result['sources']} == {'superseded'}
+    assert store.merge_tasks(*args) == result
+    error('idempotency_conflict', lambda: store.merge_tasks(owner, project, ['left', 'right'], target,
+                                                            ['dependent'], {'left': 1, 'right': 1}, 'Changed reason', 'merge-key'))
+    assert len(store.task_lineage(owner, project, 'merged')) == 2
+    assert [event['operation'] for event in store.task_history(owner, project, 'left')] == ['created', 'merge']
+    assert [event['operation'] for event in store.task_history(owner, project, 'dependent')] == ['created', 'dependency_rewired']
+
+
+def test_merge_rejects_incomplete_map_cycle_and_dropped_acceptance(store, actors):
+    project, people = actors
+    owner = people['owner']
+    create(store, owner, project, 'left', acceptance_criteria=['left done'])
+    create(store, owner, project, 'right', acceptance_criteria=['right done'])
+    create(store, owner, project, 'dependent', dependencies=['left'])
+    target = {'task_id': 'merged', 'title': 'Merged', 'description': 'Merged',
+              'acceptance_criteria': ['left done', 'right done'], 'dependencies': []}
+    def merge(changes, incoming, key):
+        return store.merge_tasks(owner, project, ['left', 'right'], changes, incoming,
+                                 {'left': 1, 'right': 1}, 'Merge', key)
+    error('workflow_conflict', lambda: merge(target, [], 'missing'))
+    error('validation', lambda: merge({**target, 'acceptance_criteria': ['left done']}, ['dependent'], 'lost-criterion'))
+    error('dependency_cycle', lambda: merge({**target, 'dependencies': ['dependent']}, ['dependent'], 'cycle'))
+    assert {task['task_id'] for task in store.list_tasks(owner, project)} == {'left', 'right', 'dependent'}
+    assert not store.task_lineage(owner, project, 'left')
+
+
+def test_merge_refuses_stale_source_and_dropped_prerequisite(store, actors):
+    project, people = actors
+    owner = people['owner']
+    create(store, owner, project, 'base')
+    create(store, owner, project, 'left', dependencies=['base'], acceptance_criteria=['left'])
+    create(store, owner, project, 'right', acceptance_criteria=['right'])
+    target = {'task_id': 'merged', 'title': 'Merged', 'description': 'Merged',
+              'acceptance_criteria': ['left', 'right'], 'dependencies': []}
+    error('validation', lambda: store.merge_tasks(owner, project, ['left', 'right'], target, [],
+                                                  {'left': 1, 'right': 1}, 'Lost prerequisite', 'lost-base'))
+    store.update_task(owner, project, 'right', {'title': 'Changed right'}, 1, 'edit-right')
+    error('stale_revision', lambda: store.merge_tasks(owner, project, ['left', 'right'],
+                                                       {**target, 'dependencies': ['base']}, [],
+                                                       {'left': 1, 'right': 1}, 'Stale', 'stale'))
+    error('validation', lambda: store.merge_tasks(owner, project, [['left'], 'right'],
+                                                  {**target, 'dependencies': ['base']}, [],
+                                                  {'left': 1, 'right': 1}, 'Invalid IDs', 'invalid-ids'))
+    assert {task['task_id'] for task in store.list_tasks(owner, project)} == {'base', 'left', 'right'}
 
 
 def error(code, call):
