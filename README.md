@@ -27,6 +27,7 @@ events share an append-only `cpu_journal` transaction with their state changes.
 SkyBuild is being built toward a running system that rebuilds and extends itself with parallel workers. The current code is the launch-free bootstrap: a PostgreSQL task service, append-only task and Cord history, durable messages, a shared HTTP client, explicit administrative commands, and a thin browser task workbench. The deployed manual pilot serves the imported task ledger through the authenticated REST API and does not launch workers or models.
 
 The [architecture](docs/design/architecture.md) governs the [MVP sequence](docs/design/implementation_plan.md). The selected [bootstrap contract](docs/design/implementation/bootstrap.md) describes the current slice. [Session handoff](docs/design/session_handoff.md) records actual progress and remaining gates.
+At cycle closeout, merge the current `dev-NNN` branch to `main`, start the next sequential development branch with a one-line README commit, and open its standing pull request.
 
 ## Local development
 
