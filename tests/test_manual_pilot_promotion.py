@@ -300,7 +300,6 @@ def test_schema_010_role_audit_and_atomic_candidate_requalification(monkeypatch)
     old = [path for path in migrations if int(path.name.split('_', 1)[0]) <= 10]
     expansions = [path for path in migrations if int(path.name.split('_', 1)[0]) > 10]
     candidate_version = int(expansions[-1].name.split('_', 1)[0])
-    authority = next(path for path in migrations if path.name == '012_api_task_authority.sql')
     with psycopg.connect(base, autocommit=True) as cluster:
         cluster.execute(sql.SQL('CREATE DATABASE {}').format(sql.Identifier(target)))
         cluster.execute(sql.SQL('CREATE ROLE {} LOGIN PASSWORD {}').format(sql.Identifier(role), sql.Literal(role_password)))
@@ -331,10 +330,6 @@ def test_schema_010_role_audit_and_atomic_candidate_requalification(monkeypatch)
                 connection.execute('INSERT INTO schema_migrations VALUES (%s, %s)',
                                    (int(expansion.name.split('_', 1)[0]),
                                     hashlib.sha256(expansion.read_bytes()).hexdigest()))
-            assert runtime_role.provision_runtime_role(connection, target, role)['ok'] is True
-            connection.execute(authority.read_text())
-            connection.execute('INSERT INTO schema_migrations VALUES (12, %s)',
-                               (hashlib.sha256(authority.read_bytes()).hexdigest(),))
             assert runtime_role.provision_runtime_role(connection, target, role)['ok'] is True
 
         class Accepted010Store(Store):
