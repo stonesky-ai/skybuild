@@ -127,6 +127,22 @@ class Client:
                     return result
             time.sleep(min(0.1 * (2 ** attempt), 1.0))
 
+    def cpu_control_status(self, project_id: str) -> dict:
+        return self.request("GET", self._path(project_id, "cpu-controls"))
+
+    def configure_cpu_pool(self, project_id: str, capacity: int, enabled: bool, expected_generation: int,
+                           *, reason: str, idempotency_key: str | None = None) -> dict:
+        return self.request("POST", self._path(project_id, "cpu-controls/central"),
+                            body={"capacity": capacity, "enabled": enabled,
+                                  "expected_generation": expected_generation, "reason": reason},
+                            idempotency_key=idempotency_key)
+
+    def set_cpu_local_control(self, project_id: str, enabled: bool, expected_generation: int,
+                              *, reason: str, idempotency_key: str | None = None) -> dict:
+        return self.request("POST", self._path(project_id, "cpu-controls/local"),
+                            body={"enabled": enabled, "expected_generation": expected_generation, "reason": reason},
+                            idempotency_key=idempotency_key)
+
     def create_task(self, project_id: str, body: dict, *, idempotency_key: str | None = None) -> dict:
         return self.request("POST", self._path(project_id, "tasks"), body=body, idempotency_key=idempotency_key)
 
