@@ -51,6 +51,17 @@ def invoke(inputs, **kwargs):
     return marshall.marshall(root, path, output, client, project="skybuild", principal="owner", **kwargs)
 
 
+def gate_result(argv, *, ok=True, cleanup=True):
+    def value(flag):
+        return argv[argv.index(flag) + 1]
+    record = {"schema": "skybuild.gate-run.v1", "run_id": value("--run-id"),
+              "checkout": value("--checkout"), "head": value("--expected-head"),
+              "tree": value("--expected-tree"), "phase": "terminal", "status": "passed" if ok else "failed",
+              "cleanup": "confirmed" if cleanup else "unknown", "ok": ok, "exit_code": 0 if ok else 1}
+    Path(value("--artifact")).write_text(json.dumps(record))
+    return SimpleNamespace(returncode=0 if ok else 1, stdout=json.dumps({"ok": ok, "cleaned_up": cleanup}))
+
+
 def test_five_related_heads_prepare_without_publication(catalog):
     inputs = catalog(["one", "two", "three", "four", "five"])
     report = invoke(inputs, prepare_next=True)
@@ -115,10 +126,9 @@ def test_gate_requires_success_cleanup_and_unchanged_snapshot(catalog, ok, clean
     inputs = catalog(["one"])
     client = inputs[3]
     def gate(argv, **kwargs):
-        assert argv[-2:] == ["--min-available-gib", "6"]
+        assert argv[argv.index("--min-available-gib") + 1] == "6"
         assert Path(kwargs["cwd"]).name == "candidate"
-        return SimpleNamespace(returncode=0 if ok else 1,
-                               stdout=json.dumps({"ok": ok, "cleaned_up": cleanup}))
+        return gate_result(argv, ok=ok, cleanup=cleanup)
     report = invoke(inputs, gate_next=True, gate_runner=gate)
     assert report["gate_passed"] is (ok and cleanup)
     assert report["published"] is False
@@ -130,7 +140,7 @@ def test_task_change_during_passing_gate_blocks_green_handoff(catalog):
     inputs = catalog(["one"])
     def gate(*args, **kwargs):
         inputs[3].tasks["one"]["revision"] = 2
-        return SimpleNamespace(returncode=0, stdout=json.dumps({"ok": True, "cleaned_up": True}))
+        return gate_result(args[0])
     with pytest.raises(BundlePlanningError, match="API task changed"):
         invoke(inputs, gate_next=True, gate_runner=gate)
     report = json.loads((inputs[2] / "report.json").read_text())
@@ -174,8 +184,34 @@ def test_changed_frozen_evidence_blocks_green_gate(catalog):
         evidence = inputs[2] / "evidence" / "001.txt"
         evidence.chmod(0o600)
         evidence.write_text("changed")
-        return SimpleNamespace(returncode=0, stdout=json.dumps({"ok": True, "cleaned_up": True}))
+        return gate_result(args[0])
     with pytest.raises(BundlePlanningError, match="Frozen evidence changed"):
         invoke(inputs, gate_next=True, gate_runner=gate)
     report = json.loads((inputs[2] / "report.json").read_text())
     assert report["gate_passed"] is False
+
+
+def test_gate_cannot_change_head_even_when_tree_is_identical(catalog):
+    inputs = catalog(["one"])
+    def gate(argv, **kwargs):
+        result = gate_result(argv)
+        git(Path(kwargs["cwd"]), "-c", "user.name=Fixture", "-c", "user.email=fixture@localhost",
+            "commit", "--allow-empty", "-m", "unreviewed empty commit")
+        return result
+    with pytest.raises(BundlePlanningError, match="head or tree"):
+        invoke(inputs, gate_next=True, gate_runner=gate)
+    report = json.loads((inputs[2] / "report.json").read_text())
+    assert report["gate_passed"] is False
+
+
+def test_gate_requires_durable_artifact_for_exact_candidate(catalog):
+    inputs = catalog(["one"])
+    def gate(argv, **kwargs):
+        result = gate_result(argv)
+        artifact = Path(argv[argv.index("--artifact") + 1])
+        record = json.loads(artifact.read_text())
+        record["head"] = "f" * 40
+        artifact.write_text(json.dumps(record))
+        return result
+    with pytest.raises(BundlePlanningError, match="artifact"):
+        invoke(inputs, gate_next=True, gate_runner=gate)

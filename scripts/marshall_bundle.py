@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+from uuid import uuid4
 
 # A shared editable environment may point at a different worktree.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -173,8 +174,15 @@ def marshall(checkout, catalog, output, client, *, project, principal, prepare_n
             save()
         if gate_next:
             candidate = Path(report["prepared"]["candidate"])
+            run_id = "marshall-" + uuid4().hex
+            artifact = output / "gate.json"
+            report["gate_artifact"] = str(artifact)
+            save()
             process = (gate_runner or subprocess.run)(["nice", "-n", "10", sys.executable, str(root / "scripts/disposable_pg_gate.py"),
-                                      "--checkout", str(candidate), "--min-available-gib", "6"],
+                                      "--checkout", str(candidate), "--min-available-gib", "6",
+                                      "--artifact", str(artifact), "--run-id", run_id,
+                                      "--expected-head", report["prepared"]["candidate_head"],
+                                      "--expected-tree", report["prepared"]["candidate_tree"]],
                                      cwd=candidate, text=True, capture_output=True, timeout=3660)
             gate = json.loads(process.stdout)
             if not isinstance(gate, dict):
@@ -183,11 +191,19 @@ def marshall(checkout, catalog, output, client, *, project, principal, prepare_n
             if process.returncode or gate.get("ok") is not True or gate.get("cleaned_up") is not True:
                 report["next_action"] = "Resolve failed gate; preserve this candidate and freeze new inputs"
             else:
+                durable = json.loads(artifact.read_text())
+                expected = {"schema": "skybuild.gate-run.v1", "run_id": run_id,
+                            "checkout": str(candidate), "head": report["prepared"]["candidate_head"],
+                            "tree": report["prepared"]["candidate_tree"], "phase": "terminal",
+                            "status": "passed", "cleanup": "confirmed", "ok": True, "exit_code": 0}
+                if not isinstance(durable, dict) or any(durable.get(key) != value for key, value in expected.items()):
+                    raise BundlePlanningError("Gate artifact does not prove this candidate passed")
                 preparation.check_refs(root, frozen)
                 check_evidence()
                 preparation._clean(candidate)
-                if preparation.git(candidate, "rev-parse", "HEAD^{tree}") != report["prepared"]["candidate_tree"]:
-                    raise BundlePlanningError("Gate changed the candidate tree")
+                if (preparation.git(candidate, "rev-parse", "HEAD") != report["prepared"]["candidate_head"]
+                        or preparation.git(candidate, "rev-parse", "HEAD^{tree}") != report["prepared"]["candidate_tree"]):
+                    raise BundlePlanningError("Gate changed the candidate head or tree")
                 check_snapshots()
                 report["gate_passed"] = True
                 report["next_action"] = "Independent exact-candidate review, guarded publication and confirmed task inclusion"

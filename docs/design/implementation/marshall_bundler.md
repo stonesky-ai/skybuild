@@ -38,7 +38,7 @@ Supply a bounded JSON catalog (256 KiB, 1–100 explicit reviewed heads). Paths 
 }
 ```
 
-The authenticated principal must match `--principal`. Each selected task is read from REST, including its revision, status, workflow phase, and dependencies. Only `ready` or `in-progress` tasks with explicit passing exact-head reviews enter planning. The tool does not invent a ready-for-integration API phase. Task status and revision are rechecked before preparation and after a passing gate.
+The authenticated principal must match `--principal`. Each selected task is read from REST, including its revision, status, workflow phase, and dependencies. Only `ready` or `in-progress` tasks with explicit passing exact-head reviews enter planning. REST readiness enforces completed prerequisites and recursively invalidates dependents after prerequisite changes; the planner orders selected dependency edges but does not independently replace those authority checks. The tool does not invent a ready-for-integration API phase. Task status and revision are rechecked before preparation and after a passing gate.
 
 The catalog must include every task currently ready for integration, up to the policy limit. Exclusion lists are explicit operator snapshots, not a distributed reservation or automatic discovery mechanism. Refresh them before each run. Missing or stale remote refs fail closed. Task ID prefixes do not imply related code.
 
@@ -66,7 +66,7 @@ Planning records REST snapshots, skip reasons, related paths, dependency edges, 
 
 ## Gate and handoff
 
-`--gate-next` implies preparation and runs the existing disposable PostgreSQL combined gate with the owner's 6 GiB reserve. Gate success requires process success, `ok: true`, confirmed cleanup, unchanged remote refs, unchanged frozen evidence, a clean candidate with the same tree, and unchanged REST task status/revision. Failure reports never claim publication.
+`--gate-next` implies preparation and runs the existing disposable PostgreSQL combined gate with the owner's 6 GiB reserve. Gate success requires process success, `ok: true`, confirmed cleanup, unchanged remote refs, unchanged frozen evidence, a durable terminal gate artifact pinned to the exact run, head and tree, a clean candidate with the same head and tree, and unchanged REST task status/revision. Failure reports never claim publication.
 
 A green report is a handoff for independent exact-candidate review and guarded publication through one frozen bundle PR. Publication and confirmed task inclusion remain required; this tool does not replace those steps. No gate evidence is reused automatically by the integration helper.
 
