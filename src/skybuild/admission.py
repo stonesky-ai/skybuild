@@ -27,6 +27,23 @@ class CPUAdmission:
                            (uuid4(), project_id, principal.principal_id, action, reason,
                             Jsonb(_public(before)) if before else None, Jsonb(_public(after))))
 
+    def cpu_control_status(self, principal, project_id):
+        """Owner inspection of recorded restrictions, not a physical-stop claim."""
+        from .store import _public
+        with self._connection() as connection:
+            principal = self._authorize(connection, principal, project_id, 'tasks:read')
+            if not principal.is_admin:
+                raise DomainError('authorization', 'Only owner/admin may inspect CPU controls', 403)
+            # One statement gives pool restrictions and held units one snapshot.
+            row = connection.execute(
+                "SELECT (SELECT row_to_json(p) FROM ("
+                "SELECT project_id, capacity, enabled, generation, local_enabled, local_generation "
+                "FROM cpu_pools WHERE project_id = %s) p) AS pool, "
+                "(SELECT COALESCE(sum(units), 0) FROM cpu_reservations "
+                "WHERE project_id = %s AND state = 'reserved') AS held_units",
+                (project_id, project_id)).fetchone()
+            return _public({'project_id': project_id, **row})
+
     def configure_cpu_pool(self, principal, project_id, capacity, enabled, expected_generation, idempotency_key, *, reason):
         """Owner CAS of central restriction. New pools start locally disabled."""
         _integer(capacity, 'capacity', zero=True, maximum=2**31 - 1)
