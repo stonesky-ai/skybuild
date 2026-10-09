@@ -112,7 +112,7 @@ def test_candidate_gate_cleanup_and_ref_checks(tmp_path, monkeypatch, change):
         assert result["gate"] == {"ok": True, "passed": 17}
         assert result["expected_base"] == base
         if change == "default_gate":
-            assert gate_commands[0][-2:] == ["--min-available-gib", "6"]
+            assert gate_commands[0][-2:] == ["--min-available-gib", "10"]
     else:
         with pytest.raises(RuntimeError, match="gate failed|Remote refs changed|Remote base differs"):
             module.integrate(args)
