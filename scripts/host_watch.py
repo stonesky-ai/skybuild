@@ -8,6 +8,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import subprocess
@@ -62,6 +63,47 @@ def docker_gate_status() -> dict:
         return {"status": "unknown", "error": "docker_inventory_unavailable"}
 
 
+def docker_runtime_status() -> dict:
+    """Observe only the owned pilot project; never retrieve container secrets."""
+    try:
+        listed = subprocess.run(
+            ["docker", "ps", "-a", "--filter", "label=com.docker.compose.project=skybuild-pilot",
+             "--format", "{{.ID}}"], capture_output=True, text=True, timeout=5, check=True,
+        )
+        ids = listed.stdout.splitlines()
+        if not ids:
+            return {"status": "absent", "count": 0}
+        if len(ids) > 32 or any(not re.fullmatch(r"[0-9a-f]{12,64}", identifier) for identifier in ids):
+            return {"status": "unknown", "error": "invalid_runtime_inventory"}
+        inspected = subprocess.run(
+            ["docker", "inspect", "--type", "container", "--format",
+             '{{json .Name}}\t{{json .State.Status}}\t'
+             '{{if .State.Health}}{{json .State.Health.Status}}{{else}}"none"{{end}}\t'
+             '{{json .HostConfig.Memory}}\t{{json (index .Config.Labels "com.docker.compose.project")}}',
+             *ids], capture_output=True, text=True, timeout=5, check=True,
+        )
+        containers = []
+        for identifier, line in zip(ids, inspected.stdout.splitlines(), strict=True):
+            name, state, health, memory, project = (json.loads(value) for value in line.split("\t"))
+            if project != "skybuild-pilot" or not isinstance(name, str):
+                raise ValueError("Runtime ownership changed or name is unavailable")
+            known_state = state in {"created", "running", "paused", "restarting", "removing", "exited", "dead"}
+            known_health = health in {"none", "starting", "healthy", "unhealthy"}
+            known_cap = type(memory) is int and memory > 0
+            status = ("unknown" if not (known_state and known_health and known_cap) else
+                      "healthy" if state == "running" and health in {"none", "healthy"} else "failed")
+            containers.append({"id": identifier,
+                               "name": re.sub(r"[^A-Za-z0-9_.-]", "_", name.removeprefix("/"))[:128],
+                               "state": state if known_state else "unknown",
+                               "health": health if known_health else "unknown",
+                               "memory_limit_bytes": memory if known_cap else None, "status": status})
+        statuses = {container["status"] for container in containers}
+        return {"status": "unknown" if "unknown" in statuses else "attention" if "failed" in statuses else "present",
+                "count": len(containers), "containers": containers}
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        return {"status": "unknown", "error": "runtime_inventory_unavailable"}
+
+
 def worktree_status(checkout: Path) -> dict:
     try:
         listed = subprocess.run(["git", "-C", str(checkout), "worktree", "list", "--porcelain"],
@@ -107,10 +149,11 @@ def sample(reserve_bytes: int, *, disk_paths: list[Path] | None = None,
     if disk_paths is not None:
         result["disks"] = disk_status(disk_paths, disk_reserve_bytes)
         result["docker_gate"] = docker_gate_status()
+        result["docker_runtime"] = docker_runtime_status()
     if checkout is not None:
         result["worktrees"] = worktree_status(checkout)
     observed = [item["status"] for item in result.get("disks", [])]
-    observed += [result[key]["status"] for key in ("docker_gate", "worktrees") if key in result]
+    observed += [result[key]["status"] for key in ("docker_gate", "docker_runtime", "worktrees") if key in result]
     if result["status"] != "low":
         result["status"] = ("low" if "low" in observed else "unknown" if "unknown" in observed
                             else "attention" if "attention" in observed else "ok")

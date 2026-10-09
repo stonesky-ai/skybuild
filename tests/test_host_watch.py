@@ -73,6 +73,7 @@ def test_low_disk_is_reported_without_cleanup(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "read_text", meminfo)
     monkeypatch.setattr(watcher.shutil, "disk_usage", lambda path: SimpleNamespace(free=2 * 1024**3))
     monkeypatch.setattr(watcher, "docker_gate_status", lambda: {"status": "clear", "count": 0})
+    monkeypatch.setattr(watcher, "docker_runtime_status", lambda: {"status": "absent", "count": 0})
     state = watcher.sample(4 * 1024**3, disk_paths=[tmp_path])
 
     assert state["status"] == "low"
@@ -125,3 +126,92 @@ def test_watch_rejects_excessive_polling_or_lifetime(tmp_path, monkeypatch, opti
         watcher.main()
     assert stopped.value.code == 2
     assert not (tmp_path / "state.json").exists()
+
+
+def runtime_inventory(monkeypatch, rows):
+    calls = []
+
+    def fake(argv, **kwargs):
+        calls.append(argv)
+        assert kwargs["timeout"] == 5 and kwargs["check"]
+        if argv[:2] == ["docker", "ps"]:
+            return subprocess.CompletedProcess(argv, 0, "".join(identifier + "\n" for identifier, _ in rows))
+        assert argv[:2] == ["docker", "inspect"]
+        return subprocess.CompletedProcess(argv, 0, "".join(
+            "\t".join(json.dumps(field) for field in fields) + "\n" for _, fields in rows))
+
+    monkeypatch.setattr(watcher.subprocess, "run", fake)
+    return calls
+
+
+def test_runtime_selection_reports_healthy_owned_services_without_secrets(monkeypatch):
+    rows = [("abcdef012345", ["/skybuild-pilot-pg", "running", "healthy", 768 * 1024**2, "skybuild-pilot"]),
+            ("123456abcdef", ["/skybuild-pilot-api", "running", "none", 512 * 1024**2, "skybuild-pilot"])]
+    calls = runtime_inventory(monkeypatch, rows)
+    state = watcher.docker_runtime_status()
+    assert state["status"] == "present" and state["count"] == 2
+    assert [item["status"] for item in state["containers"]] == ["healthy", "healthy"]
+    assert state["containers"][1]["memory_limit_bytes"] == 512 * 1024**2
+    assert "label=com.docker.compose.project=skybuild-pilot" in calls[0]
+    assert calls[1][-2:] == [row[0] for row in rows]
+    assert all(term not in " ".join(calls[1]) for term in (".Config.Env", ".Mounts", ".State.Health.Log"))
+    assert "leftover_count" not in state and all("leftover" not in item for item in state["containers"])
+
+
+@pytest.mark.parametrize("state,health,cap,expected", [
+    ("exited", "none", 100, "attention"), ("running", "unhealthy", 100, "attention"),
+    ("restarting", "starting", 100, "attention"), ("paused", "none", 100, "attention"),
+    ("running", "starting", 100, "attention"), ("running", "none", 0, "unknown"),
+    ("running", "none", None, "unknown"), ("running", "invalid", 100, "unknown"),
+    ("unexpected", "healthy", 100, "unknown"),
+])
+def test_runtime_failure_or_missing_evidence_is_visible(monkeypatch, state, health, cap, expected):
+    runtime_inventory(monkeypatch, [("abcdef012345", ["/pilot", state, health, cap, "skybuild-pilot"])])
+    assert watcher.docker_runtime_status()["status"] == expected
+
+
+def test_runtime_names_are_sanitized_and_ownership_is_rechecked(monkeypatch):
+    runtime_inventory(monkeypatch, [("abcdef012345", ["/pilot\nunsafe", "running", "none", 100, "skybuild-pilot"])])
+    assert watcher.docker_runtime_status()["containers"][0]["name"] == "pilot_unsafe"
+    runtime_inventory(monkeypatch, [("abcdef012345", ["/other", "running", "none", 100, "other-project"])])
+    assert watcher.docker_runtime_status()["status"] == "unknown"
+
+
+def test_runtime_absence_is_distinct_from_gate_clear(monkeypatch):
+    calls = runtime_inventory(monkeypatch, [])
+    assert watcher.docker_runtime_status() == {"status": "absent", "count": 0}
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("mode", ["unavailable", "timeout", "malformed", "too_many", "missing_row"])
+def test_runtime_inventory_errors_are_bounded_and_unknown(monkeypatch, mode):
+    calls = []
+
+    def fake(argv, **kwargs):
+        calls.append(argv)
+        if mode == "unavailable":
+            raise subprocess.CalledProcessError(1, argv, stderr="private diagnostic")
+        if mode == "timeout":
+            raise subprocess.TimeoutExpired(argv, 5)
+        if argv[:2] == ["docker", "ps"]:
+            output = "invalid-id\n" if mode == "malformed" else "abcdef012345\n" * (33 if mode == "too_many" else 1)
+            return subprocess.CompletedProcess(argv, 0, output)
+        return subprocess.CompletedProcess(argv, 0, "")
+
+    monkeypatch.setattr(watcher.subprocess, "run", fake)
+    result = watcher.docker_runtime_status()
+    assert result["status"] == "unknown" and "private diagnostic" not in json.dumps(result)
+    assert len(calls) == (2 if mode == "missing_row" else 1)
+
+
+@pytest.mark.parametrize("runtime,expected", [("present", "ok"), ("attention", "attention"), ("unknown", "unknown")])
+def test_sample_combines_runtime_health_without_changing_gate_leftovers(tmp_path, monkeypatch, runtime, expected):
+    original = Path.read_text
+    monkeypatch.setattr(Path, "read_text", lambda path, *args, **kwargs:
+                        "MemAvailable: 16777216 kB\n" if str(path) == "/proc/meminfo" else original(path, *args, **kwargs))
+    monkeypatch.setattr(watcher, "disk_status", lambda *args: [{"status": "ok"}])
+    monkeypatch.setattr(watcher, "docker_gate_status", lambda: {"status": "clear", "count": 0, "leftover_count": 0})
+    monkeypatch.setattr(watcher, "docker_runtime_status", lambda: {"status": runtime, "count": 2})
+    sample = watcher.sample(8 * 1024**3, disk_paths=[tmp_path])
+    assert sample["status"] == expected
+    assert sample["docker_gate"]["leftover_count"] == 0 and sample["docker_runtime"]["count"] == 2
