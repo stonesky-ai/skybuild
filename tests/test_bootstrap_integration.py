@@ -91,6 +91,19 @@ def test_http_manual_task_action_preserves_reason_and_revision(service):
                        headers=headers(owner_token, "invalid-date", 2)).status_code == 422
 
 
+def test_http_ready_requires_acceptance_and_does_not_start_work(service):
+    client, _, project, _, _, owner_token, _ = service
+    base = f"/api/v1/projects/{project}/tasks"
+    created = client.post(base, json={"task_id": "ready-task", "title": "Ready task", "description": "Brief",
+                                      "acceptance_criteria": ["Check result"]}, headers=headers(owner_token, "create-ready"))
+    assert created.status_code == 201
+    response = client.post(base + "/ready-task/actions/ready", json={"reason": "Definition reviewed"},
+                           headers=headers(owner_token, "mark-ready", 1))
+    assert response.status_code == 200
+    assert (response.json()["status"], response.json()["phase"]) == ("ready", "ready-for-work")
+    assert response.json()["next_action"] == "Await explicit admission and ownership"
+
+
 def test_http_split_exposes_lineage_and_refuses_stale_revision(service):
     client, _, project, _, _, owner_token, _ = service
     base = f"/api/v1/projects/{project}/tasks"

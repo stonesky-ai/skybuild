@@ -94,7 +94,7 @@ class Client:
 
     def task_action(self, project_id: str, task_id: str, action: str, body: dict, *, expected_revision: int,
                     idempotency_key: str | None = None) -> dict:
-        if action not in {"rework", "reassess", "defer", "resume"}:
+        if action not in {"rework", "reassess", "defer", "resume", "ready"}:
             raise ValueError("Unknown task action")
         return self.request("POST", self._path(project_id, f"tasks/{self._segment(task_id)}/actions/{action}"),
                             body=body, revision=expected_revision, idempotency_key=idempotency_key)

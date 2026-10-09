@@ -368,6 +368,9 @@ class Store:
             _invalid('Unsupported task action')
         _body(body, ACTION_FIELDS)
         def changes(before, connection):
+            if action == 'ready' and (not before['acceptance_criteria'] or before['dependencies'] or
+                                      self._has_started_history(connection, project_id, task_id)):
+                raise DomainError('workflow_conflict', 'Readiness requires acceptance, no dependencies and no started history', 409)
             result = action_change(before, action, body)
             milestone = body.get('milestone_task_id')
             if milestone is not None:

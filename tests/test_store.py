@@ -91,6 +91,31 @@ def test_workflow_invalid_trigger_rolls_back(store, actors):
     assert len(store.task_history(identities['owner'], project, task['task_id'])) == 1
 
 
+def test_guarded_ready_requires_independent_unstarted_definition(store, actors):
+    project, people = actors
+    owner = people['owner']
+    create(store, owner, project, 'bare')
+    error('workflow_conflict', lambda: store.task_action(owner, project, 'bare', 'ready',
+                                                         {'reason': 'Definition reviewed'}, 1, 'bare-ready'))
+    create(store, owner, project, 'prerequisite')
+    create(store, owner, project, 'dependent-ready', dependencies=['prerequisite'], acceptance_criteria=['check'])
+    error('workflow_conflict', lambda: store.task_action(owner, project, 'dependent-ready', 'ready',
+                                                         {'reason': 'Definition reviewed'}, 1, 'dependent-ready'))
+    task = create(store, owner, project, 'independent-ready', acceptance_criteria=['check result'])
+    error('validation', lambda: store.task_action(owner, project, task['task_id'], 'ready',
+                                                  {'reason': 'Definition reviewed', 'next_action': 'Start now'}, 1, 'forge-admission'))
+    ready = store.task_action(owner, project, task['task_id'], 'ready', {'reason': 'Definition reviewed'}, 1, 'ready')
+    assert (ready['status'], ready['phase'], ready['blocker']) == ('ready', 'ready-for-work', None)
+    assert ready['next_action'] == 'Await explicit admission and ownership'
+    assert store.task_action(owner, project, task['task_id'], 'ready', {'reason': 'Definition reviewed'}, 1, 'ready') == ready
+    error('workflow_conflict', lambda: store.task_action(owner, project, task['task_id'], 'ready',
+                                                         {'reason': 'Again'}, 2, 'ready-again'))
+    changed = store.update_task(owner, project, task['task_id'], {'description': 'Revised brief'}, 2, 'revise-ready')
+    assert (changed['status'], changed['phase']) == ('blocked', 'reassess')
+    assert store.task_action(owner, project, task['task_id'], 'ready', {'reason': 'Re-reviewed'}, 3, 'ready-after-edit')['status'] == 'ready'
+    assert [event['operation'] for event in store.task_history(owner, project, task['task_id'])] == ['created', 'ready', 'updated', 'ready']
+
+
 def test_separate_deferral_cycles_capture_current_interrupted_phase(store, actors):
     project, people = actors
     owner = people['owner']

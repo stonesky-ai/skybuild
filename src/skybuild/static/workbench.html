@@ -70,12 +70,12 @@
         </form>
         <form id="action-form">
           <h3>Task action</h3>
-          <label for="action-kind">Action</label><select id="action-kind" disabled><option value="rework">Request rework</option><option value="reassess">Request reassessment</option><option value="defer">Defer</option><option value="resume">Resume deferred task</option></select>
+          <label for="action-kind">Action</label><select id="action-kind" disabled><option value="rework">Request rework</option><option value="reassess">Request reassessment</option><option value="defer">Defer</option><option value="resume">Resume deferred task</option><option value="ready">Mark definition ready for work</option></select>
           <label for="action-reason">Reason</label><textarea id="action-reason" required maxlength="4096" rows="2" disabled></textarea>
           <label for="action-next">Next action</label><textarea id="action-next" maxlength="4096" rows="2" disabled></textarea>
           <label for="action-until">Defer until (date and time with timezone)</label><input id="action-until" placeholder="2030-01-01T09:00:00-05:00" disabled>
           <label for="action-milestone">Or milestone task ID</label><input id="action-milestone" maxlength="200" disabled>
-          <p class="hint">Deferral requires one trigger. Actions record a reason and leave work blocked for reassessment; they do not authorize execution.</p>
+          <p class="hint">Deferral requires one trigger. Readiness requires acceptance criteria, no dependencies and no started history. No action here authorizes execution.</p>
           <button id="submit-action" type="submit" disabled>Record action</button>
         </form>
         <form id="structure-form">

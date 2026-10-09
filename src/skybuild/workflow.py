@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from .contracts import DomainError, valid_identifier
 
 ACTION_FIELDS = frozenset({"reason", "next_action", "responsible", "until", "milestone_task_id"})
-ACTIONS = frozenset({"rework", "reassess", "defer", "resume"})
+ACTIONS = frozenset({"rework", "reassess", "defer", "resume", "ready"})
 
 
 def action_change(before: dict, action: str, body: dict) -> dict:
@@ -20,6 +20,8 @@ def action_change(before: dict, action: str, body: dict) -> dict:
         raise DomainError("validation", "Action requires a bounded reason", 422)
     if action != "defer" and ("until" in body or "milestone_task_id" in body):
         raise DomainError("validation", "Only deferral accepts a trigger", 422)
+    if action == "ready" and "next_action" in body:
+        raise DomainError("validation", "Ready tasks await separate admission", 422)
     if action == "defer":
         if before["status"] == "done":
             raise DomainError("workflow_conflict", "Rework completed task before deferral", 409)
@@ -44,6 +46,10 @@ def action_change(before: dict, action: str, body: dict) -> dict:
         if before["status"] != "deferred":
             raise DomainError("workflow_conflict", "Only a deferred task can resume", 409)
         trigger = None
+    elif action == "ready":
+        if before["status"] not in {"proposed", "blocked"}:
+            raise DomainError("workflow_conflict", "Only proposed or blocked tasks can be marked ready", 409)
+        trigger = None
     else:
         if before["status"] == "deferred":
             raise DomainError("workflow_conflict", "Resume deferred task before changing its work phase", 409)
@@ -54,7 +60,8 @@ def action_change(before: dict, action: str, body: dict) -> dict:
         raise DomainError("validation", "Action requires a responsible owner", 422)
     next_action = body.get("next_action")
     if next_action is None:
-        next_action = "Review task after resume" if action == "resume" else f"Resolve {action} request"
+        next_action = ("Review task after resume" if action == "resume" else
+                       "Await explicit admission and ownership" if action == "ready" else f"Resolve {action} request")
     if not isinstance(next_action, str) or not next_action.strip() or len(next_action) > 4096:
         raise DomainError("validation", "Action requires a concrete next action", 422)
 
@@ -81,6 +88,9 @@ def action_change(before: dict, action: str, body: dict) -> dict:
                 "next_action": next_action, "responsible": responsible, "metadata": metadata}
     if action == "resume":
         return {"status": "blocked", "phase": "reassess", "blocker": reason,
+                "next_action": next_action, "responsible": responsible, "metadata": metadata}
+    if action == "ready":
+        return {"status": "ready", "phase": "ready-for-work", "blocker": None,
                 "next_action": next_action, "responsible": responsible, "metadata": metadata}
     return {"status": "blocked", "phase": "needs-rework" if action == "rework" else "reassess",
             "blocker": reason, "next_action": next_action, "responsible": responsible, "metadata": metadata}
