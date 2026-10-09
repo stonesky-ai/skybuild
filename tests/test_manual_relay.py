@@ -14,6 +14,7 @@ from skybuild.manual_cord import receive_assignment, send_result
 from skybuild.store import Store
 from test_manual_assignment import pinned  # noqa: F401
 from test_manual_dispatch import FakeClient, _git
+from test_store import seed_api_authority
 
 
 @pytest.fixture(params=["wonko", "wowbagger"])
@@ -21,12 +22,13 @@ def relay_assignment(pinned, request, monkeypatch):
     repo, envelope = pinned
     path = envelope["brief_path"]
     brief = json.loads((repo / path).read_text())
-    brief.update(worker=request.param, dispatcher="pilot_dispatcher")
+    brief.update(task_id="SKYBUILD-TASK-CUTOVER", worker=request.param, dispatcher="pilot_dispatcher")
     (repo / path).write_text(json.dumps(brief))
     _git(repo, "add", path)
     _git(repo, "commit", "-qm", "Bind pilot identities")
     base = _git(repo, "rev-parse", "HEAD")
-    monkeypatch.setattr(manual_dispatch, "_published_head", lambda _repo: base)
+    monkeypatch.setattr(manual_dispatch, "_published_head",
+                        lambda _repo, base_ref: base if base_ref == "refs/heads/dev-003" else None)
     return repo, path, brief
 
 
@@ -64,7 +66,19 @@ def test_authenticated_assignment_and_result_roundtrip(relay_assignment, restric
     project = "relay-" + uuid4().hex
     dispatcher, worker = brief["dispatcher"], brief["worker"]
     admin = Store(admin_dsn, database)
-    scopes = ["cord:send", "cord:read", "cord:handle"]
+    seed_api_authority(admin, project)
+    scopes = ["cord:send", "cord:read", "cord:handle", "tasks:read"]
+    owner, owner_token = "relay-owner-" + uuid4().hex, uuid4().hex + uuid4().hex
+    admin.provision_principal(owner, owner_token, is_admin=True,
+                              grants={project: ["tasks:read", "tasks:write"]})
+    principal = admin.authenticate(owner_token)
+    admin.create_task(principal, project,
+                      {"task_id": brief["task_id"], "title": "Manual relay task",
+                       "description": "API-bound assignment fixture",
+                       "acceptance_criteria": ["Current task status and revision are checked"]},
+                      "create-relay-task")
+    admin.task_action(principal, project, brief["task_id"], "ready",
+                      {"reason": "Test fixture approval"}, 1, "ready-relay-task")
     dispatcher_token, worker_token = uuid4().hex + uuid4().hex, uuid4().hex + uuid4().hex
     admin.provision_principal(dispatcher, dispatcher_token, grants={project: scopes})
     admin.provision_principal(worker, worker_token, grants={project: scopes})

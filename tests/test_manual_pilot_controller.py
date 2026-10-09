@@ -249,7 +249,8 @@ def test_provisioned_dispatcher_receives_worker_result_over_api(
                                    headers=headers("pilot_dispatcher"), json={})
             assert response.status_code == 200
             assert response.json()[timestamp] is not None
-        assert client.get("/api/v1/projects/skybuild/tasks", headers=dispatcher).status_code == 403
+        tasks = client.get("/api/v1/projects/skybuild/tasks", headers=dispatcher)
+        assert tasks.status_code == 200 and tasks.json() == []
         assert client.get("/api/v1/projects/other/cord/inbox", headers=dispatcher).status_code == 403
         forbidden = client.post(base + f"/messages/{assignment.json()['message_id']}/handle",
                                 headers=headers("pilot_dispatcher"), json={})
