@@ -117,8 +117,7 @@ def test_effect_writes_require_admin_and_markdown_authority_guard(store, actors)
         intent(store, people['worker'], project, task)
     assert caught.value.code == 'authorization'
     with store._connection() as connection:
-        connection.execute("INSERT INTO ledger_imports (project_id, commit_id, content_sha256, import_sha256, task_count, status_counts, authority) "
-                           "VALUES (%s, 'commit', %s, %s, 1, '{}'::jsonb, 'markdown')", (project, 'c' * 64, 'd' * 64))
+        connection.execute("UPDATE ledger_imports SET authority = 'markdown' WHERE project_id = %s", (project,))
     with pytest.raises(DomainError) as caught:
         intent(store, people['owner'], project, task)
     assert caught.value.code == 'authority'

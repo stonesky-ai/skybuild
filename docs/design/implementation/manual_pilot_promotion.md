@@ -54,7 +54,13 @@ print(json.dumps({'candidate_image': image, 'package_matches_reviewed_source': T
 PY
 ```
 
-The verification container has no network, credentials, mounts, writable root, capabilities, service listener or model invocation. Use an existing private mode-0700 evidence directory outside Git and `umask 077` for new files. Save a custom-format dump of only `skybuild_pilot` to a new file through the dedicated container's ordinary PostgreSQL channel: `docker exec --user postgres skybuild-pilot-pg nice -n 10 pg_dump --format=custom --dbname=skybuild_pilot > "$PRIVATE_DUMP"`. Check exit status and a bounded dump manifest. No password belongs in arguments. The dump has not undergone a restore drill and is not an automatic rollback guarantee; never overwrite it.
+The verification container has no network, credentials, mounts, writable root, capabilities, service listener or model invocation. Use an existing private mode-0700 evidence directory outside Git and `umask 077` for new files. Create a new custom-format dump and private source-evidence manifest through the retained full PostgreSQL container ID; the helper checks the container labels, database name and system identifier before running `pg_dump`, then binds the evidence file to the dump's path, SHA-256 and byte count:
+
+```sh
+nice -n 10 ./.venv/bin/python scripts/create_pilot_backup.py --checkout "$PWD" --container-id "$CURRENT_DB_CONTAINER" --expected-system-identifier "$CURRENT_DB_SYSTEM_ID" --backup-file "$PRIVATE_DUMP" --evidence-file "$PRIVATE_BACKUP_EVIDENCE"
+```
+
+Record the returned dump and evidence digests privately. The live cutover requires both digests, the evidence file, and the same retained system identifier; it independently checks the archive database name and live cluster identity. No password belongs in arguments. The dump has not undergone a restore drill and is not an automatic rollback guarantee; never overwrite it.
 
 Keep the same base and TLS configuration and recheck the pinned image ID before use. Rerun the full preflight immediately before the stop and save its successful JSON in a new mode-0600 `$SKYBUILD_PROMOTION_REPORT` file. It contains no secrets. Parent-directory ownership and private modes remain operator prerequisites. The later replacement uses an exclusive-name Docker creation primitive, not Compose reconciliation, so a foreign replacement is never adopted or removed.
 
@@ -190,6 +196,26 @@ curl --fail --silent --max-time 10 --cacert "$SKYBUILD_PILOT_STATE/tls/ca.crt" -
 Require HTTP readiness `{"status":"ready"}` and retain the separate transactional migration/role evidence for schema 12; the HTTP response does not expose a schema version. Require exact candidate image/container identity, unchanged runtime-only environment, TLS bindings/mounts/UID and CA fingerprint. Verify authenticated `/api/v1/me`, read-only task execution-status and owner CPU-control inspection with protected token files. Do not enable controls, reserve work, invoke a simulator, or switch ledger authority to populate a panel.
 
 On each qualified worker, rerun read-only `fleet_preflight` with existing scoped credentials and pinned `--ca-file` at the same private DNS endpoint. Then use the explicitly approved harmless Cord qualification procedure for send/receive/receipt/handle, retaining message IDs. No worker/inference starts follow. Record source/image/container/cluster IDs, schema digests, role audit, readiness, TLS expiry/fingerprint and remote outcomes privately. Declare success only when all required checks pass.
+
+## Follow-on task-authority cutover
+
+Perform this only after the candidate with migration 012 is deployed and healthy, the exact 34-task manifest below has passed the disposable rehearsal, and the owner has stopped Markdown task edits and all other ledger writers. Keep the stable deployment checkout clean at the reviewed published candidate. The live transaction independently checks the PostgreSQL system identifier, retained database container, backup archive database name and pinned backup evidence before it inserts all 34 tasks and the API-authority receipt atomically.
+
+```sh
+export SKYBUILD_EXPECTED_DATABASE='skybuild_pilot'
+# Load SKYBUILD_ROLE_ADMIN_DSN from the existing protected operator environment.
+nice -n 10 ./.venv/bin/python -m skybuild ledger-cutover \
+  --ledger-dir docs/design \
+  --contract docs/design/implementation/current_task_import.json \
+  --apply-live \
+  --expected-import-sha256 576d23f09d444e6d684b62481536ec24cb78a3feaeec092947fcb51936376710 \
+  --backup-file "$PRIVATE_DUMP" --backup-sha256 "$BACKUP_SHA256" \
+  --backup-evidence "$PRIVATE_BACKUP_EVIDENCE" --backup-evidence-sha256 "$BACKUP_EVIDENCE_SHA256" \
+  --expected-system-identifier "$CURRENT_DB_SYSTEM_ID" \
+  --database-container-id "$CURRENT_DB_CONTAINER"
+```
+
+After the transaction, verify the authenticated owner API returns exactly the 34 frozen task IDs and that `SKYBUILD-TASK-CUTOVER` history contains the `imported` event. Then use one idempotent owner update to set the next action to retire the Markdown ledgers; verify the updated revision and second history event. Preserve the workflow phase through its guarded task-action interface. Keep the retired Markdown snapshot in Git history and replace the old `mastertodo.md` contents with a generated/read-only retirement notice or API export in a subsequent reviewed change. Do not re-import the edited snapshot or add bidirectional synchronization.
 
 ## Rollback boundary and remaining gaps
 

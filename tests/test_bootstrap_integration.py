@@ -16,6 +16,7 @@ from psycopg.conninfo import conninfo_to_dict
 
 from skybuild.api import create_app
 from skybuild.store import Store
+from test_store import seed_api_authority
 
 
 @pytest.fixture(params=["migration-owner", "runtime"])
@@ -29,6 +30,7 @@ def service(request):
     store = Store(dsn, database)
     store.migrate()
     project = "http-" + uuid4().hex
+    seed_api_authority(store, project)
     owner, worker = "owner-" + uuid4().hex, "worker-" + uuid4().hex
     owner_token, worker_token = uuid4().hex + uuid4().hex, uuid4().hex + uuid4().hex
     store.provision_principal(owner, owner_token, is_admin=True)

@@ -96,17 +96,31 @@ def _public(value):
 
 
 class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
-    def __init__(self, dsn: str, expected_database: str):
+    def __init__(self, dsn: str, expected_database: str, expected_system_identifier: str | None = None):
         self.dsn = dsn
         self.expected_database = _text(expected_database, 'expected_database', 63)
+        if expected_system_identifier is not None and (
+                not isinstance(expected_system_identifier, str)
+                or not expected_system_identifier.isdecimal() or len(expected_system_identifier) > 32):
+            raise ValueError('expected_system_identifier must be a decimal PostgreSQL system identifier')
+        self.expected_system_identifier = expected_system_identifier
 
     @contextmanager
     def _connection(self):
         try:
             with psycopg.connect(self.dsn, connect_timeout=5, row_factory=dict_row) as connection:
-                actual = connection.execute('SELECT current_database() AS name').fetchone()['name']
-                if actual != self.expected_database:
+                if self.expected_system_identifier is None:
+                    identity = connection.execute('SELECT current_database() AS name').fetchone()
+                else:
+                    identity = connection.execute(
+                        'SELECT current_database() AS name, '
+                        '(SELECT system_identifier::text FROM pg_control_system()) AS system_identifier'
+                    ).fetchone()
+                if identity['name'] != self.expected_database:
                     raise DomainError('database_identity', 'Database identity does not match configuration', 503)
+                if (self.expected_system_identifier is not None
+                        and identity['system_identifier'] != self.expected_system_identifier):
+                    raise DomainError('database_identity', 'PostgreSQL cluster identity does not match configuration', 503)
                 connection.execute('SET LOCAL search_path TO skybuild, pg_catalog')
                 connection.execute("SET LOCAL statement_timeout = '10s'")
                 connection.execute("SET LOCAL lock_timeout = '5s'")

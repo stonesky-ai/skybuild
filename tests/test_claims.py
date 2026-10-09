@@ -131,12 +131,13 @@ def test_claim_markdown_authority_guard_and_revoked_grant(store, actors):
     project, people = actors
     task = ready(store, people, project)
     with store._connection() as connection:
-        connection.execute("INSERT INTO ledger_imports (project_id, commit_id, content_sha256, import_sha256, task_count, status_counts, authority) "
-                           "VALUES (%s, 'commit', %s, %s, 1, '{}'::jsonb, 'markdown')", (project, 'c' * 64, 'd' * 64))
+        connection.execute("UPDATE ledger_imports SET authority = 'markdown' WHERE project_id = %s", (project,))
     with pytest.raises(DomainError) as caught:
         store.claim_task(people['owner'], project, task['task_id'], 2, 'blocked-import')
     assert caught.value.code == 'authority'
     second_project = project + '-revoked'
+    from test_store import seed_api_authority
+    seed_api_authority(store, second_project)
     task = ready(store, people, second_project)
     with store._connection() as connection:
         connection.execute('DELETE FROM principal_grants WHERE principal_id = %s AND operation = %s',

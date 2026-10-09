@@ -12,6 +12,7 @@ from skybuild.execution_status import ExecutionStatus
 from skybuild.store import Store
 from test_store import store, actors  # noqa: F401: disposable fixtures
 from test_admission import setup
+from test_store import seed_api_authority
 from test_claims import expire
 from test_observations import packet
 
@@ -161,6 +162,7 @@ def test_same_task_id_other_project_never_enters_snapshot(store, actors):
     request = setup(store, people, project, task_id='shared-id')
     store.reserve_cpu(people['worker'], project, **request)
     other_project = 'other-' + uuid4().hex
+    seed_api_authority(store, other_project)
     other = setup(store, people, other_project, task_id='shared-id', actor='owner')
     store.reserve_cpu(people['owner'], other_project, **other)
     result = view(store, people['worker'], project, 'shared-id')
@@ -219,6 +221,7 @@ def test_restricted_role_api_auth_scope_bounds_and_missing_task(restricted_datab
     admin_dsn, runtime_dsn, database, _ = restricted_database
     admin, runtime = Store(admin_dsn, database), Store(runtime_dsn, database)
     project = 'status-' + uuid4().hex
+    seed_api_authority(admin, project)
     identities, tokens = {}, {}
     for name, grants in (('owner', {}), ('reader', {project: {'tasks:read'}}),
                          ('claim-only', {project: {'tasks:claim'}}), ('outsider', {})):

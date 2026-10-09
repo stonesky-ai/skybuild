@@ -1,0 +1,352 @@
+{
+  "schema_version": 2,
+  "commit": "8503323461db33c42af4d69d28aa6c1cb92e7e53",
+  "content_sha256": "0f6eccbe747a67b908f54cbcaca01554481752ab2ef793569e9cb351e19535f0",
+  "sources": [
+    {
+      "name": "mastertodo.md",
+      "sha256": "669df2d244f24e022ee122a01d569bd064d92f9ef7839cf56f0675ca1799bb02"
+    },
+    {
+      "name": "deferred.md",
+      "sha256": "7b8cf9a5134604369058c2a4f6d14bd1fad912406527efe1d883d9c228283c64"
+    },
+    {
+      "name": "alreadydone.md",
+      "sha256": "8d671566d861ba2e315f6b9906460a2362c08961128ab8e7bd66127680f0c7b0"
+    }
+  ],
+  "dependencies": {
+    "SKYBUILD-ARCHITECTURE": [],
+    "SKYBUILD-CAPACITY-PLAN": [],
+    "SKYBUILD-BOOTSTRAP": [
+      "SKYBUILD-ARCHITECTURE"
+    ],
+    "SKYBUILD-DAILY-DB-BACKUP": [
+      "SKYBUILD-BOOTSTRAP"
+    ],
+    "SKYBUILD-TASK-CUTOVER": [
+      "SKYBUILD-BOOTSTRAP"
+    ],
+    "SKYBUILD-TASK-WORKBENCH": [
+      "SKYBUILD-BOOTSTRAP",
+      "SKYBUILD-TASK-CUTOVER"
+    ],
+    "SKYBUILD-LEGACY-MIGRATION": [
+      "SKYBUILD-ARCHITECTURE",
+      "SKYBUILD-BOOTSTRAP"
+    ],
+    "SKYBUILD-EXECUTION-CONTROLS": [
+      "SKYBUILD-BOOTSTRAP",
+      "SKYBUILD-TASK-CUTOVER",
+      "SKYBUILD-TASK-WORKBENCH"
+    ],
+    "SKYBUILD-SHARED-INFERENCE": [
+      "SKYBUILD-BOOTSTRAP",
+      "SKYBUILD-TASK-CUTOVER",
+      "SKYBUILD-EXECUTION-CONTROLS"
+    ],
+    "SKYBUILD-BUNDLED-INTEGRATION": [
+      "SKYBUILD-BOOTSTRAP",
+      "SKYBUILD-EXECUTION-CONTROLS"
+    ],
+    "SKYBUILD-SELF-BUILD-MVP": [
+      "SKYBUILD-BOOTSTRAP",
+      "SKYBUILD-TASK-CUTOVER",
+      "SKYBUILD-TASK-WORKBENCH",
+      "SKYBUILD-EXECUTION-CONTROLS",
+      "SKYBUILD-KEEPER-ADOPTION",
+      "SKYBUILD-BUNDLED-INTEGRATION"
+    ],
+    "SKYBUILD-KEEPER-ADOPTION": [
+      "SKYBUILD-EXECUTION-CONTROLS",
+      "SKYBUILD-LEGACY-MIGRATION"
+    ],
+    "SKYBUILD-TOOLING-EXTRACTION": [
+      "SKYBUILD-LEGACY-MIGRATION",
+      "SKYBUILD-KEEPER-ADOPTION"
+    ],
+    "SKYBUILD-BACKUP-RESTORE": [
+      "SKYBUILD-DAILY-DB-BACKUP"
+    ],
+    "SKYBUILD-MULTIPROJECT": [],
+    "SKYBUILD-METRICS-AUDIT": [],
+    "SKYBUILD-RICH-CONSOLE": [],
+    "SKYBUILD-KEEPER-SIMPLIFY": [],
+    "SKYBUILD-LAPTOP-HA-DR": [],
+    "SKYBUILD-COST-AWARE-JOB-TRANSFER": [],
+    "SKYBUILD-BURST-CAPACITY-PLANNING": [
+      "SKYBUILD-COMPUTE-ECONOMICS-SPIKE"
+    ],
+    "SKYBUILD-COMPUTE-ECONOMICS-SPIKE": [],
+    "SKYBUILD-NETWORK-PROVIDERS": [],
+    "SKYBUILD-GIT-HOSTS": [],
+    "SKYBUILD-TEAM-APPROVAL-CHAIN": [],
+    "SKYBUILD-QUALITY-GATES": [
+      "SKYBUILD-SELF-BUILD-MVP"
+    ],
+    "SKYBUILD-REPOSITORY": [],
+    "SKYBUILD-DOCUMENT-STRUCTURE": [],
+    "SKYBUILD-HOST-WATCH": [
+      "SKYBUILD-BOOTSTRAP"
+    ],
+    "SKYBUILD-MANUAL-WORKER-PILOT": [
+      "SKYBUILD-BOOTSTRAP"
+    ],
+    "SKYBUILD-CORD-WAIT": [
+      "SKYBUILD-BOOTSTRAP"
+    ],
+    "SKYBUILD-PREBUNDLE-PRECHECK": [
+      "SKYBUILD-BUNDLED-INTEGRATION"
+    ],
+    "SKYBUILD-QUALITY-DEBT-CLEANUP": [
+      "SKYBUILD-SELF-BUILD-MVP",
+      "SKYBUILD-QUALITY-GATES"
+    ],
+    "SKYBUILD-REPO-REVIEW-CADENCE": [
+      "SKYBUILD-SELF-BUILD-MVP",
+      "SKYBUILD-QUALITY-GATES",
+      "SKYBUILD-QUALITY-DEBT-CLEANUP"
+    ]
+  },
+  "workflow": {
+    "SKYBUILD-ARCHITECTURE": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Review the current phase and choose the next action from the full task brief",
+      "assignee": "owner and current planning session",
+      "blocker": null
+    },
+    "SKYBUILD-CAPACITY-PLAN": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Review the current phase and choose the next action from the full task brief",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-BOOTSTRAP": {
+      "phase": "reviewed implementation slice",
+      "responsible": "lead",
+      "next_action": "qualify the restricted runtime database role and actual Tailscale/owner access before any deployment; preserve the launch-free boundary",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-HOST-WATCH": {
+      "phase": "active-box observation and legacy watcher reconciliation",
+      "responsible": "lead",
+      "next_action": "retain fresh 8 GiB-reserve samples on this host and Wonko before heavy work; reconcile older locked local watcher processes only through verified owned handles. Current watcher code is committed and present on both active boxes",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-MANUAL-WORKER-PILOT": {
+      "phase": "corrected combined bundle review",
+      "responsible": "lead dispatcher",
+      "next_action": "independently review and gate the frozen worker/dispatcher/controller bundle, publish its verified tree, then resolve controller deployment authority and qualify private access, scoped credentials and the cross-box round trip. Two disjoint briefs are committed; canonical application principals are `wonko`, `wowbagger` and `pilot_dispatcher`. Wonko has a queued read-only readiness assignment in `next-task-20261009-005.md`; production coding dispatch remains blocked on the live prerequisites",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-CORD-WAIT": {
+      "phase": "bounded REST wait implementation",
+      "responsible": "mailbox-wait author; lead owns integration",
+      "next_action": "add optional bounded inbox waiting, validate arrival/timeout/revocation behavior, independently review and publish the exact task head after the REST pilot bundle",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-DAILY-DB-BACKUP": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Select this task when its prerequisites are satisfied",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-TASK-CUTOVER": {
+      "phase": "frozen-manifest reconciliation",
+      "responsible": "lead",
+      "next_action": "finalize the exact 34-task dependency/workflow manifest and digest, complete independent exact-head review, then publish the candidate and use the guarded runtime promotion for migration 012. After verified migration, take and inspect a private PostgreSQL backup, run the atomic API-authority cutover, and verify task list/history/update after API restart. The full disposable PostgreSQL suite passed 1,034 tests, 1 skipped; no current 34-task import or live migration/cutover has run. Do not use the stale 28-task contract. At 2026-10-09, host-side TLS and owner authentication succeeded, but `/tasks` returned zero records; remote-device access and production migration/cutover remain unverified",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-TASK-WORKBENCH": {
+      "phase": "reviewed basic UI",
+      "responsible": "lead",
+      "next_action": "add remaining structural task operations and guarded workflow/reassessment; live authority still follows cutover. Browser list/create/detail/edit/history, exact dependency IDs, stale-edit refusal, logout cleanup and desktop/mobile layout passed Chromium checks and separate Sol review",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-LEGACY-MIGRATION": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Select this task when its prerequisites are satisfied",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-EXECUTION-CONTROLS": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Select this task when its prerequisites are satisfied",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-BUNDLED-INTEGRATION": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Select this task when its prerequisites are satisfied",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-SELF-BUILD-MVP": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Select this task when its prerequisites are satisfied",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-KEEPER-ADOPTION": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Select this task when its prerequisites are satisfied",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-TOOLING-EXTRACTION": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Select this task when its prerequisites are satisfied",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-BACKUP-RESTORE": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Select this task when its prerequisites are satisfied",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-MULTIPROJECT": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Wait for the documented revisit trigger, then reassess",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-METRICS-AUDIT": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Wait for the documented revisit trigger, then reassess",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-RICH-CONSOLE": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Wait for the documented revisit trigger, then reassess",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-KEEPER-SIMPLIFY": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Wait for the documented revisit trigger, then reassess",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-PREBUNDLE-PRECHECK": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Wait for the documented revisit trigger, then reassess",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-LAPTOP-HA-DR": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Wait for the documented revisit trigger, then reassess",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-COST-AWARE-JOB-TRANSFER": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Wait for the documented revisit trigger, then reassess",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-BURST-CAPACITY-PLANNING": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Wait for the documented revisit trigger, then reassess",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-COMPUTE-ECONOMICS-SPIKE": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Wait for the documented revisit trigger, then reassess",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-NETWORK-PROVIDERS": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Wait for the documented revisit trigger, then reassess",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-GIT-HOSTS": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Wait for the documented revisit trigger, then reassess",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-TEAM-APPROVAL-CHAIN": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Wait for the documented revisit trigger, then reassess",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-QUALITY-GATES": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Wait for the documented revisit trigger, then reassess",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-QUALITY-DEBT-CLEANUP": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Wait for the documented revisit trigger, then reassess",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-REPO-REVIEW-CADENCE": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Wait for the documented revisit trigger, then reassess",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-SHARED-INFERENCE": {
+      "phase": "parked",
+      "responsible": "owner and lead dispatcher",
+      "next_action": "none until the owner explicitly re-enables Brodson; then reassess scope, authority, qualification and evidence before any use",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-REPOSITORY": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": null,
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-DOCUMENT-STRUCTURE": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": null,
+      "assignee": null,
+      "blocker": null
+    }
+  }
+}
