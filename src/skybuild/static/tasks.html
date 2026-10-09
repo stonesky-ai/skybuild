@@ -47,9 +47,9 @@
     </nav>
 
     <section id="panel-list" class="tab-panel panel" role="tabpanel" aria-labelledby="tab-list">
-      <div class="section-heading"><div><h2>Task List</h2><p class="hint">Select a task to open its journal in Task History.</p></div><button id="refresh-tasks" type="button" disabled>Refresh</button></div>
+      <div class="section-heading"><div><h2>Task List</h2><p class="hint">Select a task for its journal. Click headings to sort; Ctrl-click adds a sort level. Filter under any heading; × clears it.</p></div><button id="refresh-tasks" type="button" disabled>Refresh</button></div>
       <p id="task-count">Not connected</p>
-      <div class="table-scroll"><table class="task-table"><thead><tr><th>Task</th><th>Current status</th><th>Next status</th><th>Phase</th><th>Priority</th><th>Next action / blocker</th><th>Responsible</th><th>Updated</th><th>All information</th></tr></thead><tbody id="task-rows"></tbody></table></div>
+      <div class="table-scroll"><table class="task-table"><thead id="task-head"></thead><tbody id="task-rows"></tbody></table></div>
       <div class="actions"><button id="first-tasks" type="button" disabled>First page</button><button id="next-tasks" type="button" disabled>Next page</button></div>
       <section id="selected-summary" class="selected-summary" aria-live="polite"><h3>Task details</h3><p>Select a task to view all fields.</p></section>
     </section>

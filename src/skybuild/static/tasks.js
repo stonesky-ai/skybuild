@@ -36,6 +36,20 @@
 
   let token = previewMode ? "local-preview" : "", project = previewMode ? "skybuild" : "", tasks = [], selectedTask = null, selectedHistory = [], cursor = null;
   let historyOffset = 0, historyHasMore = false, busy = false, epoch = 0;
+  const taskColumns = [
+    {key: "task", label: "Task", value: task => `${task.title || "—"} · ${task.task_id || "—"}`},
+    {key: "status", label: "Current status", value: task => task.status},
+    {key: "next", label: "Next status", value: task => task.status === "deferred" ? "blocked on resume" : task.status === "done" ? "none (complete)" : "Not recorded by API"},
+    {key: "phase", label: "Phase", value: task => task.phase},
+    {key: "priority", label: "Priority", value: task => task.priority},
+    {key: "action", label: "Next action / blocker", value: task => task.blocker || task.next_action},
+    {key: "responsible", label: "Responsible", value: task => task.responsible},
+    {key: "updated", label: "Updated", value: task => task.updated_at},
+    {key: "record", label: "All information", value: task => task.fake ? "Fake preview data" : "API task"},
+  ];
+  let sortColumns = [];
+  const taskFilters = new Map();
+  const taskCollator = new Intl.Collator(undefined, {numeric: true, sensitivity: "base"});
 
   function notify(message, error = false) {
     byId("notice").textContent = message;
@@ -139,10 +153,116 @@
     return cell;
   }
 
+  function renderTaskHead() {
+    const head = byId("task-head");
+    const headings = document.createElement("tr");
+    for (const column of taskColumns) {
+      const cell = document.createElement("th");
+      const order = sortColumns.findIndex(item => item.key === column.key);
+      const direction = order < 0 ? "" : sortColumns[order].direction;
+      cell.setAttribute("aria-sort", order === 0 ? (direction === "asc" ? "ascending" : "descending") : "none");
+      const sort = document.createElement("button");
+      sort.type = "button";
+      sort.className = "task-sort-button";
+      sort.title = "Click to sort. Control-click to add or change a secondary sort.";
+      sort.setAttribute("aria-label", `Sort by ${column.label}${order < 0 ? "" : `, ${direction === "asc" ? "ascending" : "descending"}, priority ${order + 1}`}`);
+      sort.append(document.createTextNode(column.label));
+      const marker = document.createElement("span");
+      marker.className = "sort-marker";
+      marker.textContent = order < 0 ? "" : `${direction === "asc" ? "▲" : "▼"}${sortColumns.length > 1 ? order + 1 : ""}`;
+      sort.append(marker);
+      sort.addEventListener("click", event => {
+        const existing = sortColumns.find(item => item.key === column.key);
+        const nextDirection = existing ? (existing.direction === "asc" ? "desc" : "asc") : "asc";
+        if (event.ctrlKey) {
+          sortColumns = existing
+            ? sortColumns.map(item => item.key === column.key ? {...item, direction: nextDirection} : item)
+            : [...sortColumns, {key: column.key, direction: nextDirection}];
+        } else {
+          sortColumns = [{key: column.key, direction: nextDirection}];
+        }
+        renderTasks();
+      });
+      cell.append(sort);
+      headings.append(cell);
+    }
+    const filters = document.createElement("tr");
+    filters.className = "task-filter-row";
+    for (const column of taskColumns) {
+      const cell = document.createElement("th");
+      const controls = document.createElement("div");
+      controls.className = "task-column-filter";
+      const select = document.createElement("select");
+      select.setAttribute("aria-label", `Filter ${column.label}`);
+      const all = document.createElement("option");
+      all.value = "";
+      all.textContent = "All";
+      select.append(all);
+      const values = [...new Set(tasks.map(task => {
+        const value = column.value(task);
+        return value === null || value === undefined || value === "" ? "—" : String(value);
+      }))].sort(taskCollator.compare);
+      const selected = taskFilters.get(column.key) || "";
+      if (selected && !values.includes(selected)) values.push(selected);
+      for (const value of values) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = value.length > 44 ? value.slice(0, 43) + "…" : value;
+        option.title = value;
+        select.append(option);
+      }
+      select.value = selected;
+      select.addEventListener("change", () => {
+        if (select.value) taskFilters.set(column.key, select.value);
+        else taskFilters.delete(column.key);
+        renderTasks();
+      });
+      const clear = document.createElement("button");
+      clear.type = "button";
+      clear.className = "task-filter-clear";
+      clear.textContent = "×";
+      clear.title = `Clear ${column.label} filter`;
+      clear.setAttribute("aria-label", `Clear ${column.label} filter`);
+      clear.disabled = !selected;
+      clear.addEventListener("click", () => {
+        taskFilters.delete(column.key);
+        renderTasks();
+      });
+      controls.append(select, clear);
+      cell.append(controls);
+      filters.append(cell);
+    }
+    head.replaceChildren(headings, filters);
+  }
+
+  function filteredSortedTasks() {
+    const visible = tasks.filter(task => taskColumns.every(column => {
+      if (!taskFilters.has(column.key)) return true;
+      const value = column.value(task);
+      return (value === null || value === undefined || value === "" ? "—" : String(value)) === taskFilters.get(column.key);
+    }));
+    const columns = new Map(taskColumns.map(column => [column.key, column]));
+    visible.sort((left, right) => {
+      for (const item of sortColumns) {
+        const column = columns.get(item.key);
+        const a = column.value(left), b = column.value(right);
+        const aMissing = a === null || a === undefined || a === "";
+        const bMissing = b === null || b === undefined || b === "";
+        if (aMissing !== bMissing) return aMissing ? 1 : -1;
+        const order = typeof a === "number" && typeof b === "number" ? a - b : taskCollator.compare(String(a ?? ""), String(b ?? ""));
+        if (order) return item.direction === "asc" ? order : -order;
+      }
+      return taskCollator.compare(String(left.task_id || ""), String(right.task_id || ""));
+    });
+    return visible;
+  }
+
   function renderTasks() {
     const rows = byId("task-rows");
     rows.replaceChildren();
-    tasks.forEach(task => {
+    renderTaskHead();
+    const visibleTasks = filteredSortedTasks();
+    visibleTasks.forEach(task => {
       const row = document.createElement("tr");
       const name = document.createElement("td");
       const pick = document.createElement("button");
@@ -185,12 +305,13 @@
       rows.append(row);
     });
     const fake = tasks.some(task => task.fake);
+    const filteredCount = taskFilters.size ? ` · showing ${visibleTasks.length} of ${tasks.length}` : "";
     byId("task-count").textContent = previewMode && project === "skykeep"
       ? "SkyKeep repo is listed but not configured in this preview."
       : previewMode
-        ? `${tasks.length} fake task${tasks.length === 1 ? "" : "s"} loaded · signed in as user1`
+        ? `${tasks.length} fake task${tasks.length === 1 ? "" : "s"} loaded · signed in as user1${filteredCount}`
       : !token ? "Not connected"
-        : `${tasks.length} task${tasks.length === 1 ? "" : "s"} loaded for ${project}${fake ? " · API returned no tasks; showing fake preview records" : ""}`;
+        : `${tasks.length} task${tasks.length === 1 ? "" : "s"} loaded for ${project}${fake ? " · API returned no tasks; showing fake preview records" : ""}${filteredCount}`;
     renderTaskPicker();
     controls();
   }
