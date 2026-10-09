@@ -14,7 +14,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from create_pilot_backup import create_backup
 
 
-def test_backup_preflight_requires_private_pinned_postgres_archive(tmp_path, monkeypatch):
+@pytest.mark.parametrize("archive_line", [b";     Database: skybuild_pilot\n", b";     dbname: skybuild_pilot\n"])
+def test_backup_preflight_requires_private_pinned_postgres_archive(tmp_path, monkeypatch, archive_line):
     repository = tmp_path / "repo"
     repository.mkdir()
     backup = tmp_path / "pilot.dump"
@@ -28,7 +29,7 @@ def test_backup_preflight_requires_private_pinned_postgres_archive(tmp_path, mon
     evidence.write_text(json.dumps(manifest))
     evidence.chmod(0o600)
     monkeypatch.setattr("skybuild.cutover.subprocess.run", lambda *args, **kwargs:
-                        SimpleNamespace(returncode=0, stdout=b";     Database: skybuild_pilot\n"))
+                        SimpleNamespace(returncode=0, stdout=archive_line))
     evidence_sha = hashlib.sha256(evidence.read_bytes()).hexdigest()
     report = verify_backup(backup, hashlib.sha256(payload).hexdigest(), repository,
                            evidence_path=evidence, expected_evidence_sha256=evidence_sha,
@@ -172,7 +173,7 @@ def test_backup_creation_binds_dump_to_retained_container_and_cluster(tmp_path, 
             return SimpleNamespace(returncode=0)
         if args[0:2] == ["docker", "exec"] and "pg_restore" in args:
             assert container in args
-            return SimpleNamespace(returncode=0, stdout=b";     Database: skybuild_pilot\n")
+            return SimpleNamespace(returncode=0, stdout=b";     dbname: skybuild_pilot\n")
         raise AssertionError("unexpected subprocess")
 
     monkeypatch.setattr("create_pilot_backup.subprocess.run", run)

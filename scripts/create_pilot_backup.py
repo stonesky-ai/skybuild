@@ -62,7 +62,7 @@ def create_backup(repository: Path, container_id: str, expected_system_identifie
         listed = subprocess.run(["docker", "exec", "--interactive", "--user", "postgres", container_id,
                                  "pg_restore", "--list"], stdin=archive, capture_output=True,
                                 check=False, timeout=30)
-    archive_databases = re.findall(r"^;\s+Database: ([^\r\n]*)\s*$",
+    archive_databases = re.findall(r"^;\s+(?:Database|dbname): ([^\r\n]*)\s*$",
                                    listed.stdout.decode("utf-8", errors="replace"), re.MULTILINE)
     if listed.returncode or archive_databases != ["skybuild_pilot"] or len(listed.stdout) > 1_048_576:
         raise ValueError("Fresh PostgreSQL archive did not pass the pilot database listing check")
