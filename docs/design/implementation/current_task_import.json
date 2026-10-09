@@ -1,11 +1,11 @@
 {
   "schema_version": 2,
-  "commit": "8503323461db33c42af4d69d28aa6c1cb92e7e53",
-  "content_sha256": "0f6eccbe747a67b908f54cbcaca01554481752ab2ef793569e9cb351e19535f0",
+  "commit": "d79d2e1947d2c8e9edb577ab5f5093edfa3c94e3",
+  "content_sha256": "307019c967c0531912be0441809da8d89ca506905ff63594976bf5463ba142c7",
   "sources": [
     {
       "name": "mastertodo.md",
-      "sha256": "669df2d244f24e022ee122a01d569bd064d92f9ef7839cf56f0675ca1799bb02"
+      "sha256": "78bfb6047715dfdb35b96f444ff44b7ce61f366bb364ae09326460bf34979472"
     },
     {
       "name": "deferred.md",
@@ -107,6 +107,18 @@
       "SKYBUILD-SELF-BUILD-MVP",
       "SKYBUILD-QUALITY-GATES",
       "SKYBUILD-QUALITY-DEBT-CLEANUP"
+    ],
+    "SKYBUILD-PG-TEST-ISOLATION": [
+      "SKYBUILD-BOOTSTRAP"
+    ],
+    "SKYBUILD-PG-TEST-SCHEMA-FIXTURE": [
+      "SKYBUILD-BOOTSTRAP"
+    ],
+    "SKYBUILD-PG-TEST-SUITE-MIGRATION": [
+      "SKYBUILD-PG-TEST-SCHEMA-FIXTURE"
+    ],
+    "SKYBUILD-PG-TEST-GATE-CUTOVER": [
+      "SKYBUILD-PG-TEST-SUITE-MIGRATION"
     ]
   },
   "workflow": {
@@ -160,9 +172,9 @@
       "blocker": null
     },
     "SKYBUILD-TASK-CUTOVER": {
-      "phase": "frozen-manifest reconciliation",
+      "phase": "freeze and reconcile current 38-task ledger",
       "responsible": "lead",
-      "next_action": "finalize the exact 34-task dependency/workflow manifest and digest, complete independent exact-head review, then publish the candidate and use the guarded runtime promotion for migration 012. After verified migration, take and inspect a private PostgreSQL backup, run the atomic API-authority cutover, and verify task list/history/update after API restart. The full disposable PostgreSQL suite passed 1,034 tests, 1 skipped; no current 34-task import or live migration/cutover has run. Do not use the stale 28-task contract. At 2026-10-09, host-side TLS and owner authentication succeeded, but `/tasks` returned zero records; remote-device access and production migration/cutover remain unverified",
+      "next_action": "freeze all three current ledgers in a clean commit, independently reconcile the 38-task dependency/workflow mapping and import digest, and repeat the disposable PostgreSQL rehearsal. Then perform guarded migration 012 promotion, create and inspect the pinned private backup, and run the atomic API-authority import. Verify all 38 task IDs, history, update and restart through the authenticated API; then replace Markdown ledgers with one-way read-only exports. Do not use the stale 28- or 34-task contracts. The live database remains schema 11 with no authority receipt and zero tasks; remote-device access and runtime-role/cutover acceptance remain unverified",
       "assignee": null,
       "blocker": null
     },
@@ -216,6 +228,34 @@
       "blocker": null
     },
     "SKYBUILD-BACKUP-RESTORE": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Select this task when its prerequisites are satisfied",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-PG-TEST-ISOLATION": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Select this task when its prerequisites are satisfied",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-PG-TEST-SCHEMA-FIXTURE": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Select this task when its prerequisites are satisfied",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-PG-TEST-SUITE-MIGRATION": {
+      "phase": "imported",
+      "responsible": "owner",
+      "next_action": "Select this task when its prerequisites are satisfied",
+      "assignee": null,
+      "blocker": null
+    },
+    "SKYBUILD-PG-TEST-GATE-CUTOVER": {
       "phase": "imported",
       "responsible": "owner",
       "next_action": "Select this task when its prerequisites are satisfied",
