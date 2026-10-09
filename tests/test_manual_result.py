@@ -230,11 +230,11 @@ def test_cli_suppresses_secret_diagnostics_and_expiry_precedes_dns(collection, m
     def failed(*args, **kw):
         raise ResultError('SECRET transport diagnostic')
     monkeypatch.setattr(module, 'receive_result', failed)
-    assert module.main(argv) == 2
+    assert module._main(argv) == 2
     assert 'SECRET' not in capsys.readouterr().err
     monkeypatch.setattr(module, '_private_endpoint', lambda *args: pytest.fail('Expired collector reached DNS'))
     argv[argv.index('--approval-until') + 1] = '2000-01-01T00:00:00+00:00'
-    assert module.main(argv) == 2
+    assert module._main(argv) == 2
 
 
 def test_real_client_requires_disabled_automatic_retries(collection):
@@ -247,104 +247,122 @@ def test_real_client_requires_disabled_automatic_retries(collection):
             receive_result(client, 'skybuild', repo, **kwargs)
 
 
-def test_progressing_http_body_cannot_outlive_total_deadline(collection):
-    """Read inactivity timeouts alone cannot bound a continuously slow body."""
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+def cli_args(collection):
+    _, repo, kwargs, *_ = collection
+    assignment = repo.parent / 'assignment.json'
+    assignment.write_text(json.dumps(kwargs['assignment']))
+    token = repo.parent / 'token'
+    token.write_text('synthetic-token-xxxxxxxxxxxxxxxxxxxxxxxx')
+    token.chmod(0o600)
+    values = {'url': 'https://private.ts.net', 'project': 'skybuild',
+              'worker': kwargs['worker'], 'dispatcher': kwargs['dispatcher'],
+              'assignment-id': kwargs['assignment_id'], 'task-id': kwargs['task_id'],
+              'base-sha': kwargs['base_sha'], 'message-id': kwargs['message_id'],
+              'approval-until': '2999-01-01T00:00:00+00:00', 'token-file': token,
+              'checkout': repo, 'assignment': assignment,
+              'destination': kwargs['destination'], 'duration': 1}
+    return [str(part) for pair in values.items() for part in ('--' + pair[0], pair[1])]
+
+
+def test_cli_supervisor_bounds_real_libc_dns(collection, tmp_path, monkeypatch, capsys):
+    import socket
+    import time
+    import skybuild.manual_result as module
+    source = tmp_path / 'resolver.c'
+    source.write_text("""
+#include <resolv.h>
+#include <arpa/inet.h>
+int configure_resolver(unsigned short port) {
+    res_state r = __res_state();
+    if (res_ninit(r)) return -1;
+    r->nscount = 1;
+    r->nsaddr_list[0].sin_family = AF_INET;
+    r->nsaddr_list[0].sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    r->nsaddr_list[0].sin_port = htons(port);
+    r->retrans = 3; r->retry = 1;
+    r->options |= RES_INIT;
+    r->options &= ~(RES_ROTATE | RES_USEVC);
+    return 0;
+}
+""")
+    library = tmp_path / 'resolver.so'
+    subprocess.run(['cc', '-shared', '-fPIC', str(source), '-o', str(library), '-lresolv'], check=True)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as resolver:
+        resolver.bind(('127.0.0.1', 0))
+        resolver.settimeout(0.2)
+        prefix = ("import ctypes; lib=ctypes.CDLL(" + repr(str(library)) +
+                  "); assert lib.configure_resolver(" + str(resolver.getsockname()[1]) + ") == 0; ")
+        monkeypatch.setattr(module, '_CHILD_CODE', prefix + module._CHILD_CODE)
+        started = time.monotonic()
+        assert module.main(cli_args(collection)) == 2
+        assert time.monotonic() - started < 1.8
+        assert resolver.recvfrom(4096)[0]  # Actual libc resolver reached the dropped UDP reply.
+    assert not collection[2]['destination'].exists()
+    assert 'synthetic-token' not in capsys.readouterr().err
+
+
+def test_cli_supervisor_bounds_progressing_http_body(collection, monkeypatch):
     import threading
     import time
-    from skybuild.client import Client
-
-    _, repo, kwargs, *_ = collection
-    body = json.dumps({'principal_id': kwargs['dispatcher'], 'is_admin': False,
-                       'grants': {'skybuild': ['cord:read', 'cord:send', 'cord:handle']}}).encode()
-
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import skybuild.manual_result as module
+    reached = threading.Event()
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
-
         def do_GET(self):
+            reached.set()
             self.send_response(200)
-            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Content-Length', '100')
             self.end_headers()
             try:
-                for offset in range(0, len(body), 4):
-                    self.wfile.write(body[offset:offset + 4])
+                for _ in range(100):
+                    self.wfile.write(b' ')
                     self.wfile.flush()
                     time.sleep(0.08)
             except (BrokenPipeError, ConnectionResetError):
                 pass
-
     server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
-    server.daemon_threads = True
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    kwargs.update(clock=time.time, monotonic=time.monotonic, duration=1,
-                  approval_until='2999-01-01T00:00:00+00:00')
     try:
-        with Client(f'http://127.0.0.1:{server.server_port}', 'synthetic-token', retries=0,
-                    timeout=1, trust_env=False) as client:
-            started = time.monotonic()
-            with pytest.raises(ResultError, match='deadline'):
-                receive_result(client, 'skybuild', repo, **kwargs)
-            elapsed = time.monotonic() - started
-        assert 0.8 <= elapsed < 1.6
-        assert not kwargs['destination'].exists()
+        # Exercise real CLI credential/client setup and real progressing HTTP.
+        code = module._CHILD_CODE.replace('from skybuild.manual_result import _main;',
+            'import skybuild.manual_result as m; '
+            'm._private_endpoint=lambda url,resolver:url; '
+            'm.receive_result=lambda client,*args,**kwargs:client.whoami(); '
+            'from skybuild.manual_result import _main;')
+        monkeypatch.setattr(module, '_CHILD_CODE', code)
+        argv = cli_args(collection)
+        argv[argv.index('--url') + 1] = 'http://127.0.0.1:' + str(server.server_port)
+        started = time.monotonic()
+        assert module.main(argv) == 2
+        assert time.monotonic() - started < 1.8
+        assert reached.is_set()  # An unrelated preflight error cannot satisfy this test.
     finally:
         server.shutdown()
         server.server_close()
-        thread.join(timeout=2)
+        thread.join(timeout=1)
+    assert not collection[2]['destination'].exists()
 
 
-def test_cli_blocked_resolver_is_interrupted_before_credentials(collection, monkeypatch, capsys):
+def test_cli_cutoff_preserves_saved_evidence_for_valid_restart(collection, monkeypatch):
     import time
     import skybuild.manual_result as module
-    _, repo, kwargs, *_ = collection
-    argv = ['--url', 'https://private.ts.net', '--project', 'skybuild',
-            '--worker', kwargs['worker'], '--dispatcher', kwargs['dispatcher'],
-            '--assignment-id', kwargs['assignment_id'], '--task-id', kwargs['task_id'],
-            '--base-sha', kwargs['base_sha'], '--message-id', kwargs['message_id'],
-            '--approval-until', '2999-01-01T00:00:00+00:00', '--token-file', 'unused',
-            '--checkout', str(repo), '--assignment', 'unused', '--duration', '1',
-            '--destination', str(kwargs['destination'])]
-
-    def blocked(host):
-        time.sleep(3)
-        return ['100.100.100.100']
-
-    monkeypatch.setattr(module, '_resolved_addresses', blocked)
-    monkeypatch.setattr(module, '_token_from_file', lambda *args: pytest.fail('Blocked DNS reached credentials'))
+    collect(collection)
+    path = collection[2]['destination']
+    original = path.read_bytes()
+    path.unlink()
+    code = ("import sys; sys.path.insert(0," + repr(str(module.Path(module.__file__).resolve().parents[1])) +
+            "); import time, signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); from pathlib import Path; from skybuild.manual_cord import _private_write; "
+            "_private_write(Path(" + repr(str(path)) + "), " + repr(original) + "); time.sleep(3)")
+    monkeypatch.setattr(module, '_CHILD_CODE', code)
     started = time.monotonic()
-    assert module.main(argv) == 2
-    assert 0.8 <= time.monotonic() - started < 1.6
-    assert 'failed' in capsys.readouterr().err
-    assert not kwargs['destination'].exists()
-
-
-def test_interrupted_receipt_preserves_evidence_for_valid_restart(collection):
-    import time
-    client, _, kwargs, _, _, actions, *_ = collection
-    original = client.message_action
-
-    def accepted_then_blocked(*args, **options):
-        original(*args, **options)
-        time.sleep(3)
-
-    client.message_action = accepted_then_blocked
-    kwargs['duration'] = 1
-    started = time.monotonic()
-    with pytest.raises(ResultError, match='deadline'):
-        collect(collection)
-    assert time.monotonic() - started < 1.6
-    saved = kwargs['destination'].read_bytes()
-    client.message_action = original
+    assert module.main(cli_args(collection)) == 2
+    assert time.monotonic() - started < 1.8
+    assert path.read_bytes() == original
+    actions = collection[5]
+    previous = actions[-1]
     assert collect(collection)['receipted'] is True
-    assert kwargs['destination'].read_bytes() == saved
-    assert actions[0] == actions[1] and actions[0][2] == 'receipt'
-
-
-def test_non_main_thread_refuses_collection_before_git(collection):
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        with pytest.raises(ResultError, match='main thread'):
-            executor.submit(collect, collection).result(timeout=2)
-    assert collection[-1] == []
+    assert actions[-1] == previous and path.read_bytes() == original
