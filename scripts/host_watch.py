@@ -15,7 +15,6 @@ import subprocess
 import tempfile
 import time
 
-from memory_capacity import observe as observe_memory_capacity
 
 
 def disk_status(paths: list[Path], reserve_bytes: int) -> list[dict]:
@@ -162,6 +161,8 @@ def sample(reserve_bytes: int, *, disk_paths: list[Path] | None = None,
         result["status"] = ("low" if "low" in observed else "unknown" if "unknown" in observed
                             else "attention" if "attention" in observed else "ok")
     if jobs_registry is not None and capacity_state is not None:
+        from memory_capacity import observe as observe_memory_capacity
+
         capacity_state.parent.mkdir(parents=True, exist_ok=True)
         lock = os.open(str(capacity_state) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
         try:
