@@ -16,9 +16,16 @@ before launch, stops its recorded process group if available memory falls below
 GNU `timeout` enforces the deadline even if the supervisor process dies. A
 missing session ID, changed prompt, failed turn, or uncertain state parks the
 request for human inspection. A completed request never runs again.
+If the supervisor dies, a saved session ID without a terminal event is still
+uncertain and always parks. Cron cannot infer that the prior model turn ended
+or that its effects are safe to repeat. A crash between launch intent and
+recorded process identity also parks; it cannot launch a second process from
+the same request.
 The resume command applies only to a recorded `codex exec` session. It cannot
 transparently take over the current interactive Codex app thread. It never uses
 `--last`, which could select another session.
+When cron starts this supervisor, the Codex child is independent of the
+interactive terminal, so closing that terminal does not require a resume.
 
 Before enabling cron on a host, run `probe` while a known Codex process is
 active in the checkout and confirm its PID appears. The process table visible
@@ -56,6 +63,14 @@ python3 /home/kevin/my_code/skybuild/scripts/skybuild_codex_supervisor.py prepar
 Prepare refuses an active request and a persistent `STOP` file. A new run
 requires a new explicit `prepare` after prior run reaches a terminal state.
 No default prompt exists.
+
+By default, an abnormal Codex exit also parks. For work confined to reversible
+local files, with no network writes, deployment, publication, or other external
+effects, add `--reversible-local-only` to `prepare`. Only when the still-running
+supervisor itself observes its child exit abnormally can it resume the same
+recorded session once. If the supervisor dies or a child emits `turn.failed`,
+the request parks even with that flag. The operator must ensure the prompt and
+task scope truly meet this restriction; the flag is not an OS sandbox policy.
 
 ## Cron entry
 

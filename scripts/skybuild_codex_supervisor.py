@@ -198,6 +198,7 @@ def prepare(args: argparse.Namespace, state_file: Path) -> str:
         "resume_sha256": hashlib.sha256(resume).hexdigest(),
         "session_id": None,
         "terminal_event": None,
+        "reversible_local_only": args.reversible_local_only,
     }
     atomic_json(state_file, state)
     return "prepared"
@@ -222,12 +223,9 @@ def inspect_previous(state: dict) -> str | None:
     if state.get("terminal_event") == "turn.failed":
         state["phase"] = "failed"
         return "failed"
-    if not state.get("session_id"):
-        state["phase"] = "parked"
-        state["reason"] = "old process disappeared before session ID was recorded"
-        return "parked"
-    state["phase"] = "interrupted"
-    return None
+    state["phase"] = "parked"
+    state["reason"] = "supervisor did not observe child exit; effects are uncertain"
+    return "parked"
 
 
 def run_child(state: dict, state_file: Path, codex: Path) -> str:
@@ -254,6 +252,8 @@ def run_child(state: dict, state_file: Path, codex: Path) -> str:
     # model process independently of the next cron tick.
     remaining = max(1, int((parse_deadline(state["deadline_utc"]) - utc_now()).total_seconds()))
     command = ["timeout", "--signal=TERM", "--kill-after=5", str(remaining)] + command
+    state["phase"] = "launching"
+    atomic_json(state_file, state)
     process = subprocess.Popen(
         command, cwd=checkout, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, start_new_session=True, bufsize=0,
@@ -305,7 +305,13 @@ def run_child(state: dict, state_file: Path, codex: Path) -> str:
             if pending:
                 append_log(log, bytes(pending))
                 record_event(state, pending)
-            state["phase"] = "completed" if process.returncode == 0 and state.get("terminal_event") == "turn.completed" else "failed"
+            if process.returncode == 0 and state.get("terminal_event") == "turn.completed":
+                state["phase"] = "completed"
+            elif state.get("terminal_event") == "turn.failed":
+                state["phase"] = "failed"
+            else:
+                state["phase"] = "parked"
+                state["reason"] = "child exited without a completed or failed turn event"
             break
     try:
         process.wait(timeout=1)
@@ -314,6 +320,18 @@ def run_child(state: dict, state_file: Path, codex: Path) -> str:
         process.wait(timeout=5)
     state["exit_code"] = process.returncode
     atomic_json(state_file, state)
+    if (state["phase"] == "parked" and process.returncode != 0
+            and state.get("terminal_event") is None and state.get("session_id")
+            and state.get("reversible_local_only") and state["runs"] == 1
+            and (parse_deadline(state["deadline_utc"]) - utc_now()).total_seconds() >= 60
+            and not (state_file.parent / "STOP").exists()
+            and available_gib() >= MIN_AVAILABLE_GIB
+            and not competing_codex(checkout)):
+        # Only this still-running supervisor observed the failed child exit.
+        # A later cron tick must never infer this transition from saved state.
+        state["phase"] = "resume_pending"
+        atomic_json(state_file, state)
+        return run_child(state, state_file, codex)
     return state["phase"]
 
 
@@ -323,6 +341,11 @@ def tick(state_file: Path, codex: Path) -> str:
     state = load_json(state_file)
     if state["phase"] in {"completed", "failed", "expired", "parked", "stopped", "memory_stop"}:
         return state["phase"]
+    if state["phase"] in {"resume_pending", "launching"}:
+        state["phase"] = "parked"
+        state["reason"] = "supervisor died during a launch; process start is uncertain"
+        atomic_json(state_file, state)
+        return "parked"
     result = inspect_previous(state)
     if result:
         atomic_json(state_file, state)
@@ -352,6 +375,7 @@ def main() -> int:
     parser.add_argument("--resume-file", type=Path)
     parser.add_argument("--deadline-utc")
     parser.add_argument("--request-id")
+    parser.add_argument("--reversible-local-only", action="store_true")
     parser.add_argument("--codex", type=Path, default=Path("/home/kevin/.local/bin/codex"))
     args = parser.parse_args()
     state_dir = args.state_dir.resolve()

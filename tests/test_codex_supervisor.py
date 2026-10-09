@@ -33,6 +33,7 @@ def prepared(tmp_path: Path):
         checkout=checkout, prompt_file=prompt, resume_file=resume,
         deadline_utc=(supervisor.utc_now() + supervisor.dt.timedelta(minutes=5)).isoformat(),
         request_id="test-request",
+        reversible_local_only=False,
     )
     state_file = state_dir / "request.json"
     supervisor.prepare(args, state_file)
@@ -127,28 +128,68 @@ def test_prompt_change_parks_before_launch(tmp_path: Path, monkeypatch):
     assert supervisor.load_json(state_file)["runs"] == 0
 
 
-def test_resume_uses_recorded_session_once(tmp_path: Path, monkeypatch):
+def test_crash_window_with_session_id_parks(tmp_path: Path, monkeypatch):
     _, state_file, _ = prepared(tmp_path)
     state = supervisor.load_json(state_file)
     state.update(phase="running", runs=1, pid=100, start_ticks=7,
-                 session_id="12345678-1234-1234-1234-123456789abc")
+                 session_id="12345678-1234-1234-1234-123456789abc",
+                 reversible_local_only=True)
+    supervisor.atomic_json(state_file, state)
+    monkeypatch.setattr(supervisor, "same_child", lambda value: False)
+    assert supervisor.tick(state_file, Path("/no/codex")) == "parked"
+    assert supervisor.load_json(state_file)["runs"] == 1
+
+
+def test_crash_window_before_pid_recorded_parks(tmp_path: Path):
+    _, state_file, _ = prepared(tmp_path)
+    state = supervisor.load_json(state_file)
+    state["phase"] = "launching"
+    supervisor.atomic_json(state_file, state)
+    assert supervisor.tick(state_file, Path("/no/codex")) == "parked"
+    assert supervisor.load_json(state_file)["runs"] == 0
+
+
+def test_observed_abnormal_exit_resumes_once_only_when_local(tmp_path: Path, monkeypatch):
+    _, state_file, _ = prepared(tmp_path)
+    state = supervisor.load_json(state_file)
+    state["reversible_local_only"] = True
     supervisor.atomic_json(state_file, state)
     fake = tmp_path / "fake_codex"
     fake.write_text(
         "#!/usr/bin/env python3\n"
         "import json, sys\n"
+        "if sys.argv[1:3] == ['exec', '--json']:\n"
+        "    assert 'bounded task' in sys.stdin.read()\n"
+        "    print(json.dumps({'type':'thread.started','thread_id':'12345678-1234-1234-1234-123456789abc'}), flush=True)\n"
+        "    sys.exit(9)\n"
         "assert sys.argv[1:4] == ['exec', 'resume', '--json']\n"
         "assert sys.argv[4] == '12345678-1234-1234-1234-123456789abc'\n"
         "assert 'unfinished work only' in sys.stdin.read()\n"
         "print(json.dumps({'type':'turn.completed'}), flush=True)\n"
     )
     fake.chmod(0o700)
-    monkeypatch.setattr(supervisor, "same_child", lambda value: False)
     monkeypatch.setattr(supervisor, "available_gib", lambda: 20)
     monkeypatch.setattr(supervisor, "competing_codex", lambda path: [])
     assert supervisor.tick(state_file, fake) == "completed"
     assert supervisor.load_json(state_file)["runs"] == 2
     assert supervisor.tick(state_file, fake) == "completed"
+
+
+def test_observed_abnormal_exit_without_local_scope_parks(tmp_path: Path, monkeypatch):
+    _, state_file, _ = prepared(tmp_path)
+    fake = tmp_path / "fake_codex"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "sys.stdin.read()\n"
+        "print(json.dumps({'type':'thread.started','thread_id':'12345678-1234-1234-1234-123456789abc'}), flush=True)\n"
+        "sys.exit(9)\n"
+    )
+    fake.chmod(0o700)
+    monkeypatch.setattr(supervisor, "available_gib", lambda: 20)
+    monkeypatch.setattr(supervisor, "competing_codex", lambda path: [])
+    assert supervisor.tick(state_file, fake) == "parked"
+    assert supervisor.load_json(state_file)["runs"] == 1
 
 
 def test_competing_codex_detects_live_process_in_checkout(tmp_path: Path):
