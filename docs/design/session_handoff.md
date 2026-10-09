@@ -34,6 +34,10 @@ Latest validation: independent `workflow_review` accepted the readiness guard; t
 
 Importer replay now rejects changed receipt counts/authority, multiple receipts and unexpected lineage rows added since migration 004. The importer takes the receipt-table lock before task-table locks to avoid a concurrent-writer deadlock; a paused-writer PostgreSQL test verifies the ordering. No live task authority changed.
 
+The [task-list cursor slice](implementation/task_list_cursor.md) makes more than 100 tasks browsable in the workbench by immutable ID, avoiding offset shifts when priorities change. It does not alter task authority.
+
+Independent `structure_ui_review` accepted cursor paging. The full disposable suite passed 146 tests with the existing upstream warning; a final exact-100 browser regression keeps the last page visible. No live task authority changed.
+
 Saved 2026-10-08 after architecture revision A33 and the subsequent implementation authorization below. Resume from /home/kevin/my_code with sibling skybuild and skykeep checkouts. This is context, not a competing design plan.
 
 ## Committed checkpoint and immediate next task

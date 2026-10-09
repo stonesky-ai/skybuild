@@ -104,6 +104,18 @@ def test_http_ready_requires_acceptance_and_does_not_start_work(service):
     assert response.json()["next_action"] == "Await explicit admission and ownership"
 
 
+def test_http_task_id_cursor_lists_next_page(service):
+    client, _, project, _, _, owner_token, _ = service
+    base = f"/api/v1/projects/{project}/tasks"
+    for task_id in ("cursor-a", "cursor-b", "cursor-c"):
+        assert client.post(base, json={"task_id": task_id, "title": task_id, "description": "Brief"},
+                           headers=headers(owner_token, "create-" + task_id)).status_code == 201
+    first = client.get(base + "?limit=2&by_id=true", headers=headers(owner_token))
+    assert [task["task_id"] for task in first.json()] == ["cursor-a", "cursor-b"]
+    second = client.get(base + "?limit=2&after_task_id=cursor-b", headers=headers(owner_token))
+    assert [task["task_id"] for task in second.json()] == ["cursor-c"]
+
+
 def test_http_split_exposes_lineage_and_refuses_stale_revision(service):
     client, _, project, _, _, owner_token, _ = service
     base = f"/api/v1/projects/{project}/tasks"

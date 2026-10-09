@@ -7,7 +7,7 @@
   const edit = byId("edit-form");
   const action = byId("action-form");
   const structure = byId("structure-form");
-  let token = "", project = "", selected = null, busy = false, stale = false, epoch = 0, controller = null, reconcileOffset = 0, structuralPlan = null, historyOffset = 0, historyHasMore = false;
+  let token = "", project = "", selected = null, busy = false, stale = false, epoch = 0, controller = null, reconcileOffset = 0, structuralPlan = null, historyOffset = 0, historyHasMore = false, taskCursor = null, taskHasMore = false;
 
   class ApiError extends Error {
     constructor(status) { super(`Request failed (${status})`); this.status = status; }
@@ -25,6 +25,8 @@
     byId("connect").disabled = connected || busy;
     byId("logout").disabled = !connected;
     byId("refresh-tasks").disabled = !connected || busy;
+    byId("first-tasks").disabled = !connected || busy || taskCursor === null;
+    byId("next-tasks").disabled = !connected || busy || !taskHasMore;
     byId("reconcile-due").disabled = !connected || busy;
     byId("refresh-selected").disabled = !connected || busy || !selected;
     byId("load-more-history").disabled = !connected || busy || !selected || !historyHasMore;
@@ -41,7 +43,7 @@
   function disconnect() {
     epoch += 1;
     if (controller) controller.abort();
-    token = ""; project = ""; selected = null; stale = false; busy = false; reconcileOffset = 0; structuralPlan = null; historyOffset = 0; historyHasMore = false;
+    token = ""; project = ""; selected = null; stale = false; busy = false; reconcileOffset = 0; structuralPlan = null; historyOffset = 0; historyHasMore = false; taskCursor = null; taskHasMore = false;
     byId("project").value = "";
     byId("token").value = "";
     create.reset(); edit.reset(); action.reset(); structure.reset();
@@ -106,8 +108,12 @@
     }
   }
 
-  async function loadTasks() {
-    const tasks = await request("tasks?limit=100&offset=0");
+  async function loadTasks(afterTaskId = null) {
+    const tasks = await request(`tasks?limit=100&by_id=true${afterTaskId === null ? "" : `&after_task_id=${encodeURIComponent(afterTaskId)}`}`);
+    if (afterTaskId !== null && tasks.length === 0) {
+      taskHasMore = false;
+      return false;
+    }
     const list = byId("task-list"); list.replaceChildren();
     for (const task of tasks) {
       const item = document.createElement("li"), button = document.createElement("button");
@@ -118,7 +124,10 @@
       button.addEventListener("click", () => perform(async () => { await selectTask(task.task_id); notice("Task loaded."); }));
       item.append(button); list.append(item);
     }
-    byId("task-count").textContent = `${tasks.length} tasks shown for ${project}`;
+    taskCursor = afterTaskId;
+    taskHasMore = tasks.length === 100;
+    byId("task-count").textContent = `${tasks.length} tasks shown for ${project}${afterTaskId === null ? "" : ` after ${afterTaskId}`}`;
+    return true;
   }
 
   function appendHistory(history) {
@@ -173,6 +182,14 @@
   });
   byId("logout").addEventListener("click", () => { disconnect(); notice("Logged out. Private task data and token cleared."); });
   byId("refresh-tasks").addEventListener("click", () => perform(async () => { await loadTasks(); notice("Task list refreshed."); }));
+  byId("first-tasks").addEventListener("click", () => perform(async () => { await loadTasks(); notice("First task page loaded."); }));
+  byId("next-tasks").addEventListener("click", () => perform(async () => {
+    if (!taskHasMore) return;
+    const buttons = byId("task-list").querySelectorAll("button");
+    if (!buttons.length) return;
+    const advanced = await loadTasks(buttons[buttons.length - 1].dataset.taskId);
+    notice(advanced ? "Next task page loaded." : "No more tasks.");
+  }));
   byId("reconcile-due").addEventListener("click", () => perform(async () => {
     let total = 0, pages = 0;
     do {

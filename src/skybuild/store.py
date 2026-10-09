@@ -327,10 +327,22 @@ class Store:
                 return result
             return self._idempotent(connection, principal, project_id, 'task.create', idempotency_key, body, mutation)
 
-    def list_tasks(self, principal, project_id, *, limit=100, offset=0) -> list[dict]:
+    def list_tasks(self, principal, project_id, *, limit=100, offset=0, after_task_id=None, by_id=False) -> list[dict]:
         self._page(limit, offset)
+        if type(by_id) is not bool:
+            _invalid('Invalid task list order')
+        if after_task_id is not None:
+            _identifier(after_task_id, 'after_task_id')
+        if (by_id or after_task_id is not None) and offset:
+            _invalid('Cursor and offset pagination cannot be combined')
         with self._connection() as connection:
             self._authorize(connection, principal, project_id, 'tasks:read')
+            if after_task_id is not None:
+                return _public(connection.execute(TASK_SELECT + 'WHERE project_id = %s AND task_id > %s ORDER BY task_id LIMIT %s',
+                                                  (project_id, after_task_id, limit)).fetchall())
+            if by_id:
+                return _public(connection.execute(TASK_SELECT + 'WHERE project_id = %s ORDER BY task_id LIMIT %s',
+                                                  (project_id, limit)).fetchall())
             return _public(connection.execute(TASK_SELECT + 'WHERE project_id = %s ORDER BY priority, task_id LIMIT %s OFFSET %s', (project_id, limit, offset)).fetchall())
 
     def get_task(self, principal, project_id, task_id) -> dict:

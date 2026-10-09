@@ -116,6 +116,20 @@ def test_guarded_ready_requires_independent_unstarted_definition(store, actors):
     assert [event['operation'] for event in store.task_history(owner, project, task['task_id'])] == ['created', 'ready', 'updated', 'ready']
 
 
+def test_task_id_cursor_does_not_shift_when_priority_changes(store, actors):
+    project, people = actors
+    owner = people['owner']
+    create(store, owner, project, 'cursor-a', priority=30)
+    create(store, owner, project, 'cursor-b', priority=20)
+    create(store, owner, project, 'cursor-c', priority=10)
+    first = store.list_tasks(owner, project, limit=2, by_id=True)
+    assert [task['task_id'] for task in first] == ['cursor-a', 'cursor-b']
+    store.update_task(owner, project, 'cursor-c', {'priority': 0}, 1, 'change-priority')
+    second = store.list_tasks(owner, project, limit=2, after_task_id=first[-1]['task_id'])
+    assert [task['task_id'] for task in second] == ['cursor-c']
+    error('validation', lambda: store.list_tasks(owner, project, limit=2, offset=1, by_id=True))
+
+
 def test_separate_deferral_cycles_capture_current_interrupted_phase(store, actors):
     project, people = actors
     owner = people['owner']

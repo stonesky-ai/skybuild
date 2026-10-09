@@ -272,8 +272,9 @@ def create_app(store: Any) -> FastAPI:
         return store.create_task(actor, project_id, body.model_dump(mode="json", exclude_unset=True), idem)
 
     @app.get(base + "/tasks")
-    def list_tasks(project_id: ProjectPath, actor: Actor, limit: Limit = 100, offset: Offset = 0) -> list:
-        return store.list_tasks(actor, project_id, limit=limit, offset=offset)
+    def list_tasks(project_id: ProjectPath, actor: Actor, limit: Limit = 100, offset: Offset = 0,
+                   after_task_id: Identifier | None = None, by_id: bool = False) -> list:
+        return store.list_tasks(actor, project_id, limit=limit, offset=offset, after_task_id=after_task_id, by_id=by_id)
 
     @app.get(base + "/tasks/{task_id}")
     def get_task(project_id: ProjectPath, task_id: RecordPath, actor: Actor) -> dict:

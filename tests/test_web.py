@@ -97,6 +97,7 @@ const task = {task_id: " task ", title: "Title", description: "Brief", status: "
   dependencies: [" dep ", "dep"], acceptance_criteria: ["one\ntwo"], architecture_refs: ["ref\nsection"], revision: 7};
 const other = {...task, task_id: "other", revision: 3, acceptance_criteria: ["three"], dependencies: ["dep"]};
 const requests = [];
+let endPage = false;
 global.fetch = async (url, options) => {
   requests.push({url, options});
   const data = url.endsWith("/split") ? {children: [{task_id: "child"}]} :
@@ -105,7 +106,8 @@ global.fetch = async (url, options) => {
       Array.from({length: 100}, (_, index) => ({revision: index + 1, actor: "owner", operation: "updated"}))) :
     url.endsWith("/lineage") ?
       [{source_task_id: " task ", target_task_id: "<child>", action: "split"}] :
-    url.includes("tasks?") ? [task] :
+    url.includes("tasks?") ? (url.includes("after_task_id=") ? (endPage ? [] : [other]) :
+      [task, ...Array.from({length: 99}, (_, index) => ({...task, task_id: `filler-${String(index).padStart(3, "0")}`}))]) :
     url.endsWith("/tasks/other") ? other : task;
   return {ok: true, status: 200, json: async () => data};
 };
@@ -178,6 +180,18 @@ async function run() {
   assert.match(get("structure-preview").textContent, /"description": "All scope"/);
   assert.match(get("structure-preview").textContent, /" dependent "/);
   assert.equal(get("apply-structure").disabled, false);
+  assert.equal(get("next-tasks").disabled, false);
+  get("next-tasks").listeners.click(); await tick();
+  assert.equal(get("task-list").querySelectorAll().length, 1);
+  assert.ok(requests.some(request => request.url.includes("after_task_id=filler-098")));
+  assert.equal(get("next-tasks").disabled, true);
+  assert.equal(get("first-tasks").disabled, false);
+  get("first-tasks").listeners.click(); await tick();
+  assert.equal(get("task-list").querySelectorAll().length, 100);
+  endPage = true;
+  get("next-tasks").listeners.click(); await tick();
+  assert.equal(get("task-list").querySelectorAll().length, 100);
+  assert.equal(get("next-tasks").disabled, true);
   get("logout").listeners.click();
   assert.equal(get("full-task-record").textContent, "No task selected.");
   assert.equal(get("lineage").children.length, 0);

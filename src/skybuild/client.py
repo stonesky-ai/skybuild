@@ -80,8 +80,16 @@ class Client:
     def create_task(self, project_id: str, body: dict, *, idempotency_key: str | None = None) -> dict:
         return self.request("POST", self._path(project_id, "tasks"), body=body, idempotency_key=idempotency_key)
 
-    def list_tasks(self, project_id: str, *, limit: int = 100, offset: int = 0) -> list:
-        return self.request("GET", self._path(project_id, "tasks"), params={"limit": limit, "offset": offset})
+    def list_tasks(self, project_id: str, *, limit: int = 100, offset: int = 0,
+                   after_task_id: str | None = None, by_id: bool = False) -> list:
+        if after_task_id is not None and not valid_identifier(after_task_id):
+            raise ValueError("Cursor task ID is not addressable")
+        params = {"limit": limit, "offset": offset}
+        if after_task_id is not None:
+            params["after_task_id"] = after_task_id
+        if by_id:
+            params["by_id"] = "true"
+        return self.request("GET", self._path(project_id, "tasks"), params=params)
 
     def get_task(self, project_id: str, task_id: str) -> dict:
         return self.request("GET", self._path(project_id, f"tasks/{self._segment(task_id)}"))

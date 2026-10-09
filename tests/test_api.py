@@ -123,7 +123,7 @@ def test_missing_key_unknown_patch_and_pagination(api):
         assert client.get(base + "?" + query).status_code == 422
     assert not store.calls
     assert client.get(base + "?limit=3&offset=4").status_code == 200
-    assert store.calls[-1][2] == {"limit": 3, "offset": 4}
+    assert store.calls[-1][2] == {"limit": 3, "offset": 4, "after_task_id": None, "by_id": False}
 
 
 def test_cord_actor_action_and_reply_contract(api):
