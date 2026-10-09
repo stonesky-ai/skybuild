@@ -149,6 +149,46 @@ def bounded_timeout(state: dict) -> bool:
     return utc_now() >= parse_deadline(state["deadline_utc"])
 
 
+def unit_manager(state_file: Path):
+    from skybuild_job_unit import JobUnitManager
+
+    return JobUnitManager(state_file.parent / "job_units")
+
+
+def launch_worker_unit(state: dict, state_file: Path, codex: Path) -> str:
+    """Put the Codex monitor and all its descendants in one bounded user unit."""
+    from skybuild_job_unit import JobSpec
+
+    available = available_gib()
+    if available < MIN_AVAILABLE_GIB:
+        return "waiting: less than 10 GiB available"
+    cap_gib = min(4.0, available - MEMORY_FLOOR_GIB)
+    cap_bytes = int(cap_gib * 1024**3)
+    remaining = int((parse_deadline(state["deadline_utc"]) - utc_now()).total_seconds())
+    if remaining <= 0:
+        state["phase"] = "expired"
+        atomic_json(state_file, state)
+        return "expired"
+    environment = {name: os.environ[name] for name in (
+        "HOME", "PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "TERM",
+        "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
+    ) if name in os.environ}
+    spec = JobSpec(
+        task_id=state["request_id"], attempt_id="run-1",
+        worktree=Path(state["checkout"]),
+        argv=(str(Path(sys.executable).resolve()), str(Path(__file__).resolve()),
+              "worker", "--state-dir", str(state_file.parent), "--codex", str(codex)),
+        stdin_path=state_file.parent / "prompt.txt",
+        log_path=state_file.parent / "worker.log",
+        memory_high_bytes=int(cap_bytes * 0.75), memory_max_bytes=cap_bytes,
+        runtime_seconds=remaining, environment=environment,
+    )
+    state.update(phase="worker_launching", unit=spec.unit(), memory_max_bytes=cap_bytes)
+    atomic_json(state_file, state)
+    unit_manager(state_file).start(spec)
+    return "running: bounded user unit started"
+
+
 def stop_owned_child(state: dict) -> None:
     if not same_child(state):
         return
@@ -239,6 +279,13 @@ def clear_parked(state_file: Path, request_id: str | None, acknowledged: bool) -
         raise ValueError("clear requires matching parked request ID")
     if same_child(state) or competing_codex(Path(state["checkout"])):
         raise ValueError("Codex process still visible in checkout; do not clear")
+    if state.get("unit"):
+        try:
+            observed = unit_manager(state_file).observe(state["unit"])
+        except (OSError, RuntimeError, ValueError) as error:
+            raise ValueError(f"worker unit state is uncertain: {error}") from None
+        if observed.active:
+            raise ValueError("worker unit is still active; do not clear")
     archive = state_file.parent / "archive" / (request_id + "-" + uuid.uuid4().hex)
     archive.mkdir(mode=0o700, parents=True)
     for name in ("request.json", "prompt.txt", "resume.txt", "codex.jsonl"):
@@ -364,6 +411,32 @@ def tick(state_file: Path, codex: Path) -> str:
     state = load_json(state_file)
     if state["phase"] in {"completed", "failed", "expired", "parked", "stopped", "memory_stop", "cleared"}:
         return state["phase"]
+    if state["phase"] == "worker_launching":
+        try:
+            manager = unit_manager(state_file)
+            observed = manager.observe(state["unit"])
+        except (OSError, RuntimeError, ValueError):
+            observed = None
+        if observed and observed.active:
+            stop_present = (state_file.parent / "STOP").exists()
+            expired = bounded_timeout(state)
+            low_memory = available_gib() < MEMORY_FLOOR_GIB
+            if stop_present or expired or low_memory:
+                try:
+                    manager.stop(state["unit"])
+                except (OSError, RuntimeError, ValueError) as error:
+                    state["phase"] = "parked"
+                    state["reason"] = f"worker unit stop is uncertain: {error}"
+                    atomic_json(state_file, state)
+                    return "parked"
+                state["phase"] = "stopped" if stop_present else "expired" if expired else "memory_stop"
+                atomic_json(state_file, state)
+                return state["phase"]
+            return "running: bounded user unit active"
+        state["phase"] = "parked"
+        state["reason"] = "worker unit did not record child start; launch is uncertain"
+        atomic_json(state_file, state)
+        return "parked"
     if state["phase"] in {"resume_pending", "launching"}:
         state["phase"] = "parked"
         state["reason"] = "supervisor died during a launch; process start is uncertain"
@@ -383,15 +456,37 @@ def tick(state_file: Path, codex: Path) -> str:
         return "stopped"
     if available_gib() < MIN_AVAILABLE_GIB:
         return "waiting: less than 10 GiB available"
+    prompt = (state_file.parent / "prompt.txt").read_bytes()
+    if hashlib.sha256(prompt).hexdigest() != state["prompt_sha256"]:
+        state["phase"] = "parked"
+        state["reason"] = "prepared prompt changed"
+        atomic_json(state_file, state)
+        return "parked"
     competitors = competing_codex(Path(state["checkout"]))
     if competitors:
         return "waiting: live Codex session in checkout"
+    return launch_worker_unit(state, state_file, codex)
+
+
+def worker(state_file: Path, codex: Path) -> str:
+    state = load_json(state_file)
+    if state.get("phase") != "worker_launching":
+        return "parked: no matching worker launch intent"
+    if bounded_timeout(state) or (state_file.parent / "STOP").exists():
+        state["phase"] = "expired" if bounded_timeout(state) else "stopped"
+        atomic_json(state_file, state)
+        return state["phase"]
+    if available_gib() < MIN_AVAILABLE_GIB or competing_codex(Path(state["checkout"])):
+        state["phase"] = "parked"
+        state["reason"] = "worker admission changed after unit launch"
+        atomic_json(state_file, state)
+        return "parked"
     return run_child(state, state_file, codex)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("prepare", "tick", "status", "probe", "clear"))
+    parser.add_argument("command", choices=("prepare", "tick", "status", "probe", "clear", "worker"))
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--checkout", type=Path)
     parser.add_argument("--prompt-file", type=Path)
@@ -408,11 +503,14 @@ def main() -> int:
         raise SystemExit("state directory must not be accessible to group or others")
     state_file = state_dir / "request.json"
     with (state_dir / "supervisor.lock").open("a+") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            print("running: another supervisor owns lock")
-            return 0
+        if args.command == "worker":
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        else:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print("running: another supervisor owns lock")
+                return 0
         if args.command == "status":
             print(json.dumps(load_json(state_file) if state_file.exists() else {"phase": "idle"}, sort_keys=True))
             return 0
@@ -435,6 +533,8 @@ def main() -> int:
             if not all((args.checkout, args.prompt_file, args.resume_file, args.deadline_utc, args.request_id)):
                 parser.error("prepare needs checkout, both prompt files, deadline and request ID")
             result = prepare(args, state_file)
+        elif args.command == "worker":
+            result = worker(state_file, args.codex)
         else:
             result = tick(state_file, args.codex)
         print(result)

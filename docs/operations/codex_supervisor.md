@@ -1,5 +1,12 @@
 # Local Codex session recovery from cron
 
+**Implementation status:** This task branch is a prototype and must remain
+disabled. It depends on the reviewed `scripts/skybuild_job_unit.py` helper,
+which is on a separate task branch. The worker-unit path has only mock tests
+here; the sandbox cannot access the host user systemd bus. Integrate and test
+the helper and supervisor together on a qualified host before installing the
+crontab entry below.
+
 `scripts/skybuild_codex_supervisor.py` is a bounded local recovery aid for one
 explicitly prepared Codex session. It does not choose a SkyBuild task or grant
 model, billing, deployment, or publication authority. Do not enable it as a
@@ -13,6 +20,10 @@ one exists, it waits. It pins prompt files by SHA-256, requires an explicit
 UTC deadline within eight hours, requires at least 10 GiB of available memory
 before launch, stops its recorded process group if available memory falls below
 8 GiB, and permits at most one resume of the recorded Codex session.
+The cron tick starts a systemd user unit for the monitor and Codex child. The
+shared job-unit helper sets `Nice=10`, `MemoryHigh`, `MemoryMax`, no swap, and a
+runtime limit. The memory cap is at most 4 GiB and never exceeds available
+memory above the 8 GiB host reserve at admission.
 GNU `timeout` enforces the deadline even if the supervisor process dies. A
 missing session ID, changed prompt, failed turn, or uncertain state parks the
 request for human inspection. A completed request never runs again.

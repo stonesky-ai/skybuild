@@ -6,6 +6,7 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import sys
 import time
 from types import SimpleNamespace
 
@@ -141,6 +142,9 @@ def test_stop_file_stops_orphaned_owned_child(tmp_path: Path, monkeypatch):
 
 def test_fake_codex_runs_once_and_records_completion(tmp_path: Path, monkeypatch):
     _, state_file, _ = prepared(tmp_path)
+    state = supervisor.load_json(state_file)
+    state["phase"] = "worker_launching"
+    supervisor.atomic_json(state_file, state)
     fake = tmp_path / "fake_codex"
     fake.write_text(
         "#!/usr/bin/env python3\n"
@@ -152,7 +156,7 @@ def test_fake_codex_runs_once_and_records_completion(tmp_path: Path, monkeypatch
     fake.chmod(0o700)
     monkeypatch.setattr(supervisor, "available_gib", lambda: 20)
     monkeypatch.setattr(supervisor, "competing_codex", lambda path: [])
-    assert supervisor.tick(state_file, fake) == "completed"
+    assert supervisor.worker(state_file, fake) == "completed"
     state = supervisor.load_json(state_file)
     assert state["runs"] == 1
     assert state["session_id"] == "12345678-1234-1234-1234-123456789abc"
@@ -167,6 +171,40 @@ def test_prompt_change_parks_before_launch(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(supervisor, "competing_codex", lambda path: [])
     assert supervisor.tick(state_file, Path("/no/codex")) == "parked"
     assert supervisor.load_json(state_file)["runs"] == 0
+
+
+def test_tick_starts_bounded_worker_unit_once(tmp_path: Path, monkeypatch):
+    _, state_file, _ = prepared(tmp_path)
+    specs = []
+
+    class FakeSpec:
+        def __init__(self, **values):
+            self.__dict__.update(values)
+            specs.append(self)
+
+        def unit(self):
+            return "skybuild-job-test.service"
+
+    class FakeManager:
+        def __init__(self, path):
+            assert path == state_file.parent / "job_units"
+
+        def start(self, spec):
+            assert supervisor.load_json(state_file)["phase"] == "worker_launching"
+            return spec.unit()
+
+        def observe(self, unit):
+            return SimpleNamespace(active=True)
+
+    monkeypatch.setitem(sys.modules, "skybuild_job_unit", SimpleNamespace(JobSpec=FakeSpec, JobUnitManager=FakeManager))
+    monkeypatch.setattr(supervisor, "available_gib", lambda: 20)
+    monkeypatch.setattr(supervisor, "competing_codex", lambda path: [])
+    assert supervisor.tick(state_file, Path("/no/codex")) == "running: bounded user unit started"
+    assert specs[0].memory_max_bytes == 4 * 1024**3
+    assert specs[0].memory_high_bytes == 3 * 1024**3
+    assert specs[0].argv[2] == "worker"
+    assert supervisor.tick(state_file, Path("/no/codex")) == "running: bounded user unit active"
+    assert len(specs) == 1
 
 
 def test_crash_window_with_session_id_parks(tmp_path: Path, monkeypatch):
@@ -194,6 +232,7 @@ def test_observed_abnormal_exit_resumes_once_only_when_local(tmp_path: Path, mon
     _, state_file, _ = prepared(tmp_path)
     state = supervisor.load_json(state_file)
     state["reversible_local_only"] = True
+    state["phase"] = "worker_launching"
     supervisor.atomic_json(state_file, state)
     fake = tmp_path / "fake_codex"
     fake.write_text(
@@ -211,13 +250,16 @@ def test_observed_abnormal_exit_resumes_once_only_when_local(tmp_path: Path, mon
     fake.chmod(0o700)
     monkeypatch.setattr(supervisor, "available_gib", lambda: 20)
     monkeypatch.setattr(supervisor, "competing_codex", lambda path: [])
-    assert supervisor.tick(state_file, fake) == "completed"
+    assert supervisor.worker(state_file, fake) == "completed"
     assert supervisor.load_json(state_file)["runs"] == 2
     assert supervisor.tick(state_file, fake) == "completed"
 
 
 def test_observed_abnormal_exit_without_local_scope_parks(tmp_path: Path, monkeypatch):
     _, state_file, _ = prepared(tmp_path)
+    state = supervisor.load_json(state_file)
+    state["phase"] = "worker_launching"
+    supervisor.atomic_json(state_file, state)
     fake = tmp_path / "fake_codex"
     fake.write_text(
         "#!/usr/bin/env python3\n"
@@ -229,7 +271,7 @@ def test_observed_abnormal_exit_without_local_scope_parks(tmp_path: Path, monkey
     fake.chmod(0o700)
     monkeypatch.setattr(supervisor, "available_gib", lambda: 20)
     monkeypatch.setattr(supervisor, "competing_codex", lambda path: [])
-    assert supervisor.tick(state_file, fake) == "parked"
+    assert supervisor.worker(state_file, fake) == "parked"
     assert supervisor.load_json(state_file)["runs"] == 1
 
 
