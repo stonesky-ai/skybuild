@@ -11,7 +11,7 @@ from skybuild import manual_dispatch
 
 def _brief():
     return {"schema": "manual-work-brief-v1", "assignment_id": "MWP-test-1",
-            "task_id": "SKYBUILD-TASK-CUTOVER", "worker": "wonko", "dispatcher": "jeltz",
+            "task_id": "SKYBUILD-TASK-CUTOVER", "worker": "wonko", "dispatcher": "pilot_dispatcher",
             "branch": "task/manual-test", "owned_paths": ["src/skybuild/new_module.py"],
             "checks": ["Run focused tests"], "model_limit": "One existing subscription worker",
             "next_action": "Implement the bounded change."}
@@ -37,19 +37,19 @@ def test_build_envelope_from_committed_bytes(tmp_path, monkeypatch):
     _git(repo, "commit", "-qm", "test brief")
     base = _git(repo, "rev-parse", "HEAD")
     monkeypatch.setattr(manual_dispatch, "_published_head", lambda _repo: base)
-    envelope = manual_dispatch.build_envelope(repo, path, worker="wonko", dispatcher="jeltz")
+    envelope = manual_dispatch.build_envelope(repo, path, worker="wonko", dispatcher="pilot_dispatcher")
     assert envelope["base_sha"] == base
     assert envelope["brief_sha256"] == hashlib.sha256(raw).hexdigest()
     assert envelope["schema"] == "manual-work-v1"
     with pytest.raises(manual_dispatch.DispatchError, match="another worker"):
-        manual_dispatch.build_envelope(repo, path, worker="wowbaggers", dispatcher="jeltz")
+        manual_dispatch.build_envelope(repo, path, worker="wowbaggers", dispatcher="pilot_dispatcher")
 
 
 class FakeClient:
     def __init__(self):
         self.calls = []
         self.fail_once = False
-        self.grants = {"skybuild": ["cord:send"]}
+        self.grants = {"skybuild": ["cord:send", "cord:read", "cord:handle"]}
 
     def __enter__(self):
         return self
@@ -62,7 +62,7 @@ class FakeClient:
         return {"status": "ready"}
 
     def whoami(self):
-        return {"principal_id": "dispatch-principal", "is_admin": False, "grants": self.grants}
+        return {"principal_id": "pilot_dispatcher", "is_admin": False, "grants": self.grants}
 
     def send_message(self, project, body, *, idempotency_key):
         self.calls.append((project, body, idempotency_key))
@@ -80,7 +80,7 @@ def _dispatch(tmp_path, monkeypatch, client):
     token.write_text("x" * 32)
     token.chmod(0o600)
     envelope = {"schema": "manual-work-v1", "assignment_id": "MWP-test-1",
-                "task_id": "SKYBUILD-TASK-CUTOVER", "worker": "wonko", "dispatcher": "jeltz",
+                "task_id": "SKYBUILD-TASK-CUTOVER", "worker": "wonko", "dispatcher": "pilot_dispatcher",
                 "base_sha": "a" * 40, "brief_path": "docs/design/assignments/test.json",
                 "brief_sha256": "b" * 64, "branch": "task/manual-test",
                 "owned_paths": ["src/skybuild/new_module.py"], "checks": ["Run focused tests"],
@@ -88,8 +88,8 @@ def _dispatch(tmp_path, monkeypatch, client):
     monkeypatch.setattr(manual_dispatch, "build_envelope", lambda *_args, **_kwargs: envelope)
     monkeypatch.setattr(manual_dispatch, "verify_assignment", lambda *_args, **_kwargs: {"verified": True})
     monkeypatch.setattr(manual_dispatch, "_published_head", lambda _repo: "a" * 40)
-    kwargs = {"worker": "wonko", "dispatcher": "jeltz", "project": "skybuild",
-              "principal": "dispatch-principal", "url": "https://controller.ts.net",
+    kwargs = {"worker": "wonko", "dispatcher": "pilot_dispatcher", "project": "skybuild",
+              "principal": "pilot_dispatcher", "url": "https://controller.ts.net",
               "token_file": token, "state_dir": state,
               "resolve": lambda _host: ["100.101.102.103"],
               "client_factory": lambda *_args, **_kwargs: client}
@@ -175,7 +175,7 @@ def test_prepared_retry_reuses_pinned_body_after_head_moves(tmp_path, monkeypatc
         manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
     assert json.loads(next(state_dir.glob("*.json")).read_text())["status"] == "prepared"
     monkeypatch.setattr(manual_dispatch, "_published_head", lambda _repo: "c" * 40)
-    client.grants = {"skybuild": ["cord:send"]}
+    client.grants = {"skybuild": ["cord:send", "cord:read", "cord:handle"]}
     sent = manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
     assert sent["mode"] == "prepared_retry"
     assert json.loads(client.calls[0][1]["body"])["base_sha"] == "a" * 40
@@ -194,3 +194,13 @@ def test_large_valid_intent_can_be_retried(tmp_path, monkeypatch):
     assert result["mode"] == "pinned_retry"
     assert len(client.calls) == 2
     assert client.calls[0] == client.calls[1]
+
+
+def test_dispatcher_must_match_authenticated_principal(tmp_path, monkeypatch):
+    client = FakeClient()
+    repo, state_dir, _, kwargs = _dispatch(tmp_path, monkeypatch, client)
+    with pytest.raises(manual_dispatch.DispatchError, match="authenticated principal"):
+        manual_dispatch.dispatch(repo, "docs/design/assignments/test.json",
+                                 **{**kwargs, "dispatcher": "jeltz"})
+    assert not state_dir.exists()
+    assert client.calls == []

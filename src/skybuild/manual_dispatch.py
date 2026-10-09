@@ -156,6 +156,8 @@ def dispatch(repo: Path, brief_path: str, *, worker: str, dispatcher: str, proje
         raise DispatchError(str(error)) from error
     if not brief_path.startswith("docs/design/assignments/") or not brief_path.endswith(".json"):
         raise DispatchError("Brief must be an assignment JSON path")
+    if dispatcher != principal:
+        raise DispatchError("Dispatcher must equal the authenticated principal")
     endpoint = _private_endpoint(url, resolve)
     state_dir = _state_directory(state_dir, repo)
     slot = hashlib.sha256(f"{project}\0{brief_path}".encode()).hexdigest()
@@ -186,7 +188,7 @@ def dispatch(repo: Path, brief_path: str, *, worker: str, dispatcher: str, proje
         key = f"manual-work-v1:{identity}"
         body = {"recipient": worker, "subject": f"Manual assignment {envelope['assignment_id']}",
                 "body": json.dumps(envelope, sort_keys=True, separators=(",", ":")),
-                "category": "manual-work-v1", "urgency": "normal"}
+                "category": "manual-work", "urgency": "normal"}
         if len(body["body"]) > 32768 or len(body["subject"]) > 500:
             raise DispatchError("Cord assignment exceeds message size limit")
         intended = {"schema": "manual-dispatch-intent-v1", "project": project, "principal": principal,
@@ -211,7 +213,8 @@ def dispatch(repo: Path, brief_path: str, *, worker: str, dispatcher: str, proje
                 grants = identity_response.get("grants") if isinstance(identity_response, dict) else None
                 if (not isinstance(identity_response, dict) or identity_response.get("principal_id") != principal
                         or identity_response.get("is_admin") is not False or not isinstance(grants, dict)
-                        or set(grants) != {project} or grants[project] != ["cord:send"]):
+                        or set(grants) != {project} or not isinstance(grants[project], list)
+                        or sorted(grants[project]) != ["cord:handle", "cord:read", "cord:send"]):
                     raise DispatchError("Token does not identify the scoped dispatcher")
                 if state["status"] == "prepared":
                     if mode == "new" and _published_head(repo) != envelope["base_sha"]:

@@ -2,8 +2,8 @@
   "schema": "manual-work-brief-v1",
   "assignment_id": "MWP-20261009-WOWBAGGERS-TRIAGE-001",
   "task_id": "SKYBUILD-TASK-WORKBENCH",
-  "worker": "wowbaggers",
-  "dispatcher": "jeltz",
+  "worker": "wowbagger",
+  "dispatcher": "pilot_dispatcher",
   "branch": "task/workbench-page-triage-001",
   "owned_paths": [
     "src/skybuild/static/workbench.html",

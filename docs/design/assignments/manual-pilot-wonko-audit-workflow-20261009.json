@@ -3,7 +3,7 @@
   "assignment_id": "MWP-20261009-WONKO-AUDIT-WORKFLOW-001",
   "task_id": "SKYBUILD-TASK-CUTOVER",
   "worker": "wonko",
-  "dispatcher": "jeltz",
+  "dispatcher": "pilot_dispatcher",
   "branch": "task/cutover-workflow-audit-001",
   "owned_paths": [
     "src/skybuild/ledger_audit.py",
