@@ -1,0 +1,250 @@
+{
+  "base_sha": "257216c5498b95d5a6e56bca60c31abcd6736226",
+  "cases": [
+    {
+      "checks": [
+        {
+          "byte_limit": 0,
+          "text": ""
+        },
+        {
+          "byte_limit": 1,
+          "text": ""
+        },
+        {
+          "byte_limit": 2,
+          "text": ""
+        },
+        {
+          "byte_limit": 3,
+          "text": ""
+        },
+        {
+          "byte_limit": 4,
+          "text": ""
+        },
+        {
+          "byte_limit": 5,
+          "text": ""
+        },
+        {
+          "byte_limit": 8,
+          "text": ""
+        },
+        {
+          "byte_limit": 12,
+          "text": ""
+        },
+        {
+          "byte_limit": 0,
+          "text": "plain"
+        },
+        {
+          "byte_limit": 1,
+          "text": "plain"
+        },
+        {
+          "byte_limit": 2,
+          "text": "plain"
+        },
+        {
+          "byte_limit": 3,
+          "text": "plain"
+        },
+        {
+          "byte_limit": 4,
+          "text": "plain"
+        },
+        {
+          "byte_limit": 5,
+          "text": "plain"
+        },
+        {
+          "byte_limit": 8,
+          "text": "plain"
+        },
+        {
+          "byte_limit": 12,
+          "text": "plain"
+        },
+        {
+          "byte_limit": 0,
+          "text": "café"
+        },
+        {
+          "byte_limit": 1,
+          "text": "café"
+        },
+        {
+          "byte_limit": 2,
+          "text": "café"
+        },
+        {
+          "byte_limit": 3,
+          "text": "café"
+        },
+        {
+          "byte_limit": 4,
+          "text": "café"
+        },
+        {
+          "byte_limit": 5,
+          "text": "café"
+        },
+        {
+          "byte_limit": 8,
+          "text": "café"
+        },
+        {
+          "byte_limit": 12,
+          "text": "café"
+        },
+        {
+          "byte_limit": 0,
+          "text": "€uro"
+        },
+        {
+          "byte_limit": 1,
+          "text": "€uro"
+        },
+        {
+          "byte_limit": 2,
+          "text": "€uro"
+        },
+        {
+          "byte_limit": 3,
+          "text": "€uro"
+        },
+        {
+          "byte_limit": 4,
+          "text": "€uro"
+        },
+        {
+          "byte_limit": 5,
+          "text": "€uro"
+        },
+        {
+          "byte_limit": 8,
+          "text": "€uro"
+        },
+        {
+          "byte_limit": 12,
+          "text": "€uro"
+        },
+        {
+          "byte_limit": 0,
+          "text": "🙂ok"
+        },
+        {
+          "byte_limit": 1,
+          "text": "🙂ok"
+        },
+        {
+          "byte_limit": 2,
+          "text": "🙂ok"
+        },
+        {
+          "byte_limit": 3,
+          "text": "🙂ok"
+        },
+        {
+          "byte_limit": 4,
+          "text": "🙂ok"
+        },
+        {
+          "byte_limit": 5,
+          "text": "🙂ok"
+        },
+        {
+          "byte_limit": 8,
+          "text": "🙂ok"
+        },
+        {
+          "byte_limit": 12,
+          "text": "🙂ok"
+        },
+        {
+          "byte_limit": 0,
+          "text": "é"
+        },
+        {
+          "byte_limit": 1,
+          "text": "é"
+        },
+        {
+          "byte_limit": 2,
+          "text": "é"
+        },
+        {
+          "byte_limit": 3,
+          "text": "é"
+        },
+        {
+          "byte_limit": 4,
+          "text": "é"
+        },
+        {
+          "byte_limit": 5,
+          "text": "é"
+        },
+        {
+          "byte_limit": 8,
+          "text": "é"
+        },
+        {
+          "byte_limit": 12,
+          "text": "é"
+        },
+        {
+          "byte_limit": 0,
+          "text": "👩‍💻"
+        },
+        {
+          "byte_limit": 1,
+          "text": "👩‍💻"
+        },
+        {
+          "byte_limit": 2,
+          "text": "👩‍💻"
+        },
+        {
+          "byte_limit": 3,
+          "text": "👩‍💻"
+        },
+        {
+          "byte_limit": 4,
+          "text": "👩‍💻"
+        },
+        {
+          "byte_limit": 5,
+          "text": "👩‍💻"
+        },
+        {
+          "byte_limit": 8,
+          "text": "👩‍💻"
+        },
+        {
+          "byte_limit": 12,
+          "text": "👩‍💻"
+        }
+      ],
+      "id": "utf8-clip",
+      "kind": "code-change",
+      "prompt": "Repair only the return expression in clip_utf8 below. Return JSON with exactly one string field, replacement, containing an expression. Preserve the existing validation. For a valid text and byte_limit, return the longest Unicode code-point prefix whose UTF-8 bytes fit the limit. Keep the original text unchanged within that prefix; do not normalize or split a code point. Allowed expression operations are text/byte_limit names, bounded literals, slicing, and UTF-8 str.encode/bytes.decode using strict or ignore decoding. No imports, other calls, statements or unrelated changes.\ndef clip_utf8(text, byte_limit):\n    if not isinstance(text, str) or type(byte_limit) is not int:\n        raise ValueError(\"Invalid clipping arguments\")\n    if not 0 <= byte_limit <= 512:\n        raise ValueError(\"Invalid clipping arguments\")\n    return text[:byte_limit]\n",
+      "source": "def clip_utf8(text, byte_limit):\n    if not isinstance(text, str) or type(byte_limit) is not int:\n        raise ValueError(\"Invalid clipping arguments\")\n    if not 0 <= byte_limit <= 512:\n        raise ValueError(\"Invalid clipping arguments\")\n    return text[:byte_limit]\n"
+    },
+    {
+      "id": "interval-review",
+      "kind": "bug-finding",
+      "prompt": "Review this one function under its stated contract: both intervals are nonempty integer half-open ranges, with endpoints in -32..32. There is one boundary defect. Return JSON {\"findings\":[{\"line\":integer,\"a\":[start,end],\"b\":[start,end],\"actual\":boolean,\"expected\":boolean}]}. Give one concrete counterexample, identify the faulty source line, and add no unverified findings.\ndef overlaps(a, b):\n    \"\"\"Nonempty integer half-open intervals, with endpoints in -32..32.\"\"\"\n    return max(a[0], b[0]) <= min(a[1], b[1])\n",
+      "source": "def overlaps(a, b):\n    \"\"\"Nonempty integer half-open intervals, with endpoints in -32..32.\"\"\"\n    return max(a[0], b[0]) <= min(a[1], b[1])\n"
+    },
+    {
+      "id": "rle-test-design",
+      "kind": "test-design",
+      "prompt": "Design four to eight distinct parameter cases for this run-length encoder. Return JSON {\"tests\":[{\"input\":string,\"expected\":[[one_character,positive_count],...]}]}. Include empty input, adjacent repeats, equal characters separated by another run, and Unicode. Every expected result must reconstruct the input and have distinct adjacent run labels. The cases must detect mutants that merge nonadjacent equal characters or drop the final run. Input length is at most 128 characters. Return data only.\ndef rle(text):\n    runs = []\n    for char in text:\n        if runs and runs[-1][0] == char:\n            runs[-1][1] += 1\n        else:\n            runs.append([char, 1])\n    return runs\n",
+      "source": "def rle(text):\n    runs = []\n    for char in text:\n        if runs and runs[-1][0] == char:\n            runs[-1][1] += 1\n        else:\n            runs.append([char, 1])\n    return runs\n"
+    }
+  ],
+  "schema": "brodson-spike-cases-v1"
+}

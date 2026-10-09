@@ -1,0 +1,59 @@
+{
+  "cases": {
+    "interval-review": [
+      {
+        "content": "{\"findings\": [{\"a\": [0, 2], \"actual\": true, \"b\": [2, 4], \"expected\": false, \"line\": 3}]}",
+        "finish_reason": "stop",
+        "synthetic_latency_ms": 700,
+        "synthetic_usage": {
+          "completion_tokens": 52,
+          "prompt_tokens": 210
+        }
+      }
+    ],
+    "rle-test-design": [
+      {
+        "content": "{\"tests\": [{\"expected\": [], \"input\": \"\"}, {\"expected\": [[\"a\", 1]], \"input\": \"a\"}, {\"expected\": [[\"a\", 2]], \"input\": \"aa\"}, {\"expected\": [[\"b\", 2]], \"input\": \"bb\"}]}",
+        "finish_reason": "stop",
+        "synthetic_latency_ms": 850,
+        "synthetic_usage": {
+          "completion_tokens": 60,
+          "prompt_tokens": 200
+        }
+      },
+      {
+        "content": "{\"tests\": [{\"expected\": [], \"input\": \"\"}, {\"expected\": [[\"a\", 2]], \"input\": \"aa\"}, {\"expected\": [[\"a\", 1], [\"b\", 1], [\"a\", 1]], \"input\": \"aba\"}, {\"expected\": [[\"é\", 2], [\"🙂\", 1]], \"input\": \"éé🙂\"}]}",
+        "finish_reason": "stop",
+        "synthetic_latency_ms": 950,
+        "synthetic_usage": {
+          "completion_tokens": 96,
+          "prompt_tokens": 260
+        }
+      }
+    ],
+    "utf8-clip": [
+      {
+        "content": "{\"replacement\": \"text[:byte_limit]\"}",
+        "finish_reason": "stop",
+        "synthetic_latency_ms": 800,
+        "synthetic_usage": {
+          "completion_tokens": 16,
+          "prompt_tokens": 180
+        }
+      },
+      {
+        "content": "{\"replacement\": \"text.encode(\\\"utf-8\\\")[:byte_limit].decode(\\\"utf-8\\\", errors=\\\"ignore\\\")\"}",
+        "finish_reason": "stop",
+        "synthetic_latency_ms": 900,
+        "synthetic_usage": {
+          "completion_tokens": 32,
+          "prompt_tokens": 240
+        }
+      }
+    ]
+  },
+  "model": "synthetic-fixture",
+  "notice": "All content, latency and usage here are authored synthetic fixtures, never live observations.",
+  "schema": "brodson-spike-responses-v1",
+  "synthetic": true
+}

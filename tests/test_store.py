@@ -363,7 +363,7 @@ def test_identity_guard_and_readiness(store):
     assert error('database_identity', wrong.migrate).status_code == 503
     error('database_identity', wrong.readiness)
     store.migrate()
-    assert store.readiness() == {'ready': True, 'schema_version': 10}
+    assert store.readiness() == {'ready': True, 'schema_version': 11}
 
 
 def test_upgrade_001_to_002_preserves_existing_records_and_is_repeatable(store):
@@ -387,7 +387,7 @@ def test_upgrade_001_to_002_preserves_existing_records_and_is_repeatable(store):
         error('schema_mismatch', upgraded.readiness)
         upgraded.migrate()
         upgraded.migrate()
-        assert upgraded.readiness() == {'ready': True, 'schema_version': 10}
+        assert upgraded.readiness() == {'ready': True, 'schema_version': 11}
         with upgraded._connection() as connection:
             assert connection.execute('SELECT * FROM tasks').fetchone() == task_before
             assert connection.execute('SELECT * FROM messages').fetchone() == message_before
