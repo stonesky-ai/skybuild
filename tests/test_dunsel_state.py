@@ -200,3 +200,85 @@ def test_worker_samples_and_sleeps_only_until_minute_boundary(tmp_path, monkeypa
     assert records[1]["root_disk"]["free_bytes"] > 0
     assert sleeps == [0.5]
     assert not dunsel_state.file_exists(dunsel_state.PID_FILE)
+
+
+def test_worker_publication_blocks_other_checkout_start(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
+    use_private_state(monkeypatch, tmp_path / "state")
+    args = ["/other/python", "/other/skybuild/marshall_dunsel.py", "--instance", "dunsel"]
+    monkeypatch.setattr(dunsel_state, "_proc_identity", lambda pid: ("42", args))
+    original_write = dunsel_state.write_text
+    truncated = threading.Event()
+    release = threading.Event()
+    controller_entered = threading.Event()
+
+    def partial_write(name, text, **kwargs):
+        if name == dunsel_state.PID_FILE:
+            original_write(name, "")
+            truncated.set()
+            assert release.wait(5), "test did not release worker publication"
+        original_write(name, text, **kwargs)
+
+    monkeypatch.setattr(dunsel_state, "write_text", partial_write)
+    monkeypatch.setattr(marshalls.subprocess, "Popen", lambda *args, **kwargs: pytest.fail("partial identity must never launch a duplicate"))
+    def other_checkout_start():
+        controller_entered.set()
+        return marshalls.start()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        publication = pool.submit(marshall_dunsel._write_pid)
+        assert truncated.wait(5)
+        controller = pool.submit(other_checkout_start)
+        assert controller_entered.wait(5)
+        try:
+            assert not controller.done()
+        finally:
+            release.set()
+        publication.result(timeout=5)
+        assert controller.result(timeout=5) == {"started": False, "pid": os.getpid()}
+
+
+def test_unresolved_start_blocks_retry_across_checkouts(tmp_path, monkeypatch):
+    use_private_state(monkeypatch, tmp_path / "state")
+    # A process has not yet execed Python, so ordinary worker lookup cannot see it.
+    monkeypatch.setattr(dunsel_state, "_proc_identity", lambda pid: ("42", ["/usr/bin/nohup"]))
+    dunsel_state.record_startup(123)
+    monkeypatch.setattr(marshalls.subprocess, "Popen", lambda *args, **kwargs: pytest.fail("unresolved startup must block retry"))
+    with pytest.raises(marshalls.MarshallConflict, match="startup is still unresolved"):
+        marshalls.start()
+    assert dunsel_state.file_exists(dunsel_state.STARTUP_FILE)
+
+
+def test_startup_record_expires_only_when_process_identity_changes(tmp_path, monkeypatch):
+    use_private_state(monkeypatch, tmp_path / "state")
+    monkeypatch.setattr(dunsel_state, "_proc_identity", lambda pid: ("42", ["/usr/bin/nohup"]))
+    dunsel_state.record_startup(123)
+    monkeypatch.setattr(dunsel_state, "_proc_identity", lambda pid: ("43", ["/unrelated"]))
+    assert not dunsel_state.startup_alive()
+
+
+def test_visibility_timeout_retains_unstopped_process_exposure(tmp_path, monkeypatch):
+    use_private_state(monkeypatch, tmp_path / "state")
+    monkeypatch.setattr(dunsel_state, "_proc_identity", lambda pid: ("42", ["/usr/bin/nohup"]))
+    monkeypatch.setattr(marshalls, "_worker_processes", lambda: [])
+    monkeypatch.setattr(marshalls.shutil, "which", lambda name: "/usr/bin/nohup")
+    times = iter([0.0, 3.0])
+    monkeypatch.setattr(marshalls.time, "monotonic", lambda: next(times))
+    class Process:
+        pid = 123
+        terminated = False
+        def terminate(self):
+            self.terminated = True
+        def wait(self, timeout):
+            raise subprocess.TimeoutExpired("dunsel", timeout)
+    process = Process()
+    monkeypatch.setattr(marshalls.subprocess, "Popen", lambda *args, **kwargs: process)
+
+    with pytest.raises(RuntimeError, match="startup remains unresolved"):
+        marshalls.start()
+    assert process.terminated
+    assert dunsel_state.startup_alive()
+    with pytest.raises(marshalls.MarshallConflict, match="startup is still unresolved"):
+        marshalls.start()

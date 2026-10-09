@@ -46,14 +46,16 @@ def _disk(path: str) -> dict[str, int | str]:
 
 
 def _write_pid() -> None:
-    dunsel_state.write_process_identity(os.getpid())
+    with dunsel_state.locked_control():
+        dunsel_state.write_process_identity(os.getpid())
 
 
 def _clear_pid() -> None:
     try:
-        identity = dunsel_state.process_identity()
-        if identity and identity["pid"] == os.getpid():
-            dunsel_state.unlink_file(dunsel_state.PID_FILE)
+        with dunsel_state.locked_control():
+            identity = dunsel_state.process_identity()
+            if identity and identity["pid"] == os.getpid():
+                dunsel_state.unlink_file(dunsel_state.PID_FILE)
     except (OSError, UnicodeError, ValueError):
         pass
 

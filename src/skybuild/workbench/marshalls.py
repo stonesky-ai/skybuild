@@ -1,14 +1,12 @@
 """Fixed local process controls for development Workbench marshalls."""
 from __future__ import annotations
 
-import fcntl
 import os
 import re
 import shutil
 import subprocess
 import sys
 import time
-from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -28,17 +26,7 @@ def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-@contextmanager
-def _locked_control():
-    descriptor = dunsel_state.open_file(
-        dunsel_state.LOCK_FILE, os.O_CREAT | os.O_RDWR
-    )
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        yield
-    finally:
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
-        os.close(descriptor)
+_locked_control = dunsel_state.locked_control
 
 
 def _worker_processes() -> list[dict[str, int | str]]:
@@ -79,6 +67,9 @@ def start() -> dict:
     with _locked_control():
         if dunsel_state.file_exists(dunsel_state.DISABLED_FILE):
             raise MarshallConflict("Dunsel is disabled. Enable it before starting.")
+        if dunsel_state.startup_alive():
+            raise MarshallConflict("A previous Dunsel startup is still unresolved.")
+        dunsel_state.unlink_file(dunsel_state.STARTUP_FILE)
         existing = _worker_processes()
         if existing:
             return {"started": False, "pid": existing[0]["pid"]}
@@ -99,12 +90,20 @@ def start() -> dict:
                 close_fds=True,
                 start_new_session=True,
             )
+        try:
+            dunsel_state.record_startup(process.pid)
+        except FileNotFoundError:
+            if process.poll() is None:
+                raise
+            raise RuntimeError("Dunsel exited during startup") from None
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
             if any(int(row["pid"]) == process.pid for row in _worker_processes()):
                 _write_pid(process.pid)
+                dunsel_state.unlink_file(dunsel_state.STARTUP_FILE)
                 return {"started": True, "pid": process.pid}
             if process.poll() is not None:
+                dunsel_state.unlink_file(dunsel_state.STARTUP_FILE)
                 dunsel_state.unlink_file(dunsel_state.PID_FILE)
                 raise RuntimeError("Dunsel exited during startup")
             time.sleep(0.02)
@@ -112,7 +111,8 @@ def start() -> dict:
         try:
             process.wait(timeout=2)
         except subprocess.TimeoutExpired:
-            pass
+            raise RuntimeError("Dunsel startup remains unresolved after termination") from None
+        dunsel_state.unlink_file(dunsel_state.STARTUP_FILE)
         dunsel_state.unlink_file(dunsel_state.PID_FILE)
         raise RuntimeError("Dunsel did not become visible in the process table")
 

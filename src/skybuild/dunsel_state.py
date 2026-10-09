@@ -1,10 +1,12 @@
 """Private, no-follow state files for the local Dunsel preview utility."""
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import stat
 from pathlib import Path
+from contextlib import contextmanager
 
 
 STATE_DIR = Path.home() / ".local" / "state" / "skybuild" / "dunsel"
@@ -13,7 +15,8 @@ EXIT_FILE = "dunsel.off-now"
 DISABLED_FILE = "dunsel.disabled"
 PID_FILE = "dunsel.pid"
 LOCK_FILE = "dunsel.control.lock"
-_STATE_FILES = {LOG_FILE, EXIT_FILE, DISABLED_FILE, PID_FILE, LOCK_FILE}
+STARTUP_FILE = "dunsel.startup"
+_STATE_FILES = {LOG_FILE, EXIT_FILE, DISABLED_FILE, PID_FILE, LOCK_FILE, STARTUP_FILE}
 _NOFOLLOW = os.O_NOFOLLOW
 _NONBLOCK = os.O_NONBLOCK
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
@@ -203,3 +206,36 @@ def _proc_identity(pid: int) -> tuple[str, list[str]]:
     start = raw[raw.rfind(")") + 2:].split()[19]
     args = [value.decode("utf-8") for value in (root / "cmdline").read_bytes().split(b"\0") if value]
     return start, args
+
+
+@contextmanager
+def locked_control():
+    """Serialize every state mutation by controllers and the worker."""
+    descriptor = open_file(LOCK_FILE, os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def record_startup(pid: int) -> None:
+    """Retain launched process exposure before its worker arguments are visible."""
+    start, _ = _proc_identity(pid)
+    write_text(STARTUP_FILE, json.dumps({"pid": pid, "start": start}) + "\n")
+
+
+def startup_alive() -> bool:
+    """Refuse retries while a failed start may still be alive; unknowns fail closed."""
+    try:
+        record = json.loads(read_text(STARTUP_FILE))
+    except FileNotFoundError:
+        return False
+    if type(record.get("pid")) is not int or record["pid"] <= 0:
+        raise ValueError("invalid Dunsel startup record")
+    try:
+        start, _ = _proc_identity(record["pid"])
+    except FileNotFoundError:
+        return False
+    return start == record["start"]
