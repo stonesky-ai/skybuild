@@ -147,6 +147,11 @@ class Client:
     def get_task(self, project_id: str, task_id: str) -> dict:
         return self.request("GET", self._path(project_id, f"tasks/{self._segment(task_id)}"))
 
+    def execution_status(self, project_id: str, task_id: str, *, limit: int = 20) -> dict:
+        """Read one task's bounded cached evidence; never probe or reconcile."""
+        return self.request("GET", self._path(project_id, f"tasks/{self._segment(task_id)}/execution-status"),
+                            params={"limit": limit})
+
     def update_task(self, project_id: str, task_id: str, body: dict, *, expected_revision: int, idempotency_key: str | None = None) -> dict:
         return self.request("PATCH", self._path(project_id, f"tasks/{self._segment(task_id)}"), body=body, revision=expected_revision, idempotency_key=idempotency_key)
 
