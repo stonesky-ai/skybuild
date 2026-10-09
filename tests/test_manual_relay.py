@@ -68,21 +68,18 @@ def test_authenticated_assignment_and_result_roundtrip(relay_assignment, restric
     dispatcher, worker = brief["dispatcher"], brief["worker"]
     admin = Store(admin_dsn, database)
     seed_api_authority(admin, project)
-    scopes = ["cord:send", "cord:read", "cord:handle", "tasks:read"]
-    owner, owner_token = "relay-owner-" + uuid4().hex, uuid4().hex + uuid4().hex
-    admin.provision_principal(owner, owner_token, is_admin=True,
-                              grants={project: ["tasks:read", "tasks:write"]})
-    principal = admin.authenticate(owner_token)
-    task = admin.create_task(principal, project,
-                             {"task_id": brief["task_id"], "title": "Manual relay task",
-                              "description": "API-bound assignment fixture",
-                              "acceptance_criteria": ["Current task status and revision are checked"]},
-                             "create-relay-task")
-    task = admin.task_action(principal, project, brief["task_id"], "ready",
-                             {"reason": "Test fixture approval"}, task["revision"], "ready-relay-task")
+    scopes = ["tasks:read", "cord:send", "cord:read", "cord:handle"]
     dispatcher_token, worker_token = uuid4().hex + uuid4().hex, uuid4().hex + uuid4().hex
     admin.provision_principal(dispatcher, dispatcher_token, grants={project: scopes})
     admin.provision_principal(worker, worker_token, grants={project: scopes})
+    owner_token = uuid4().hex + uuid4().hex
+    admin.provision_principal("owner-" + project, owner_token, is_admin=True)
+    owner = admin.authenticate(owner_token)
+    task = admin.create_task(owner, project, {
+        "task_id": brief["task_id"], "title": "Relay coding task", "description": "Bounded relay test",
+        "acceptance_criteria": ["Worker receives an API-bound assignment and reports a result"]}, "create")
+    task = admin.task_action(owner, project, task["task_id"], "ready", {"reason": "Ready for manual relay"},
+                             task["revision"], "ready")
     with TestClient(create_app(Store(runtime_dsn, database))) as api:
         def transport(request):
             response = api.request(request.method, str(request.url),
