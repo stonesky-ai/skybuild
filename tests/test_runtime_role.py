@@ -103,6 +103,8 @@ def test_runtime_supports_launch_free_store_operations(restricted_database, oper
     ("GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_file(text) TO {role}", "system routine EXECUTE"),
     ("GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_file(text) TO PUBLIC", "system routine EXECUTE"),
     ("GRANT EXECUTE ON FUNCTION pg_catalog.now() TO {role} WITH GRANT OPTION", "system routine grant option"),
+    ("GRANT SET ON PARAMETER session_replication_role TO {role}", "parameter privilege"),
+    ("GRANT ALTER SYSTEM ON PARAMETER search_path TO {role}", "parameter privilege"),
     ("GRANT EXECUTE ON FUNCTION skybuild.refuse_journal_mutation() TO PUBLIC", "routine EXECUTE"),
 ])
 def test_audit_detects_effective_privilege_drift(restricted_database, grant, expected):

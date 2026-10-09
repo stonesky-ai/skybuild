@@ -78,6 +78,11 @@ def audit_runtime_role(connection, expected_database, role):
     """
     runtime_oid = _identity(connection, expected_database, role)
     findings = []
+    for name, privilege in connection.execute(
+        "SELECT p.parname, a.privilege_type FROM pg_parameter_acl p, LATERAL aclexplode(p.paracl) a "
+        "WHERE a.grantee IN (0, %s)", (runtime_oid,),
+    ):
+        findings.append(f"parameter privilege: {name} {privilege}")
     if not connection.execute("SELECT has_database_privilege(%s, current_database(), 'CONNECT')", (role,)).fetchone()[0]:
         findings.append("missing database CONNECT")
     if connection.execute("SELECT has_database_privilege(%s, current_database(), 'CONNECT WITH GRANT OPTION')", (role,)).fetchone()[0]:
