@@ -144,8 +144,11 @@ def test_candidate_gate_cleanup_and_ref_checks(tmp_path, monkeypatch, change):
             assert gate_commands[0][gate_commands[0].index("--expected-head") + 1] == "d" * 40
             assert Path(result["gate_artifact"]).is_file()
     else:
-        with pytest.raises((OSError, RuntimeError, ValueError)):
+        with pytest.raises((OSError, RuntimeError, ValueError)) as failure:
             module.integrate(args)
+        if default_gate:
+            artifact = gate_commands[0][gate_commands[0].index("--artifact") + 1]
+            assert "artifact=" + artifact in str(failure.value)
     if change != "wrong_initial_base":
         assert any(argv[:3] == ["git", "worktree", "remove"] for argv in calls)
     else:

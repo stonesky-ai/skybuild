@@ -97,6 +97,7 @@ def integrate(args):
     with reserve_worktree_slots(root, 1), tempfile.TemporaryDirectory(prefix="skybuild-pr-candidate-") as directory:
         candidate = Path(directory) / "checkout"
         added = False
+        artifact = None
         try:
             run(["git", "worktree", "add", "--detach", str(candidate), base], root)
             added = True
@@ -104,7 +105,6 @@ def integrate(args):
                  "merge", "--no-ff", "--no-edit", head], candidate)
             candidate_head = run(["git", "rev-parse", "HEAD"], candidate)
             tree = run(["git", "rev-parse", "HEAD^{tree}"], candidate)
-            artifact = None
             run_id = "pr-" + str(args.pr) + "-" + uuid4().hex
             if not args.gate_argv:
                 artifact = getattr(args, "gate_artifact", None)
@@ -118,23 +118,18 @@ def integrate(args):
                                       "--artifact", str(artifact), "--run-id", run_id,
                                       "--expected-head", candidate_head, "--expected-tree", tree]
             gate = [word.replace("{checkout}", str(candidate)) for word in gate]
-            try:
-                gate_result = run_gate(gate, candidate)
-            except RuntimeError as error:
-                if artifact is not None:
-                    raise RuntimeError(str(error) + "; artifact=" + str(artifact)) from error
-                raise
+            gate_result = run_gate(gate, candidate)
             if artifact is not None:
                 if (not isinstance(gate_result, dict) or gate_result.get("ok") is not True
                         or gate_result.get("cleaned_up") is not True):
-                    raise RuntimeError("Project gate did not confirm success and cleanup; artifact=" + str(artifact))
+                    raise RuntimeError("Project gate did not confirm success and cleanup")
                 durable = json.loads(artifact.read_text())
                 expected = {"schema": "skybuild.gate-run.v1", "run_id": run_id,
                             "checkout": str(candidate), "head": candidate_head, "tree": tree,
                             "phase": "terminal", "status": "passed", "cleanup": "confirmed",
                             "ok": True, "exit_code": 0}
                 if not isinstance(durable, dict) or any(durable.get(key) != value for key, value in expected.items()):
-                    raise RuntimeError("Gate artifact differs from the passed candidate; artifact=" + str(artifact))
+                    raise RuntimeError("Gate artifact differs from the passed candidate")
             if run(["git", "status", "--porcelain"], candidate):
                 raise RuntimeError("Gate modified the candidate checkout")
             if (run(["git", "rev-parse", "HEAD"], candidate) != candidate_head
@@ -162,9 +157,18 @@ def integrate(args):
                 run(["git", "merge-base", "--is-ancestor", commit, "FETCH_HEAD"], root)
                 result.update(merged=True, published_commit=commit)
             return result
+        except (OSError, RuntimeError, ValueError, KeyError) as error:
+            if artifact is not None:
+                raise RuntimeError(str(error) + "; artifact=" + str(artifact)) from error
+            raise
         finally:
             if added:
-                run(["git", "worktree", "remove", "--force", str(candidate)], root)
+                try:
+                    run(["git", "worktree", "remove", "--force", str(candidate)], root)
+                except (OSError, RuntimeError) as error:
+                    if artifact is not None:
+                        raise RuntimeError(str(error) + "; artifact=" + str(artifact)) from error
+                    raise
 
 
 def main(argv=None):
