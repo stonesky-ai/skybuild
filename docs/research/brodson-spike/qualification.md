@@ -1,6 +1,6 @@
 # Brodson metadata and token-count qualification
 
-Task `SKYBUILD-SHARED-INFERENCE`, base `42c3256d1dd05af2c1c457d214231cce9f69c066`, branch `task/brodson-live-qualification`. This is a separate bounded controller command. It does not enable assignment010's `--live`, install an adapter, launch workers or claim spare inference capacity. Current implementation evidence is entirely offline and synthetic; no Brodson calls or real credential reads occurred during preparation.
+Task `SKYBUILD-SHARED-INFERENCE`, base `42c3256d1dd05af2c1c457d214231cce9f69c066`, branch `task/brodson-live-qualification`. This is a separate bounded controller command. It does not enable assignment010's `--live`, install an adapter, launch workers or claim spare inference capacity. The implementation-preparation evidence described below is offline and synthetic; no Brodson calls or real credential reads occurred during that preparation. Subsequent separately owner-authorized operator probes are recorded in the [four-concurrent capability report](four-concurrent-20261009.md). Those observations do not change this runner's serial contract or qualify general coding ability.
 
 ## Two explicit operator decisions, one budget
 
