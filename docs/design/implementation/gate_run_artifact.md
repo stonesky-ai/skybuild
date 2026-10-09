@@ -20,7 +20,7 @@ Example addition to the existing guarded invocation:
 
 ```sh
 nice -n 10 python scripts/disposable_pg_gate.py \
-  --checkout /absolute/frozen-candidate --min-available-gib 10 \
+  --checkout /absolute/frozen-candidate --min-available-gib 6 \
   --artifact /private/gate-artifacts/bundle-001.json --run-id bundle-001 \
   --expected-head FULL_REVIEWED_COMMIT --expected-tree FULL_FROZEN_TREE
 ```

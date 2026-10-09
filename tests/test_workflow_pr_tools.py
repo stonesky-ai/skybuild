@@ -112,7 +112,7 @@ def test_candidate_gate_cleanup_and_ref_checks(tmp_path, monkeypatch, change):
         assert result["gate"] == {"ok": True, "passed": 17}
         assert result["expected_base"] == base
         if change == "default_gate":
-            assert gate_commands[0][-2:] == ["--min-available-gib", "10"]
+            assert gate_commands[0][-2:] == ["--min-available-gib", "6"]
     else:
         with pytest.raises(RuntimeError, match="gate failed|Remote refs changed|Remote base differs"):
             module.integrate(args)
@@ -126,9 +126,13 @@ def test_candidate_gate_cleanup_and_ref_checks(tmp_path, monkeypatch, change):
 def test_failed_gate_retains_log_without_test_output(monkeypatch, tmp_path):
     module = load("integrate_reviewed_pr")
     monkeypatch.setattr(module.subprocess, "run", lambda *a, **kw: SimpleNamespace(
-        returncode=1, stdout='{"ok":false,"log":"/tmp/skybuild-gate.log"}', stderr="secret stderr"))
-    with pytest.raises(RuntimeError, match=r"Gate failed.*log=/tmp/skybuild-gate.log") as failure:
+        returncode=1, stdout='{"ok":false,"error_detail":"Available memory below gate minimum: '
+                            '1 bytes available; 10737418240 bytes required",'
+                            '"log":"/tmp/skybuild-gate.log"}', stderr="secret stderr"))
+    with pytest.raises(RuntimeError) as failure:
         module.run_gate(["gate"], tmp_path)
+    assert "reason=Available memory below gate minimum: 1 bytes available; 10737418240 bytes required" in str(failure.value)
+    assert "log=/tmp/skybuild-gate.log" in str(failure.value)
     assert "secret" not in str(failure.value)
 
 

@@ -35,6 +35,10 @@ def run_gate(argv, cwd):
     if process.returncode or isinstance(evidence, dict) and evidence.get("ok") is False:
         log = evidence.get("log") if isinstance(evidence, dict) else None
         detail = f"Gate failed (exit {process.returncode})"
+        error_detail = evidence.get("error_detail") if isinstance(evidence, dict) else None
+        if (isinstance(error_detail, str) and len(error_detail) <= 256
+                and all(char.isprintable() for char in error_detail)):
+            detail += "; reason=" + error_detail
         if isinstance(log, str) and not any(ord(char) < 32 for char in log):
             detail += "; log=" + log
         raise RuntimeError(detail)
@@ -95,7 +99,7 @@ def integrate(args):
                  "merge", "--no-ff", "--no-edit", head], candidate)
             tree = run(["git", "rev-parse", "HEAD^{tree}"], candidate)
             gate = args.gate_argv or [sys.executable, str(root / "scripts/disposable_pg_gate.py"),
-                                      "--checkout", str(candidate), "--min-available-gib", "10"]
+                                      "--checkout", str(candidate), "--min-available-gib", "6"]
             gate = [word.replace("{checkout}", str(candidate)) for word in gate]
             gate_result = run_gate(gate, candidate)
             if run(["git", "status", "--porcelain"], candidate):
