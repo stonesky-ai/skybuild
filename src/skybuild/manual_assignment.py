@@ -39,8 +39,9 @@ def _git(repo: Path, *args: str) -> bytes:
     return result.stdout
 
 
-def verify_assignment(envelope: dict, repo: Path, *, worker: str) -> dict:
+def verify_assignment(envelope: dict, repo: Path, *, worker: str, git_runner=None) -> dict:
     """Check a Cord snapshot against committed Git bytes; never grant task authority."""
+    git = git_runner or _git
     required = {"schema", "assignment_id", "task_id", "worker", "dispatcher", "base_sha",
                 "brief_path", "brief_sha256", "branch", "owned_paths", "checks", "model_limit"}
     if not isinstance(envelope, dict) or set(envelope) != required:
@@ -62,7 +63,7 @@ def verify_assignment(envelope: dict, repo: Path, *, worker: str) -> dict:
     branch = envelope["branch"]
     if not isinstance(branch, str) or not _BRANCH.fullmatch(branch) or "//" in branch or ".." in branch:
         raise AssignmentError("Invalid task branch")
-    _git(repo, "check-ref-format", "--branch", branch)
+    git(repo, "check-ref-format", "--branch", branch)
     paths = envelope["owned_paths"]
     if (not isinstance(paths, list) or not paths or not all(isinstance(value, str) for value in paths)
             or len(paths) != len(set(paths))):
@@ -77,20 +78,20 @@ def verify_assignment(envelope: dict, repo: Path, *, worker: str) -> dict:
     if not brief_path.startswith("docs/design/assignments/") or not brief_path.endswith(".json"):
         raise AssignmentError("Brief must be a committed assignment JSON file")
     repo = repo.resolve()
-    root = Path(_git(repo, "rev-parse", "--show-toplevel").decode().strip()).resolve()
+    root = Path(git(repo, "rev-parse", "--show-toplevel").decode().strip()).resolve()
     if root != repo or not (repo / "docs/design/architecture.md").is_file():
         raise AssignmentError("Expected the exact SkyBuild checkout")
-    remotes = (_git(repo, "remote", "get-url", "--all", "origin").decode().splitlines()
-               + _git(repo, "remote", "get-url", "--push", "--all", "origin").decode().splitlines())
+    remotes = (git(repo, "remote", "get-url", "--all", "origin").decode().splitlines()
+               + git(repo, "remote", "get-url", "--push", "--all", "origin").decode().splitlines())
     if len(remotes) < 2 or any(not _ORIGIN.fullmatch(url) for url in remotes):
         raise AssignmentError("Checkout origin is not SkyBuild")
-    resolved = _git(repo, "rev-parse", "--verify", f"{base}^{{commit}}").decode().strip()
+    resolved = git(repo, "rev-parse", "--verify", f"{base}^{{commit}}").decode().strip()
     if resolved != base:
         raise AssignmentError("Assignment base is not the pinned commit")
-    mode = _git(repo, "ls-tree", base, "--", brief_path).decode().split()
+    mode = git(repo, "ls-tree", base, "--", brief_path).decode().split()
     if not mode or mode[0] != "100644":
         raise AssignmentError("Brief must be a committed regular file")
-    brief = _git(repo, "show", f"{base}:{brief_path}")
+    brief = git(repo, "show", f"{base}:{brief_path}")
     try:
         document = json.loads(brief.decode("utf-8"))
     except (UnicodeError, ValueError) as error:
