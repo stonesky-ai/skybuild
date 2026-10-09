@@ -14,6 +14,8 @@ import subprocess
 import tempfile
 import time
 
+from memory_capacity import observe as observe_memory_capacity
+
 
 def disk_status(paths: list[Path], reserve_bytes: int) -> list[dict]:
     result = []
@@ -84,7 +86,9 @@ def worktree_status(checkout: Path) -> dict:
 
 
 def sample(reserve_bytes: int, *, disk_paths: list[Path] | None = None,
-           disk_reserve_bytes: int = 4 * 1024**3, checkout: Path | None = None) -> dict:
+           disk_reserve_bytes: int = 4 * 1024**3, checkout: Path | None = None,
+           jobs_registry: Path | None = None, capacity_state: Path | None = None,
+           new_job_limit_bytes: int = 4 * 1024**3) -> dict:
     values = {}
     for line in Path("/proc/meminfo").read_text(encoding="ascii").splitlines():
         if line.startswith(("MemAvailable:", "SwapFree:")):
@@ -114,6 +118,25 @@ def sample(reserve_bytes: int, *, disk_paths: list[Path] | None = None,
     if result["status"] != "low":
         result["status"] = ("low" if "low" in observed else "unknown" if "unknown" in observed
                             else "attention" if "attention" in observed else "ok")
+    if jobs_registry is not None and capacity_state is not None:
+        capacity_state.parent.mkdir(parents=True, exist_ok=True)
+        lock = os.open(str(capacity_state) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                capacity = {"status": "unknown", "reason": "capacity_writer_active",
+                            "sampled_at": result["sampled_at"], "max_new_jobs": 0}
+            else:
+                capacity = observe_memory_capacity(jobs_registry, capacity_state,
+                                                   available_bytes=available, reserve_bytes=reserve_bytes,
+                                                   new_job_limit_bytes=new_job_limit_bytes)
+                write_state(capacity_state, capacity)
+        finally:
+            os.close(lock)
+        result["capacity"] = {key: capacity[key] for key in
+                              ("status", "sampled_at", "safe_total_jobs", "target_jobs", "max_new_jobs")
+                              if key in capacity}
     return result
 
 
@@ -135,7 +158,8 @@ def write_state(path: Path, state: dict) -> None:
 
 def watch(path: Path, reserve_bytes: int, interval: int, duration_minutes: int,
           *, disk_paths: list[Path] | None = None, disk_reserve_bytes: int = 4 * 1024**3,
-          checkout: Path | None = None) -> int:
+          checkout: Path | None = None, jobs_registry: Path | None = None,
+          capacity_state: Path | None = None, new_job_limit_bytes: int = 4 * 1024**3) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
     stop_path = path.with_name(path.name + ".stop")
     lock = os.open(str(path) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
@@ -157,7 +181,9 @@ def watch(path: Path, reserve_bytes: int, interval: int, duration_minutes: int,
                     break
                 try:
                     state = sample(reserve_bytes, disk_paths=disk_paths,
-                                   disk_reserve_bytes=disk_reserve_bytes, checkout=checkout)
+                                   disk_reserve_bytes=disk_reserve_bytes, checkout=checkout,
+                                   jobs_registry=jobs_registry, capacity_state=capacity_state,
+                                   new_job_limit_bytes=new_job_limit_bytes)
                 except (OSError, ValueError):
                     state = {"sampled_at": datetime.now(timezone.utc).isoformat(),
                              "pid": os.getpid(), "status": "unknown", "reserve_bytes": reserve_bytes}
@@ -184,19 +210,32 @@ def main() -> int:
     parser.add_argument("--watch", action="store_true", help="Sample repeatedly without model calls")
     parser.add_argument("--interval", type=int, default=60, help="Watch interval in seconds")
     parser.add_argument("--duration-minutes", type=int, default=480, help="Maximum watch lifetime")
+    parser.add_argument("--jobs-registry", type=Path, help="Launcher-owned cgroup job registry JSON")
+    parser.add_argument("--capacity-state", type=Path, help="Atomic persistent worker guidance JSON")
+    parser.add_argument("--new-job-limit-gib", type=int, default=4,
+                        help="Hard cgroup MemoryMax for each new job; must match launcher")
     args = parser.parse_args()
     if args.reserve_gib < 0 or args.disk_reserve_gib < 0:
         parser.error("Reserve must not be negative")
     if not 60 <= args.interval <= 90 or not 1 <= args.duration_minutes <= 480:
         parser.error("Watch interval must be 60–90 seconds and lifetime at most eight hours")
+    if (args.jobs_registry is None) != (args.capacity_state is None):
+        parser.error("Specify both --jobs-registry and --capacity-state")
+    if args.new_job_limit_gib < 1 or args.new_job_limit_gib > 64:
+        parser.error("New job MemoryMax must be 1–64 GiB")
+    if args.capacity_state is not None and args.capacity_state.resolve() == args.state.resolve():
+        parser.error("Capacity and host state files must differ")
     reserve_bytes = args.reserve_gib * 1024**3
     disk_paths = args.disk_path or [args.checkout, Path("/tmp")]
     disk_reserve_bytes = args.disk_reserve_gib * 1024**3
+    capacity_args = {"jobs_registry": args.jobs_registry, "capacity_state": args.capacity_state,
+                     "new_job_limit_bytes": args.new_job_limit_gib * 1024**3}
     if args.watch:
         return watch(args.state, reserve_bytes, args.interval, args.duration_minutes,
-                     disk_paths=disk_paths, disk_reserve_bytes=disk_reserve_bytes, checkout=args.checkout)
+                     disk_paths=disk_paths, disk_reserve_bytes=disk_reserve_bytes, checkout=args.checkout,
+                     **capacity_args)
     state = sample(reserve_bytes, disk_paths=disk_paths,
-                   disk_reserve_bytes=disk_reserve_bytes, checkout=args.checkout)
+                   disk_reserve_bytes=disk_reserve_bytes, checkout=args.checkout, **capacity_args)
     write_state(args.state, state)
     print(json.dumps(state, sort_keys=True))
     return 0
