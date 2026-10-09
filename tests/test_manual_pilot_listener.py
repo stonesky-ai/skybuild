@@ -33,13 +33,16 @@ class Inbox:
 
     def whoami(self):
         return {"principal_id": "wonko", "is_admin": False,
-                "grants": {"skybuild": ["cord:read", "cord:send", "cord:handle"]}}
+                "grants": {"skybuild": ["tasks:read", "cord:read", "cord:send", "cord:handle"]}}
 
     def inbox(self, project, *, limit, offset, wait_seconds):
         assert (project, limit, offset) == ("skybuild", 100, 0)
         assert 0 <= wait_seconds <= 25
         self.waits.append(wait_seconds)
         return self.messages
+
+    def get_task(self, project, task_id):
+        return {"task_id": task_id, "status": "ready", "revision": 2}
 
     def message_action(self, project, message_id, action, *, idempotency_key):
         assert self.destination.exists()
@@ -54,6 +57,7 @@ class Inbox:
 @pytest.fixture
 def armed(pinned, tmp_path):
     repo, envelope = pinned
+    envelope = envelope | {"schema": "manual-work-v2", "task_status": "ready", "task_revision": 2}
     clock = Clock()
     destination = tmp_path / "assignment.json"
     client = Inbox(envelope, destination, clock)
@@ -303,7 +307,7 @@ def test_actual_receiving_client_requires_exact_identity_and_scopes(armed, ident
 def test_receiving_identity_is_rechecked_before_receipt(armed):
     client, options, _ = armed
     original = client.whoami()
-    identities = iter([original, original | {"principal_id": "foreign"}])
+    identities = iter([original, original, original | {"principal_id": "foreign"}])
     client.whoami = lambda: next(identities)
     with pytest.raises(ListenerError, match="scoped worker"):
         listen(client, **options)

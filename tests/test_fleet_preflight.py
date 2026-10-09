@@ -27,7 +27,7 @@ def token_file(tmp_path):
     return path
 
 
-def transport_for(identity, *, ready=True):
+def transport_for(identity, *, ready=True, tasks=None, task_status=200):
     def handle(request):
         assert request.headers["Authorization"] == f"Bearer {TOKEN}"
         assert request.method == "GET"
@@ -37,21 +37,26 @@ def transport_for(identity, *, ready=True):
             return httpx.Response(200, json=identity)
         if request.url.path == "/api/v1/projects/skybuild/cord/inbox":
             return httpx.Response(200, json=[])
+        if request.url.path == "/api/v1/projects/skybuild/tasks":
+            assert request.url.params["limit"] == "1"
+            assert request.url.params["by_id"] == "true"
+            return httpx.Response(task_status, json=[] if tasks is None else tasks)
         raise AssertionError("Unexpected request")
     return httpx.MockTransport(handle)
 
 
 def identity(**overrides):
     return {"principal_id": "wonko-worker", "is_admin": False,
-            "grants": {"skybuild": ["cord:read", "cord:send", "cord:handle"]}} | overrides
+            "grants": {"skybuild": ["tasks:read", "cord:read", "cord:send", "cord:handle"]}} | overrides
 
 
 def test_private_ready_project_scoped_worker_can_read_inbox(token_file):
     result = checked_probe(URL, "skybuild", token_file, "wonko-worker",
                                transport=transport_for(identity()))
     assert result == {"ready": True, "project_id": "skybuild", "principal_id": "wonko-worker",
-                      "scopes": ["cord:handle", "cord:read", "cord:send"],
-                      "inbox_access": True, "host": "jeltz.tail991ac1.ts.net"}
+                      "scopes": ["cord:handle", "cord:read", "cord:send", "tasks:read"],
+                      "inbox_access": True, "task_list_access": True,
+                      "host": "jeltz.tail991ac1.ts.net"}
     assert TOKEN not in json.dumps(result)
 
 
@@ -104,3 +109,11 @@ def test_token_fifo_is_refused_without_blocking(tmp_path):
     )
     assert result.returncode == 0
     assert result.stdout.strip() == "rejected"
+
+
+@pytest.mark.parametrize("tasks, status", [({}, 200), ([{}, {}], 200),
+                                              ({"error": {"code": "authorization"}}, 403)])
+def test_task_list_must_be_accessible_and_bounded(token_file, tasks, status):
+    with pytest.raises(PreflightError):
+        checked_probe(URL, "skybuild", token_file, "wonko-worker",
+                      transport=transport_for(identity(), tasks=tasks, task_status=status))

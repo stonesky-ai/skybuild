@@ -70,7 +70,7 @@ python scripts/prepare_bundle.py \
 ```
 
 Git commands run at nice 10. Before fetch/worktree creation and each merge,
-available memory must be at least 8 GiB. The helper uses no model, REST endpoint,
+available memory must be at least 6 GiB. The helper uses no model, REST endpoint,
 daemon, PostgreSQL process, test gate, publisher or runtime deployment.
 Inherited `GIT_*` environment variables other than RTK's inert `GIT_PAGER` are
 rejected before even the repository guard runs. The helper's Git subprocesses

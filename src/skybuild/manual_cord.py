@@ -85,12 +85,26 @@ def receive_assignment(client: Client, project: str, checkout: Path, *, worker: 
     snapshot = verify_assignment(envelope, checkout, worker=worker)
     if envelope["dispatcher"] != dispatcher:
         raise ManualCordError("Assignment dispatcher differs from authenticated sender")
+    if envelope["schema"] != "manual-work-v2":
+        raise ManualCordError("Legacy assignment needs API-bound redispatch")
+    try:
+        task = client.get_task(project, envelope["task_id"])
+    except ClientError as error:
+        raise ManualCordError(f"Assigned task check failed ({error.code})") from None
+    if (not isinstance(task, dict) or task.get("task_id") != envelope["task_id"]
+            or task.get("status") != envelope["task_status"]
+            or type(task.get("revision")) is not int
+            or task["revision"] != envelope["task_revision"]):
+        raise ManualCordError("Task changed after dispatcher prepared the assignment")
     payload = (json.dumps(envelope, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
     _private_write(destination, payload)
     key = "manual-receipt-" + hashlib.sha256(message_id.encode()).hexdigest()
     client.message_action(project, message_id, "receipt", idempotency_key=key)
     return {"saved": str(destination), "message_id": message_id, "assignment_id": snapshot["assignment_id"],
-            "base_sha": snapshot["base_sha"], "verified": True, "authority": "markdown"}
+            "base_sha": snapshot["base_sha"], "verified": True,
+            "authority": "api", "brief_authority": "git",
+            "task_revision": snapshot["task_revision"], "task_status": snapshot["task_status"]}
+
 
 
 def send_result(client: Client, project: str, checkout: Path, worktree: Path, *, worker: str,
