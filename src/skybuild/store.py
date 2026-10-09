@@ -313,7 +313,7 @@ class Store:
         _body(body, TASK_FIELDS | {'task_id'})
         if body.get('status', 'proposed') != 'proposed' or body.get('phase', 'triage') != 'triage' or body.get('blocker') is not None:
             _invalid('New tasks start in proposed triage; use guarded actions for workflow changes')
-        if isinstance(body.get('metadata'), dict) and '_skybuild_workflow' in body['metadata']:
+        if isinstance(body.get('metadata'), dict) and set(body['metadata']) & {'_skybuild_workflow', '_skybuild_completion'}:
             _invalid('Workflow metadata is managed by task actions')
         task_id = _identifier(body.get('task_id'), 'task_id')
         values = self._task_values({key: value for key, value in body.items() if key != 'task_id'})
@@ -359,7 +359,7 @@ class Store:
         _body(body, TASK_FIELDS)
         if set(body) & {'status', 'phase', 'blocker'}:
             _invalid('Workflow state changes require a guarded task action')
-        if isinstance(body.get('metadata'), dict) and '_skybuild_workflow' in body['metadata']:
+        if isinstance(body.get('metadata'), dict) and set(body['metadata']) & {'_skybuild_workflow', '_skybuild_completion'}:
             _invalid('Workflow metadata is managed by task actions')
         def changes(before, connection):
             if '_skybuild_workflow' not in before['metadata']:
@@ -397,6 +397,24 @@ class Store:
             return result
         return self._change_task(principal, project_id, task_id, expected_revision, idempotency_key,
                                  'task.action.' + action,
+                                 {'task_id': task_id, 'revision': expected_revision, 'body': body}, changes,
+                                 reason=body.get('reason'))
+
+    def complete_task(self, principal, project_id, task_id, body: dict, expected_revision: int, idempotency_key: str) -> dict:
+        """Record owner-attested code acceptance; never contact or publish to GitHub."""
+        from .completion import completion_change
+
+        _body(body, {'reason', 'generation', 'source_head', 'author', 'policy_ref',
+                     'acceptance', 'checks', 'review', 'publication'})
+        def changes(before, connection):
+            current = self._principal(connection, principal.principal_id)
+            if not current.is_admin:
+                raise DomainError('authorization', 'Only an owner/admin may attest completion', 403)
+            if before['dependencies']:
+                raise DomainError('workflow_conflict', 'Dependency-bearing completion requires durable dependency invalidation', 409)
+            return completion_change(before, body, current.principal_id)
+        return self._change_task(principal, project_id, task_id, expected_revision, idempotency_key,
+                                 'task.action.completed',
                                  {'task_id': task_id, 'revision': expected_revision, 'body': body}, changes,
                                  reason=body.get('reason'))
 
