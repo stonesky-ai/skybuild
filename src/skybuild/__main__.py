@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -43,6 +44,19 @@ def main(argv: list[str] | None = None) -> int:
     ledger_import.add_argument("--project-id", default="skybuild")
     ledger_import.add_argument("--apply-disposable", action="store_true")
     ledger_import.add_argument("--expected-import-sha256")
+    ledger_cutover = commands.add_parser("ledger-cutover", help="Plan or explicitly cut task authority over to the API")
+    ledger_cutover.add_argument("--ledger-dir", type=Path, default=Path("docs/design"))
+    ledger_cutover.add_argument("--contract", type=Path, default=Path("docs/design/implementation/current_task_import.json"))
+    ledger_cutover.add_argument("--apply-live", action="store_true", help="Apply the guarded one-time live import")
+    ledger_cutover.add_argument("--expected-import-sha256")
+    ledger_cutover.add_argument("--backup-file", type=Path)
+    ledger_cutover.add_argument("--backup-sha256")
+    ledger_cutover.add_argument("--backup-evidence", type=Path)
+    ledger_cutover.add_argument("--backup-evidence-sha256")
+    ledger_cutover.add_argument("--expected-system-identifier",
+                                help="Retained PostgreSQL cluster identity from reviewed pilot preflight")
+    ledger_cutover.add_argument("--database-container-id",
+                                help="Retained full PostgreSQL container ID from reviewed pilot preflight")
     audit = commands.add_parser("ledger-audit", help="Audit frozen versus current Markdown without database access or authority changes")
     audit.add_argument("--ledger-dir", type=Path, default=Path("docs/design"))
     audit.add_argument("--contract", type=Path, default=Path("docs/design/implementation/frozen_ledger_import.json"))
@@ -163,6 +177,49 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps({**result, "content_sha256": plan["content_sha256"]}, ensure_ascii=False, indent=2))
             else:
                 print(json.dumps(plan, ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "ledger-cutover":
+            from .cutover import verify_backup
+            from .importer import cutover_live, prepare_import
+
+            plan = prepare_import(args.ledger_dir, args.contract)
+            if not args.apply_live:
+                print(json.dumps(plan, ensure_ascii=False, indent=2))
+                return 0
+            if not args.expected_import_sha256 or plan["import_sha256"] != args.expected_import_sha256:
+                raise ValueError("Live cutover requires the reviewed exact import-plan SHA-256")
+            if (args.backup_file is None or not args.backup_sha256 or args.backup_evidence is None
+                    or not args.backup_evidence_sha256 or not args.expected_system_identifier):
+                raise ValueError("Live cutover requires a private backup, pinned source evidence, and retained cluster identity")
+            if not args.database_container_id:
+                raise ValueError("Live cutover requires the retained PostgreSQL container ID")
+            repository = args.ledger_dir.resolve().parent.parent
+            expected_database = _environment("SKYBUILD_EXPECTED_DATABASE")
+            if expected_database != "skybuild_pilot":
+                raise ValueError("Live cutover requires the exact skybuild_pilot database")
+            backup = verify_backup(
+                args.backup_file, args.backup_sha256, repository,
+                evidence_path=args.backup_evidence,
+                expected_evidence_sha256=args.backup_evidence_sha256,
+                expected_database=expected_database,
+                expected_system_identifier=args.expected_system_identifier,
+                expected_container_id=args.database_container_id,
+            )
+            status = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"],
+                                    cwd=repository, capture_output=True, check=False)
+            if status.returncode or status.stdout:
+                raise ValueError("Live cutover requires a clean reviewed checkout")
+            ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", plan["commit"], "HEAD"],
+                                     cwd=repository, capture_output=True, check=False)
+            if ancestor.returncode:
+                raise ValueError("Frozen ledger commit must be an ancestor of the reviewed checkout")
+            from .store import Store
+
+            result = cutover_live(Store(_environment("SKYBUILD_ROLE_ADMIN_DSN"), expected_database,
+                                        args.expected_system_identifier),
+                                  args.ledger_dir, args.contract, args.expected_import_sha256)
+            print(json.dumps({**result, "content_sha256": plan["content_sha256"], "backup": backup},
+                             ensure_ascii=False, indent=2))
             return 0
         if args.command in {"tasks", "get", "history", "execution-status"}:
             with Client(_environment("SKYBUILD_API_URL"), _environment("SKYBUILD_TOKEN"), ca_file=args.ca_file) as client:

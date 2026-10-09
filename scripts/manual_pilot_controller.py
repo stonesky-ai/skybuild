@@ -129,12 +129,22 @@ def _source_manifest(checkout: Path, revision: str) -> dict[str, str]:
     return manifest
 
 
+def _verify_schema_011_to_012(current: dict[str, str], candidate: dict[str, str]) -> None:
+    old = {name: digest for name, digest in current.items() if name.startswith("migrations/")}
+    new = {name: digest for name, digest in candidate.items() if name.startswith("migrations/")}
+    versions = sorted(int(Path(name).name.split("_", 1)[0]) for name in old)
+    if (versions != list(range(1, 12))
+            or any(new.get(name) != digest for name, digest in old.items())
+            or set(new) - set(old) != {"migrations/012_api_task_authority.sql"}):
+        raise ValueError("Require unchanged schema 001-011 and only reviewed authority migration 012")
+
+
 
 def promotion_preflight(checkout: Path, expected_sha: str, published_ref: str, *,
                         current_sha: str, state_dir: Path, hostname: str, tailnet_ip: str,
                         api_container: str, db_container: str, api_image: str, system_id: str,
                         ca_pem_sha256: str) -> dict:
-    """Read-only, exact-identity preflight for the reviewed 010-to-011 promotion.
+    """Read-only, exact-identity preflight for the reviewed 011-to-012 promotion.
 
     Expected identities come from retained deployment evidence, not from blindly
     accepting whatever happens to own a container name or a loopback listener.
@@ -154,7 +164,8 @@ def promotion_preflight(checkout: Path, expected_sha: str, published_ref: str, *
     if published_ref not in {"refs/heads/dev-002", "refs/heads/main"}:
         raise ValueError("Require the approved publication ref")
     checkout = checkout.absolute()
-    tls.controller(checkout, expected_sha, state_dir, hostname, tailnet_ip)
+    tls.controller(checkout, expected_sha, state_dir, hostname, tailnet_ip,
+                   expected_api_image=api_image)
     if tls.command("git", "-C", str(checkout), "ls-remote", "--exit-code", "origin", published_ref) != \
             f"{expected_sha}\t{published_ref}":
         raise ValueError("Candidate differs from the exact approved published ref")
@@ -170,13 +181,9 @@ def promotion_preflight(checkout: Path, expected_sha: str, published_ref: str, *
         raise ValueError("Unexpected Serve/Funnel configuration needs separate reconciliation")
     current = _source_manifest(checkout, current_sha)
     candidate = _source_manifest(checkout, expected_sha)
+    _verify_schema_011_to_012(current, candidate)
     old_migrations = {name: digest for name, digest in current.items() if name.startswith("migrations/")}
-    new_migrations = {name: digest for name, digest in candidate.items() if name.startswith("migrations/")}
     old_names = sorted(old_migrations)
-    if ([int(Path(name).name.split('_', 1)[0]) for name in old_names] != list(range(1, 11))
-            or any(new_migrations.get(name) != digest for name, digest in old_migrations.items())
-            or set(new_migrations) - set(old_migrations) != {"migrations/011_cpu_fake_dispatch.sql"}):
-        raise ValueError("Require unchanged schema 001-010 and only reviewed expansion 011")
 
     inspected = {}
     for name, identifier in (("skybuild-pilot-api", api_container), (DATABASE_CONTAINER, db_container)):
@@ -257,17 +264,16 @@ def promotion_preflight(checkout: Path, expected_sha: str, published_ref: str, *
         applied = connection.execute('SELECT version, digest FROM skybuild.schema_migrations ORDER BY version').fetchall()
         expected = [(int(Path(name).name.split('_', 1)[0]), old_migrations[name]) for name in old_names]
         if applied != expected:
-            raise ValueError("Applied schema is not the exact retained 010 prefix")
+            raise ValueError("Applied schema is not the exact retained 011 prefix")
         audit = audit_runtime_role(connection, provisioner.DATABASE, provisioner.ROLE)
-        expected_missing = ['missing table: cpu_fake_dispatches', 'missing table: cpu_fake_receipts']
-        if audit['findings'] != expected_missing:
-            raise ValueError("Current restricted-role policy differs beyond absent 011 objects")
+        if audit['findings']:
+            raise ValueError("Current restricted-role policy is not fully qualified")
     return {'ready_for_operator_promotion': True, 'no_changes_made': True,
             'candidate_source': expected_sha, 'current_source': current_sha,
             'api_container': api_container, 'database_container': db_container, 'api_image': api_image,
             'database': provisioner.DATABASE, 'database_system_id': system_id,
-            'current_schema': 10, 'candidate_schema': 11,
-            'current_role_audit': 'only expected absent 011 tables',
+            'current_schema': 11, 'candidate_schema': 12,
+            'current_role_audit': 'passed',
             'candidate_role_audit_required': True, 'tls': tls_report,
             'ca_pem_sha256': ca_pem_sha256,
             'binary_rollback_after_migration': False,
@@ -278,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--checkout", type=Path, required=True)
     parser.add_argument("--expected-sha", required=True)
     parser.add_argument("--published-ref", choices=("refs/heads/dev-002", "refs/heads/main"), required=True)
-    parser.add_argument("--promotion", action="store_true", help="Inspect existing pinned 010 controller; never apply changes")
+    parser.add_argument("--promotion", action="store_true", help="Inspect the retained schema-011 controller; never apply changes")
     parser.add_argument("--current-sha")
     parser.add_argument("--state-dir", type=Path)
     parser.add_argument("--hostname")

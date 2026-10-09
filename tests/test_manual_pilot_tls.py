@@ -125,6 +125,56 @@ def test_controller_guards_before_certificate_generation(tmp_path, monkeypatch, 
     assert not (state / "tls").exists()
 
 
+@pytest.mark.parametrize("matches", [True, False])
+def test_controller_can_pin_current_api_image_for_promotion(tmp_path, monkeypatch, matches):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    sha = "a" * 40
+    api_image = "sha256:" + "b" * 64
+    db_image = "sha256:" + "c" * 64
+    api = {"Image": api_image if matches else "sha256:" + "d" * 64,
+           "Config": {"Labels": {"com.docker.compose.project": "skybuild-pilot",
+                                    "com.docker.compose.service": "api",
+                                    "com.docker.compose.project.working_dir": str(checkout / "ops/manual-pilot")}},
+           "State": {"Running": True}}
+    db = {"Image": db_image,
+          "Config": {"Labels": {"com.docker.compose.project": "skybuild-pilot",
+                                   "com.docker.compose.service": "db",
+                                   "com.docker.compose.project.working_dir": str(checkout / "ops/manual-pilot")}},
+          "State": {"Running": True},
+          "NetworkSettings": {"Ports": {"5432/tcp": [{"HostIp": "127.0.0.1", "HostPort": "55432"}]}},
+          "Mounts": [{"Destination": "/var/lib/postgresql/data", "Source": str(state / "pgdata")}]
+    }
+    calls = []
+
+    def command(*args):
+        calls.append(args)
+        if args[0] == "git":
+            if "--show-toplevel" in args: return str(checkout)
+            if "rev-parse" in args: return sha
+            if "status" in args: return ""
+            if "ls-remote" in args: return sha + "\trefs/heads/dev-002"
+            if "get-url" in args: return "https://github.com/stonesky-ai/skybuild.git"
+        if args[:2] == ("tailscale", "status"):
+            return json.dumps(snapshot())
+        if args[:3] == ("docker", "image", "inspect"):
+            assert args[3] == "postgres:16"
+            return db_image
+        if args[:2] == ("docker", "inspect"):
+            return json.dumps([api if args[2] == "skybuild-pilot-api" else db])
+        raise AssertionError(args)
+
+    monkeypatch.setattr(tls, "command", command)
+    if matches:
+        tls.controller(checkout, sha, state, HOST, IP, expected_api_image=api_image)
+    else:
+        with pytest.raises(tls.TLSError, match="expected local image"):
+            tls.controller(checkout, sha, state, HOST, IP, expected_api_image=api_image)
+    assert not any(args[:4] == ("docker", "image", "inspect", "skybuild-pilot-api:local") for args in calls)
+
+
 def test_overlay_only_tailnet_bind_leaf_mounts_and_native_flags():
     text = (Path(__file__).parents[1] / "ops/manual-pilot/compose.tls.yaml").read_text()
     assert ':8443:8000"' in text

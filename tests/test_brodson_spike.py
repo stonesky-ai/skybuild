@@ -605,7 +605,13 @@ def test_fake_http_failed_generation_retains_parent_wall_latency_and_exposure(ht
     generation = entries[1]
     assert generation["request"]["method"] == "POST"
     assert generation["status"] == "consumed_uncertain"
-    assert generation["parent_elapsed_wall_ms"] >= (95 if outcome == "timeout" else 25)
+    if outcome == "timeout":
+        # Setup and discovery consume time before generation starts, so
+        # request-only latency must stay within one shared deadline.
+        assert sum(entry["parent_elapsed_wall_ms"] for entry in entries) < 150
+        assert generation["parent_elapsed_wall_ms"] > 0
+    else:
+        assert generation["parent_elapsed_wall_ms"] >= 25
 
     def forbidden(request):
         raise AssertionError("failed generation remains consumed on restart")
@@ -614,3 +620,138 @@ def test_fake_http_failed_generation_retains_parent_wall_latency_and_exposure(ht
     assert restarted["stop_reason"] == "consumed_attempt_not_reconciled"
     assert restarted["consumed_generation"] == 1 and restarted["reserved_token_exposure"] == 2560
     assert json.loads(path.read_text())["entries"] == entries
+
+
+def test_fake_http_total_deadline_is_persisted_across_restart(http_setup):
+    import httpx
+    import time
+    manifest, recordings, root, _ = http_setup
+    baseline = http_transport(manifest, recordings)
+
+    def slow_handler(request):
+        time.sleep(0.05)
+        return baseline.handle_request(request)
+
+    started = time.monotonic()
+    result = run_http(http_setup, httpx.MockTransport(slow_handler), deadline_seconds=0.12)
+    elapsed = time.monotonic() - started
+    assert result["status"] == "stopped"
+    assert elapsed < 0.5
+    assert result["consumed_discovery"] == 1
+    state = json.loads((root / "attempts.json").read_text())
+    assert state["identity"]["limits"]["total_wall_seconds"] == 60
+    assert state["identity"]["run_deadline_unix"] < state["identity"]["expires_at"]
+    assert all("parent_elapsed_wall_ms" in entry for entry in state["entries"])
+
+    def forbidden(request):
+        raise AssertionError("restart must retain the original total wall deadline")
+
+    restarted = run_http(http_setup, httpx.MockTransport(forbidden))
+    assert restarted["consumed_discovery"] == result["consumed_discovery"]
+    assert restarted["consumed_generation"] == result["consumed_generation"]
+    assert restarted["reserved_token_exposure"] == result["reserved_token_exposure"]
+    assert json.loads((root / "attempts.json").read_text())["entries"] == state["entries"]
+
+
+def test_fake_http_shortened_deadline_survives_restart_and_cannot_be_extended(http_setup):
+    result = run_http(http_setup)
+    assert result["status"] == "prepared"
+    path = http_setup[2] / "attempts.json"
+    original = json.loads(path.read_text())["identity"]
+
+    shortened = run_http(http_setup, deadline_seconds=0.5)
+    assert shortened["status"] == "prepared"
+    after_shorten = json.loads(path.read_text())["identity"]
+    assert after_shorten["run_deadline_monotonic"] < original["run_deadline_monotonic"]
+    assert after_shorten["run_deadline_unix"] < original["run_deadline_unix"]
+
+    extended = run_http(http_setup, deadline_seconds=60)
+    assert extended["status"] == "prepared"
+    after_extend = json.loads(path.read_text())["identity"]
+    assert after_extend["run_deadline_monotonic"] == after_shorten["run_deadline_monotonic"]
+    assert after_extend["run_deadline_unix"] == after_shorten["run_deadline_unix"]
+
+
+def test_fake_http_expired_completed_prefix_is_not_renewed_by_wall_clock_rollback(
+        http_setup, monkeypatch):
+    import time
+    result = run_http(http_setup)
+    assert result["status"] == "prepared"
+    path = http_setup[2] / "attempts.json"
+    state = json.loads(path.read_text())
+    state["entries"] = state["entries"][:1]  # Completed discovery, generation still resumable.
+    expired_mono = time.monotonic() - 1
+    state["identity"]["run_deadline_monotonic"] = expired_mono
+    spike.write_result(path, spike.canonical(state))
+
+    monkeypatch.setattr(spike.time, "monotonic", lambda: expired_mono + 1)
+    monkeypatch.setattr(spike.time, "time", lambda: state["identity"]["run_deadline_unix"] - 1000)
+
+    def forbidden(request):
+        raise AssertionError("an expired resumed run must not dispatch after clock rollback")
+
+    resumed = run_http(http_setup, __import__("httpx").MockTransport(forbidden))
+    assert resumed["status"] == "stopped"
+    assert resumed["stop_reason"] == "total_wall_deadline_exhausted"
+    assert json.loads(path.read_text())["entries"] == state["entries"]
+
+
+def test_fake_http_rejects_journal_from_another_boot(http_setup, monkeypatch):
+    run_http(http_setup)
+    monkeypatch.setattr(spike, "_boot_id", lambda: "f" * 36)
+    with pytest.raises(spike.SpikeError, match="journal_boot_changed"):
+        run_http(http_setup)
+
+
+def test_fake_http_preflight_wall_rollback_does_not_extend_authority(http_setup, monkeypatch):
+    import time
+    from types import SimpleNamespace
+    wall = [time.time()]
+    monotonic_start = time.monotonic()
+    http_setup[3]["expires_at"] = wall[0] + 5
+    fake_clock = SimpleNamespace(time=lambda: wall[0], monotonic=time.monotonic)
+    monkeypatch.setattr(spike, "time", fake_clock)
+    validate = spike.validate_manifest
+
+    def validation_with_wall_rollback(manifest, recordings):
+        result = validate(manifest, recordings)
+        wall[0] -= 10000
+        return result
+
+    monkeypatch.setattr(spike, "validate_manifest", validation_with_wall_rollback)
+    result = run_http(http_setup, deadline_seconds=60)
+    assert result["status"] == "prepared"
+    identity = json.loads((http_setup[2] / "attempts.json").read_text())["identity"]
+    assert monotonic_start < identity["run_deadline_monotonic"] <= monotonic_start + 5.1
+    assert identity["run_deadline_unix"] == http_setup[3]["expires_at"]
+
+
+def test_fake_http_startup_sampling_pause_cannot_extend_authority(http_setup, monkeypatch):
+    import time
+    from types import SimpleNamespace
+    wall_start = time.time()
+    monotonic_start = time.monotonic()
+    http_setup[3]["expires_at"] = wall_start + 5
+    clocks = {"wall": wall_start, "monotonic": monotonic_start, "first": True}
+
+    def read_monotonic():
+        value = clocks["monotonic"]
+        if clocks["first"]:
+            clocks["first"] = False
+            clocks["monotonic"] += 2
+            clocks["wall"] += 2
+        return value
+
+    def read_wall():
+        value = clocks["wall"]
+        if clocks["first"]:
+            clocks["first"] = False
+            clocks["monotonic"] += 2
+            clocks["wall"] += 2
+        return value
+
+    monkeypatch.setattr(spike, "time", SimpleNamespace(time=read_wall, monotonic=read_monotonic))
+    result = run_http(http_setup, deadline_seconds=60)
+    assert result["status"] == "prepared"
+    identity = json.loads((http_setup[2] / "attempts.json").read_text())["identity"]
+    assert identity["run_deadline_monotonic"] <= monotonic_start + 5.1

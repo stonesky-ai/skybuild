@@ -83,8 +83,26 @@ def test_lost_receipt_reply_replays_same_persisted_result_without_handling(colle
     assert kwargs['destination'].read_bytes() == original
     assert kwargs['destination'].stat().st_mode & 0o777 == 0o600
     assert actions[0] == actions[1] and actions[0][2] == 'receipt'
-    assert result['review_required'] is True and result['authority'] == 'markdown'
+    assert result['review_required'] is True
     assert 'checks' not in result and 'risks' not in result
+
+
+@pytest.mark.parametrize(('phase', 'routing', 'review_required'), [
+    ('in-progress', 'record-only', False),
+    ('blocked', 'owner-attention', False),
+    ('ready-for-review', 'queue-independent-review', True),
+])
+def test_result_phase_routes_without_starting_model_work(collection, phase, routing, review_required):
+    client, _, _, result, message, actions, *_ = collection
+    result['phase'] = phase
+    message['body'] = json.dumps(result)
+
+    collected = collect(collection)
+
+    assert collected['phase'] == phase
+    assert collected['routing'] == routing
+    assert collected['review_required'] is review_required
+    assert len(actions) == 1 and actions[0][2] == 'receipt'
 
 
 @pytest.mark.parametrize('change', ['sender', 'recipient', 'assignment', 'phase', 'scope', 'head', 'paths', 'pin'])

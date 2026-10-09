@@ -1,4 +1,4 @@
-"""Frozen, one-shot Markdown ledger import. This module never switches authority."""
+"""Frozen one-shot Markdown import and authority cutover; never maintain a live sync."""
 
 from __future__ import annotations
 
@@ -20,16 +20,60 @@ from .store import Store, _public
 LEDGERS = ("mastertodo.md", "deferred.md", "alreadydone.md")
 _TITLE = re.compile(r"^## (SKYBUILD-[A-Z0-9-]+)\s+[—–-]\s+(.+?)\s*$")
 _ACCEPTANCE = re.compile(r"^- Acceptance: (.+)$", re.MULTILINE)
+_FIELD_BOUNDARY = re.compile(r"[.;][ \t]+(?=[A-Z][A-Za-z -]*:[ \t]*)")
+_WORKFLOW_FIELDS = {"Phase", "Responsible", "Next action", "Assignee", "Blocker"}
 
 
 def _refuse(message: str) -> None:
     raise DomainError("import_contract", message, 409)
 
 
+def _workflow_fields(raw: str, status: str) -> dict:
+    """Project unique workflow labels from task bullets; defaults remain explicit in v2."""
+    lines = [line for line in raw.splitlines() if re.match(r"^[ \t]*-[ \t]*Status:", line)]
+    if len(lines) != 1:
+        _refuse("Task workflow line must contain exactly one status")
+    patterns = {label: re.compile(r"(?:^|[.;][ \t]+)" + re.escape(label) + r":[ \t]*")
+                for label in _WORKFLOW_FIELDS}
+    occurrences = {label: [] for label in _WORKFLOW_FIELDS}
+    for line in raw.splitlines():
+        bullet = line.lstrip()
+        if not bullet.startswith("- "):
+            continue
+        text = bullet[2:]
+        for label, pattern in patterns.items():
+            for match in pattern.finditer(text):
+                value = text[match.end():]
+                boundary = _FIELD_BOUNDARY.search(value)
+                value = value[:boundary.start()] if boundary else value
+                value = value.strip(" \t.;")
+                occurrences[label].append(value or None)
+    fields = {label: values[0] if len(values) == 1 and values[0] else None
+              for label, values in occurrences.items()}
+    default_next_action = {
+        "in-progress": "Review the current phase and choose the next action from the full task brief",
+        "proposed": "Select this task when its prerequisites are satisfied",
+        "deferred": "Wait for the documented revisit trigger, then reassess",
+        "ready": "Confirm acceptance evidence and choose the next action",
+        "blocked": "Resolve the documented blocker before continuing",
+        "done": None,
+    }.get(status, "Review the imported task before execution")
+    return {
+        "phase": fields["Phase"] or "imported",
+        "responsible": fields["Responsible"] or "owner",
+        "next_action": fields["Next action"] or default_next_action,
+        "assignee": fields["Assignee"],
+        "blocker": fields["Blocker"],
+    }
+
+
 def prepare_import(ledger_dir: Path, contract_path: Path, *, repository: Path | None = None) -> dict:
     """Validate exact committed source bytes and return a reviewable import plan."""
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
-    if set(contract) != {"schema_version", "commit", "content_sha256", "sources", "dependencies"} or contract["schema_version"] != 1:
+    base_keys = {"schema_version", "commit", "content_sha256", "sources", "dependencies"}
+    expected_keys = base_keys | ({"workflow"} if type(contract.get("schema_version")) is int
+                                and contract["schema_version"] == 2 else set())
+    if set(contract) != expected_keys or type(contract.get("schema_version")) is not int or contract["schema_version"] not in (1, 2):
         _refuse("Unknown frozen import contract")
     commit = contract["commit"]
     if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
@@ -50,6 +94,9 @@ def prepare_import(ledger_dir: Path, contract_path: Path, *, repository: Path | 
     ids = set(manifest["task_ids"])
     if not isinstance(mapping, dict) or set(mapping) != ids:
         _refuse("Dependency mapping must cover every task exactly")
+    workflow_mapping = contract.get("workflow")
+    if contract["schema_version"] == 2 and (not isinstance(workflow_mapping, dict) or set(workflow_mapping) != ids):
+        _refuse("Workflow mapping must cover every task exactly")
     records = []
     for order, task in enumerate(manifest["tasks"]):
         task_id, raw = task["task_id"], task["raw"]
@@ -61,6 +108,13 @@ def prepare_import(ledger_dir: Path, contract_path: Path, *, repository: Path | 
             _refuse(f"Invalid task heading for {task_id}")
         acceptance = _ACCEPTANCE.findall(raw)
         architecture = re.findall(r"^- Architecture: (.+)$", raw, re.MULTILINE)
+        if contract["schema_version"] == 2:
+            workflow = workflow_mapping[task_id]
+            if not isinstance(workflow, dict) or set(workflow) != {"phase", "responsible", "next_action", "assignee", "blocker"}:
+                _refuse(f"Explicit workflow projection is incomplete for {task_id}")
+        else:
+            workflow = {"phase": "imported", "next_action": None if task["status"] == "done"
+                        else "Review imported ledger task before execution", "responsible": "owner"}
         record = {
             "task_id": task_id,
             "title": heading.group(2),
@@ -70,9 +124,7 @@ def prepare_import(ledger_dir: Path, contract_path: Path, *, repository: Path | 
             "dependencies": sorted(dependencies),
             "acceptance_criteria": acceptance,
             "architecture_refs": architecture,
-            "phase": "imported",
-            "next_action": None if task["status"] == "done" else "Review imported ledger task before execution",
-            "responsible": "owner",
+            **workflow,
             "metadata": {"ledger_import": {
                 "commit": commit,
                 "manifest_sha256": manifest["content_sha256"],
@@ -100,13 +152,7 @@ def prepare_import(ledger_dir: Path, contract_path: Path, *, repository: Path | 
             "task_count": len(records), "records": records, "authority": "markdown"}
 
 
-def import_frozen(store: Store, project_id: str, ledger_dir: Path, contract_path: Path, expected_import_sha256: str) -> dict:
-    """Atomically import into an empty destination; replay verifies unchanged rows."""
-    plan = prepare_import(ledger_dir, contract_path)
-    if plan["import_sha256"] != expected_import_sha256:
-        _refuse("Frozen import plan hash differs from reviewed hash")
-    if not valid_identifier(project_id):
-        _refuse("Invalid project ID")
+def _apply_plan(store: Store, project_id: str, plan: dict, authority: str) -> dict:
     store.readiness()
     with store._connection() as connection:
         connection.execute("SELECT pg_advisory_xact_lock(hashtextextended('skybuild:frozen-import', 0))")
@@ -122,14 +168,13 @@ def import_frozen(store: Store, project_id: str, ledger_dir: Path, contract_path
             if (receipt["project_id"] != project_id or receipt["content_sha256"] != plan["content_sha256"]
                     or receipt["import_sha256"] != plan["import_sha256"] or receipt["commit_id"] != plan["commit"]
                     or receipt["task_count"] != plan["task_count"] or receipt["status_counts"] != plan["counts"]
-                    or receipt["authority"] != "markdown"):
+                    or receipt["authority"] != authority):
                 _refuse("Destination already has a different import")
             rows = connection.execute("SELECT project_id, task_id, title, description, status, priority, acceptance_criteria, architecture_refs, phase, next_action, responsible, metadata, revision FROM tasks ORDER BY priority").fetchall()
             if len(rows) != plan["task_count"] or connection.execute("SELECT count(*) AS count FROM task_journal").fetchone()["count"] != len(rows):
                 _refuse("Imported destination changed")
-            for table in ("task_lineage", "messages", "cord_journal", "idempotency"):
-                if connection.execute(sql.SQL("SELECT 1 FROM {} LIMIT 1").format(sql.Identifier(table))).fetchone():
-                    _refuse("Imported destination changed")
+            if connection.execute("SELECT 1 FROM task_lineage LIMIT 1").fetchone():
+                _refuse("Imported destination changed")
             for row, expected in zip(rows, plan["records"]):
                 actual = _public(row)
                 for field in ("task_id", "title", "description", "status", "priority", "acceptance_criteria", "architecture_refs", "phase", "next_action", "responsible", "metadata"):
@@ -145,8 +190,8 @@ def import_frozen(store: Store, project_id: str, ledger_dir: Path, contract_path
                         or journal["revision"] != 1 or journal["reason"] != f"Frozen ledger import {plan['commit']}"
                         or journal["before_state"] is not None or journal["after_state"] != store._task(connection, project_id, row["task_id"])):
                     _refuse("Imported history changed")
-            return {"result": "unchanged", "project_id": project_id, "task_count": len(rows), "authority": "markdown"}
-        for table in ("tasks", "task_dependencies", "task_journal", "task_lineage", "messages", "cord_journal", "idempotency"):
+            return {"result": "unchanged", "project_id": project_id, "task_count": len(rows), "authority": authority}
+        for table in ("tasks", "task_dependencies", "task_journal", "task_lineage"):
             if connection.execute(sql.SQL("SELECT 1 FROM {} LIMIT 1").format(sql.Identifier(table))).fetchone():
                 _refuse("Destination contains unrelated data")
         actor = "skybuild-ledger-import"
@@ -171,6 +216,31 @@ def import_frozen(store: Store, project_id: str, ledger_dir: Path, contract_path
                 "VALUES (%s, %s, %s, %s, 'imported', 1, %s, %s)",
                 (uuid4(), project_id, record["task_id"], actor, f"Frozen ledger import {plan['commit']}", Jsonb(after)),
             )
-        connection.execute("INSERT INTO ledger_imports (project_id, commit_id, content_sha256, import_sha256, task_count, status_counts, authority) VALUES (%s, %s, %s, %s, %s, %s, 'markdown')",
-                           (project_id, plan["commit"], plan["content_sha256"], plan["import_sha256"], plan["task_count"], Jsonb(plan["counts"])))
-        return {"result": "imported", "project_id": project_id, "task_count": plan["task_count"], "authority": "markdown"}
+        connection.execute("INSERT INTO ledger_imports (project_id, commit_id, content_sha256, import_sha256, task_count, status_counts, authority) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                           (project_id, plan["commit"], plan["content_sha256"], plan["import_sha256"], plan["task_count"], Jsonb(plan["counts"]), authority))
+        return {"result": "imported", "project_id": project_id, "task_count": plan["task_count"], "authority": authority}
+
+
+def import_frozen(store: Store, project_id: str, ledger_dir: Path, contract_path: Path, expected_import_sha256: str) -> dict:
+    """Atomically rehearse an import into a disposable database; always Markdown-owned."""
+    if not store.expected_database.startswith("skybuild_import_test"):
+        _refuse("Frozen import rehearsal requires a skybuild_import_test database")
+    plan = prepare_import(ledger_dir, contract_path)
+    if plan["import_sha256"] != expected_import_sha256:
+        _refuse("Frozen import plan hash differs from reviewed hash")
+    if not valid_identifier(project_id):
+        _refuse("Invalid project ID")
+    return _apply_plan(store, project_id, plan, "markdown")
+
+
+def cutover_live(store: Store, ledger_dir: Path, contract_path: Path,
+                 expected_import_sha256: str, *, repository: Path | None = None) -> dict:
+    """Atomically import a pinned ledger source and switch the canonical project to API authority."""
+    if store.expected_database != "skybuild_pilot":
+        _refuse("Live task cutover requires the exact skybuild_pilot database")
+    if store.expected_system_identifier is None:
+        _refuse("Live task cutover requires the retained PostgreSQL system identifier")
+    plan = prepare_import(ledger_dir, contract_path, repository=repository)
+    if plan["import_sha256"] != expected_import_sha256:
+        _refuse("Live cutover plan hash differs from reviewed hash")
+    return _apply_plan(store, "skybuild", plan, "api")

@@ -204,3 +204,37 @@ qualified tokenizer/template/profile/capacity and enforce finite shared budgets.
 Until REST workers qualify and the parent delivers explicit later clearance
 through REST, the unconditional live boundary remains closed. There are no
 endpoint observations or live attempts in this assignment, including discovery.
+
+## Restart recovery checkpoint, 2026-10-09
+
+The recovered mock HTTP changes now share one total wall deadline across
+discovery and generation, persist its expiry in the journal, and retain the
+earliest deadline across restart. Child transport timeouts use the remaining
+budget. An expired run cannot dispatch another request or renew its budget.
+The timeout regression checks parent time across discovery and generation;
+the new restart regression preserves consumed attempts and token exposure.
+All 90 focused tests passed in 2.51 seconds. These are synthetic checks only.
+The previously committed preparation artifact describes the earlier runner;
+it has not been regenerated as evidence for this recovered change.
+
+The owner requested committing and pushing the recovered work. Jeltz's
+authenticated dispatcher was notified through Cord. Independent exact-head
+review and frozen-bundle integration remain with the dispatcher; this
+checkpoint does not claim either gate has passed.
+
+## Deadline recovery correction, 2026-10-09
+
+Independent review found that reconstructing a monotonic deadline from wall
+time could renew expired work after a clock rollback, and that a shortened
+deadline was not durable across another restart. The journal now records the
+monotonic deadline with the host boot ID, durably keeps the earliest observed
+deadline, and refuses reuse after reboot because the old monotonic epoch cannot
+be trusted. Regression coverage exercises deadline shortening, attempted
+extension, rollback with a completed discovery prefix, boot change, wall
+rollback during preflight, and a startup sampling pause. The monotonic clock is
+sampled before wall time, making sampling delay shorten the derived authority
+budget. The clock pair is captured before preflight, so later wall-clock
+changes cannot extend authority expiry. All checks use explicit
+`httpx.MockTransport`; the focused suite passes 95 tests.
+No endpoint call or worker launch was made. Exact-head independent review and
+frozen-bundle integration remain pending.
