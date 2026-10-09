@@ -1,0 +1,117 @@
+{
+  "cases": [
+    {
+      "attempts": [
+        {
+          "accepted": false,
+          "content_sha256": "ba73b31aad51c8d9f3503e811572f16c1ca42ac12b0b8e0350f77406b6e8ad69",
+          "number": 1,
+          "reason": "prefix_or_byte_budget_assertion_failed",
+          "synthetic_latency_ms": 800,
+          "synthetic_usage": {
+            "completion_tokens": 16,
+            "prompt_tokens": 180
+          },
+          "validation_cpu_ms": 0.942
+        },
+        {
+          "accepted": true,
+          "content_sha256": "9831d75ac4e66c7f8a2e30adc84357184e01a42dc22378277e466df086593e8f",
+          "number": 2,
+          "reason": "independent_assertions_passed",
+          "synthetic_latency_ms": 900,
+          "synthetic_usage": {
+            "completion_tokens": 32,
+            "prompt_tokens": 240
+          },
+          "validation_cpu_ms": 3.867
+        }
+      ],
+      "case_id": "utf8-clip",
+      "prompt_sha256": "8056c0dfd0a93f21c32640b0d0be5c58f2873fdedaa7342682fbf3953df559e3",
+      "status": "accepted"
+    },
+    {
+      "attempts": [
+        {
+          "accepted": true,
+          "content_sha256": "01be940c073119be15fb634cea705c7c112d9a1d8d6a09c3194cf77b56d99715",
+          "number": 1,
+          "reason": "independent_assertions_passed",
+          "synthetic_latency_ms": 700,
+          "synthetic_usage": {
+            "completion_tokens": 52,
+            "prompt_tokens": 210
+          },
+          "validation_cpu_ms": 0.036
+        }
+      ],
+      "case_id": "interval-review",
+      "prompt_sha256": "271268c8347148e757593eaa5773c29bfe5f433d02d73c260f4eda7064cfead1",
+      "status": "accepted"
+    },
+    {
+      "attempts": [
+        {
+          "accepted": false,
+          "content_sha256": "be3f95dfab03d67b36c34869735f8177a3f5c1e6c0858ff0792155ac08d81b30",
+          "number": 1,
+          "reason": "coverage_or_mutation_assertion_failed",
+          "synthetic_latency_ms": 850,
+          "synthetic_usage": {
+            "completion_tokens": 60,
+            "prompt_tokens": 200
+          },
+          "validation_cpu_ms": 0.096
+        },
+        {
+          "accepted": true,
+          "content_sha256": "85c28bb2e2f6312f1e9c420de13b852bad5b4f351e5c7ef4ff8244b877309c72",
+          "number": 2,
+          "reason": "independent_assertions_passed",
+          "synthetic_latency_ms": 950,
+          "synthetic_usage": {
+            "completion_tokens": 96,
+            "prompt_tokens": 260
+          },
+          "validation_cpu_ms": 0.091
+        }
+      ],
+      "case_id": "rle-test-design",
+      "prompt_sha256": "fab9ab0f00e91b7d4598246e7d00551a638a18fbbafe46ec7c9b7b455bad4781",
+      "status": "accepted"
+    }
+  ],
+  "cases_sha256": "dd0c8fd2b6ec27af57ab51d705d131e274a23d1b2dba8f92c0f8442e469444a0",
+  "corrected_accepted": 2,
+  "first_pass_accepted": 1,
+  "limits": {
+    "attempts_per_case": 2,
+    "cases": 3,
+    "concurrency": 1,
+    "input_tokens": 2048,
+    "latency_ms": 60000,
+    "output_tokens": 512,
+    "prompt_bytes": 8192,
+    "requests": 6,
+    "response_bytes": 16384,
+    "returned_tokens": 15360
+  },
+  "live_calls": 0,
+  "live_prerequisites": [
+    "REST worker qualification",
+    "explicit parent clearance",
+    "qualified tokenizer and accounting",
+    "separate live transport review"
+  ],
+  "mode": "offline-replay",
+  "model": "synthetic-fixture",
+  "recordings_sha256": "26b2cf212b1a080b05fbc6634cae8c7ae749894f0267f66b6e9615043ef7f8a3",
+  "schema": "brodson-spike-preparation-v1",
+  "simulated_requests": 5,
+  "source_base": "257216c5498b95d5a6e56bca60c31abcd6736226",
+  "status": "prepared",
+  "synthetic": true,
+  "synthetic_returned_tokens": 1346,
+  "usage_complete": true
+}
