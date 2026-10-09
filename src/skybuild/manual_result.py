@@ -159,9 +159,15 @@ def receive_result(client, project, checkout, *, assignment, assignment_id, task
     reply = call(client.message_action, project, message_id, 'receipt', idempotency_key=key)
     if not isinstance(reply, dict) or reply.get('message_id') != message_id or not reply.get('delivered_at'):
         raise ResultError("Result receipt is unconfirmed; preserve local evidence")
+    phase = result['phase']
+    routing = {
+        'in-progress': 'record-only',
+        'blocked': 'owner-attention',
+        'ready-for-review': 'queue-independent-review',
+    }[phase]
     return {'saved': str(destination), 'message_id': message_id, 'assignment_id': assignment_id,
-            'task_id': task_id, 'head_sha': head, 'phase': result['phase'], 'receipted': True,
-            'authority': 'markdown', 'review_required': True}
+            'task_id': task_id, 'head_sha': head, 'phase': phase, 'receipted': True,
+            'routing': routing, 'review_required': phase == 'ready-for-review'}
 
 
 def _read_assignment(path):
