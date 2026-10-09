@@ -32,6 +32,7 @@ def store():
 @pytest.fixture
 def actors(store):
     project = 'test-' + uuid4().hex
+    seed_api_authority(store, project)
     identities = {}
     for name in ('owner', 'worker', 'peer', 'outsider'):
         principal_id, token = name + '-' + uuid4().hex, secrets.token_urlsafe(32)
@@ -39,6 +40,16 @@ def actors(store):
         identities[name] = store.authenticate(token)
         identities[name + '_token'] = token
     return project, identities
+
+
+def seed_api_authority(store, project):
+    """Test projects start API-owned only when the fixture records that explicitly."""
+    with store._connection() as connection:
+        connection.execute(
+            "INSERT INTO ledger_imports (project_id, commit_id, content_sha256, import_sha256, "
+            "task_count, status_counts, authority) VALUES (%s, 'test-api', %s, %s, 0, '{}'::jsonb, 'api')",
+            (project, '0' * 64, '1' * 64),
+        )
 
 
 def create(store, principal, project, task_id='T1', **fields):
@@ -363,7 +374,17 @@ def test_identity_guard_and_readiness(store):
     assert error('database_identity', wrong.migrate).status_code == 503
     error('database_identity', wrong.readiness)
     store.migrate()
-    assert store.readiness() == {'ready': True, 'schema_version': 9}
+    assert store.readiness() == {'ready': True, 'schema_version': 12}
+
+
+def test_store_can_bind_operations_to_postgres_system_identifier(store):
+    with psycopg.connect(store.dsn) as connection:
+        system_identifier = str(connection.execute(
+            'SELECT system_identifier::text FROM pg_control_system()').fetchone()[0])
+    bound = Store(store.dsn, store.expected_database, system_identifier)
+    assert bound.readiness()['ready'] is True
+    wrong_cluster = Store(store.dsn, store.expected_database, str(int(system_identifier) + 1))
+    error('database_identity', wrong_cluster.readiness)
 
 
 def test_upgrade_001_to_002_preserves_existing_records_and_is_repeatable(store):
@@ -387,7 +408,7 @@ def test_upgrade_001_to_002_preserves_existing_records_and_is_repeatable(store):
         error('schema_mismatch', upgraded.readiness)
         upgraded.migrate()
         upgraded.migrate()
-        assert upgraded.readiness() == {'ready': True, 'schema_version': 9}
+        assert upgraded.readiness() == {'ready': True, 'schema_version': 12}
         with upgraded._connection() as connection:
             assert connection.execute('SELECT * FROM tasks').fetchone() == task_before
             assert connection.execute('SELECT * FROM messages').fetchone() == message_before
@@ -456,6 +477,7 @@ def test_idempotency_scope_includes_actor_project_and_operation(store, actors):
     body = {'task_id': 'T1', 'title': 'One', 'description': 'Brief'}
     first = store.create_task(people['worker'], project, body, 'shared')
     second = store.create_task(people['peer'], project, {**body, 'task_id': 'T2'}, 'shared')
+    seed_api_authority(store, project + '-other')
     third = store.create_task(people['owner'], project + '-other', body, 'shared')
     updated = store.update_task(people['worker'], project, 'T1', {'title': 'Changed'}, 1, 'shared')
     assert first['task_id'] != second['task_id']
@@ -474,6 +496,7 @@ def test_dependency_validation_rolls_back_task_and_history(store, actors):
     error('validation', lambda: create(store, worker, project, 'C', dependencies=['missing']))
     error('not_found', lambda: store.get_task(worker, project, 'C'))
     error('validation', lambda: store.update_task(worker, project, 'A', {'dependencies': ['A']}, 1, 'self'))
+    seed_api_authority(store, project + '-other')
     create(store, people['owner'], project + '-other', 'OnlyElsewhere')
     error('validation', lambda: store.update_task(worker, project, 'A', {'dependencies': ['OnlyElsewhere']}, 1, 'cross-project'))
 
@@ -576,6 +599,7 @@ def test_cord_validates_project_references_and_scopes(store, actors):
     project, people = actors
     error('validation', lambda: send(store, people, project, recipient=people['outsider'].principal_id))
     error('validation', lambda: send(store, people, project, recipient='missing'))
+    seed_api_authority(store, project + '-other')
     create(store, people['owner'], project + '-other', 'ForeignTask')
     error('not_found', lambda: send(store, people, project, task_id='ForeignTask'))
     foreign = store.send_message(people['owner'], project + '-other', {'recipient': people['owner'].principal_id, 'subject': 'Other', 'body': 'Content'}, 'foreign')

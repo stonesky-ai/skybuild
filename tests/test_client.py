@@ -111,6 +111,75 @@ def test_cli_credentials_never_appear_in_error_output(monkeypatch, capsys):
     assert "SECRET" not in output.err + output.out
 
 
+def test_cli_cord_send_reads_utf8_file_and_preserves_key(tmp_path, monkeypatch, capsys):
+    from skybuild.__main__ import main
+    monkeypatch.setenv("SKYBUILD_API_URL", "https://skybuild.test")
+    monkeypatch.setenv("SKYBUILD_TOKEN", "secret-token")
+    payload = {"recipient": "worker", "subject": "Assignment", "body": "First\n\nCafé `$(echo literal)`"}
+    file = tmp_path / "message.json"
+    file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    calls = []
+
+    def send(self, project_id, body, *, idempotency_key=None):
+        calls.append((project_id, body, idempotency_key))
+        return {"message_id": "message-1"}
+
+    monkeypatch.setattr(Client, "send_message", send)
+    assert main(["cord-send", "skybuild", "--body-file", str(file), "--idempotency-key", "assignment-1"]) == 0
+    assert calls == [("skybuild", payload, "assignment-1")]
+    assert json.loads(capsys.readouterr().out) == {"message_id": "message-1"}
+
+
+def test_cli_cord_inbox_and_actions(monkeypatch, capsys):
+    import io
+    from skybuild.__main__ import main
+    monkeypatch.setenv("SKYBUILD_API_URL", "https://skybuild.test")
+    monkeypatch.setenv("SKYBUILD_TOKEN", "secret-token")
+    calls = []
+
+    def inbox(self, project_id, *, limit, offset):
+        calls.append(("inbox", project_id, limit, offset))
+        return [{"message_id": "message-1"}]
+
+    def action(self, project_id, message_id, action, body=None, *, idempotency_key=None):
+        calls.append((action, project_id, message_id, body, idempotency_key))
+        return {"state": action}
+
+    monkeypatch.setattr(Client, "inbox", inbox)
+    monkeypatch.setattr(Client, "message_action", action)
+    assert main(["cord-inbox", "skybuild", "--limit", "3", "--offset", "2"]) == 0
+    assert main(["cord-receipt", "skybuild", "message-1", "--idempotency-key", "receipt-1"]) == 0
+    assert main(["cord-handle", "skybuild", "message-1", "--idempotency-key", "handle-1"]) == 0
+    monkeypatch.setattr("sys.stdin", io.StringIO('{"subject":"Result","body":"done\\n","handle_original":true}'))
+    assert main(["cord-reply", "skybuild", "message-1", "--body-stdin",
+                 "--idempotency-key", "reply-1"]) == 0
+    assert calls == [
+        ("inbox", "skybuild", 3, 2),
+        ("receipt", "skybuild", "message-1", None, "receipt-1"),
+        ("handle", "skybuild", "message-1", None, "handle-1"),
+        ("reply", "skybuild", "message-1", {"subject": "Result", "body": "done\n",
+                                          "handle_original": True}, "reply-1"),
+    ]
+    output = capsys.readouterr().out
+    assert '"message_id": "message-1"' in output
+    assert output.count('"state"') == 3
+
+
+def test_cli_cord_rejects_non_object_and_oversized_payload(tmp_path, monkeypatch, capsys):
+    from skybuild.__main__ import main
+    monkeypatch.setenv("SKYBUILD_API_URL", "https://skybuild.test")
+    monkeypatch.setenv("SKYBUILD_TOKEN", "secret-token")
+    file = tmp_path / "message.json"
+    calls = []
+    monkeypatch.setattr(Client, "send_message", lambda *args, **kwargs: calls.append(args))
+    file.write_text('["not an object"]')
+    assert main(["cord-send", "skybuild", "--body-file", str(file)]) == 1
+    file.write_text("x" * 262_145)
+    assert main(["cord-send", "skybuild", "--body-file", str(file)]) == 1
+    assert calls == []
+    assert "not an object" not in capsys.readouterr().err
+
+
 def test_cli_reconcile_due_is_bounded_and_reports_continuation(monkeypatch, capsys):
     from skybuild.__main__ import main
     monkeypatch.setenv("SKYBUILD_API_URL", "https://skybuild.test")
@@ -182,3 +251,26 @@ def test_cli_ledger_manifest_needs_no_database_or_credentials(monkeypatch, tmp_p
     output = capsys.readouterr()
     assert not output.out
     assert "Operation failed" in output.err
+
+
+@pytest.mark.parametrize("retries", [True, False, 1.0, 0.5, "2", None, [], {}, -1, 6])
+def test_invalid_retries_fail_before_http_client_creation(monkeypatch, retries):
+    def unexpected_client(*args, **kwargs):
+        pytest.fail("Invalid retries must fail before creating an HTTP client")
+    monkeypatch.setattr("skybuild.client.httpx.Client", unexpected_client)
+    with pytest.raises(ValueError, match="Retries must be"):
+        Client("https://skybuild.test", "secret-token", retries=retries)
+
+
+@pytest.mark.parametrize("retries", [0, 1, 5])
+def test_valid_retry_boundaries_make_expected_attempts(monkeypatch, retries):
+    monkeypatch.setattr("skybuild.client.time.sleep", lambda _: None)
+    requests = []
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(503, json={"error": {"code": "unavailable"}})
+    with Client("https://skybuild.test", "secret-token", retries=retries,
+                transport=httpx.MockTransport(handle)) as client:
+        with pytest.raises(ClientError):
+            client.list_tasks("p")
+    assert len(requests) == retries + 1

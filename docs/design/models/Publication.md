@@ -1,6 +1,6 @@
 # Publication design model
 
-Planning evidence for architecture A30 and [ADR 0030](../../adr/0030-effect-boundaries-and-accounting.md). The [spec](Publication.tla) models two bundles, target versions 0–3 and ownership generations 0–1. It does not run Git or contact GitHub.
+Planning evidence for architecture A30 and [ADR 0030](../../adr/integration.md#adr-0030). The [spec](Publication.tla) models two bundles, target versions 0–3 and ownership generations 0–1. It does not run Git or contact GitHub.
 
 ## Invariants and boundaries
 

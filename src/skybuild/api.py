@@ -1,5 +1,6 @@
 """Validated, launch-free HTTP interface to the transaction-owning Store."""
 
+import asyncio
 import json
 import re
 from typing import Annotated, Any, Literal
@@ -8,6 +9,7 @@ from fastapi import Depends, FastAPI, Header, Path, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field, StrictBool, StrictInt, StringConstraints, field_validator
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
 
 from . import __version__
@@ -85,6 +87,16 @@ class TaskAction(Input):
     responsible: WorkflowText | None = None
     until: AwareDatetime | None = None
     milestone_task_id: Identifier | None = None
+
+
+class CPULocalControl(Input):
+    enabled: StrictBool
+    expected_generation: Annotated[StrictInt, Field(ge=0, lt=2**63)]
+    reason: Annotated[str, StringConstraints(min_length=1, max_length=4096)]
+
+
+class CPUCentralControl(CPULocalControl):
+    capacity: Annotated[StrictInt, Field(ge=0, lt=2**31)]
 
 
 class ClaimLease(Input):
@@ -280,6 +292,26 @@ def create_app(store: Any) -> FastAPI:
             available = False
         return JSONResponse({"status": "ready" if available else "unavailable"}, status_code=200 if available else 503)
 
+    @app.get("/api/v1/me")
+    def me(actor: Actor) -> dict:
+        """Expose only the caller's identity and grants for scoped access checks."""
+        return {"principal_id": actor.principal_id, "is_admin": actor.is_admin,
+                "grants": {project: sorted(operations) for project, operations in actor.grants.items()}}
+
+    @app.get(base + "/cpu-controls")
+    def cpu_control_status(project_id: ProjectPath, actor: Actor) -> dict:
+        return store.cpu_control_status(actor, project_id)
+
+    @app.post(base + "/cpu-controls/central")
+    def configure_cpu_pool(project_id: ProjectPath, body: CPUCentralControl, actor: Actor, idem: Key) -> dict:
+        return store.configure_cpu_pool(actor, project_id, body.capacity, body.enabled,
+                                        body.expected_generation, idem, reason=body.reason)
+
+    @app.post(base + "/cpu-controls/local")
+    def set_cpu_local_control(project_id: ProjectPath, body: CPULocalControl, actor: Actor, idem: Key) -> dict:
+        return store.set_cpu_local_control(actor, project_id, body.enabled,
+                                           body.expected_generation, idem, reason=body.reason)
+
     @app.post(base + "/tasks", status_code=201)
     def create_task(project_id: ProjectPath, body: TaskCreate, actor: Actor, idem: Key) -> dict:
         return store.create_task(actor, project_id, body.model_dump(mode="json", exclude_unset=True), idem)
@@ -292,6 +324,11 @@ def create_app(store: Any) -> FastAPI:
     @app.get(base + "/tasks/{task_id}")
     def get_task(project_id: ProjectPath, task_id: RecordPath, actor: Actor) -> dict:
         return store.get_task(actor, project_id, task_id)
+
+    @app.get(base + "/tasks/{task_id}/execution-status")
+    def execution_status(project_id: ProjectPath, task_id: RecordPath, actor: Actor,
+                         limit: Limit = 20) -> dict:
+        return store.execution_status(actor, project_id, task_id, limit=limit)
 
     @app.patch(base + "/tasks/{task_id}")
     def update_task(project_id: ProjectPath, task_id: RecordPath, body: TaskFields, actor: Actor, idem: Key, expected: Revision) -> dict:
@@ -364,8 +401,21 @@ def create_app(store: Any) -> FastAPI:
         return store.send_message(actor, project_id, body.model_dump(mode="json", exclude_unset=True), idem)
 
     @app.get(base + "/cord/inbox")
-    def inbox(project_id: ProjectPath, actor: Actor, limit: Limit = 100, offset: Offset = 0) -> list:
-        return store.inbox(actor, project_id, limit=limit, offset=offset)
+    async def inbox(project_id: ProjectPath, actor: Actor, request: Request, limit: Limit = 100,
+                    offset: Offset = 0, wait_seconds: Annotated[int, Query(ge=0, le=25)] = 0) -> list:
+        """Wait for a pending page without claiming, receiving, or handling messages."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + wait_seconds
+        while True:
+            messages = await run_in_threadpool(store.inbox, actor, project_id, limit=limit, offset=offset)
+            remaining = deadline - loop.time()
+            if messages or remaining <= 0 or await request.is_disconnected():
+                return messages
+            await asyncio.sleep(min(0.5, remaining))
+            # Token rotation and grant revocation also apply to outstanding waits.
+            if await request.is_disconnected():
+                return []
+            actor = await run_in_threadpool(principal, request.headers.get("authorization"))
 
     @app.post(base + "/cord/messages/{message_id}/receipt")
     def receipt(project_id: ProjectPath, message_id: RecordPath, body: Input, actor: Actor, idem: Key) -> dict:

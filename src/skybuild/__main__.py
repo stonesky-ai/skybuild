@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -17,8 +18,23 @@ def _environment(name: str) -> str:
     return value
 
 
+def _cord_payload(args: argparse.Namespace) -> dict:
+    if args.body_file is not None:
+        with args.body_file.open("r", encoding="utf-8") as stream:
+            raw = stream.read(262_145)
+    else:
+        raw = sys.stdin.read(262_145)
+    if len(raw.encode("utf-8")) > 262_144:
+        raise ValueError("Cord payload is too large")
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError("Cord payload must be a JSON object")
+    return payload
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="skybuild")
+    parser.add_argument("--ca-file", type=Path, help="Trust only this installation CA for HTTPS API requests")
     commands = parser.add_subparsers(dest="command", required=True)
     manifest = commands.add_parser("ledger-manifest", help="Emit a read-only ledger validation manifest without database access")
     manifest.add_argument("paths", nargs="+", type=Path)
@@ -28,9 +44,25 @@ def main(argv: list[str] | None = None) -> int:
     ledger_import.add_argument("--project-id", default="skybuild")
     ledger_import.add_argument("--apply-disposable", action="store_true")
     ledger_import.add_argument("--expected-import-sha256")
+    ledger_cutover = commands.add_parser("ledger-cutover", help="Plan or explicitly cut task authority over to the API")
+    ledger_cutover.add_argument("--ledger-dir", type=Path, default=Path("docs/design"))
+    ledger_cutover.add_argument("--contract", type=Path, default=Path("docs/design/implementation/current_task_import.json"))
+    ledger_cutover.add_argument("--apply-live", action="store_true", help="Apply the guarded one-time live import")
+    ledger_cutover.add_argument("--expected-import-sha256")
+    ledger_cutover.add_argument("--backup-file", type=Path)
+    ledger_cutover.add_argument("--backup-sha256")
+    ledger_cutover.add_argument("--backup-evidence", type=Path)
+    ledger_cutover.add_argument("--backup-evidence-sha256")
+    ledger_cutover.add_argument("--expected-system-identifier",
+                                help="Retained PostgreSQL cluster identity from reviewed pilot preflight")
+    ledger_cutover.add_argument("--database-container-id",
+                                help="Retained full PostgreSQL container ID from reviewed pilot preflight")
     audit = commands.add_parser("ledger-audit", help="Audit frozen versus current Markdown without database access or authority changes")
     audit.add_argument("--ledger-dir", type=Path, default=Path("docs/design"))
     audit.add_argument("--contract", type=Path, default=Path("docs/design/implementation/frozen_ledger_import.json"))
+    for command in ("audit-runtime-role", "provision-runtime-role"):
+        role_command = commands.add_parser(command, help="Inspect or qualify a pre-created restricted LOGIN role using SKYBUILD_ROLE_ADMIN_DSN")
+        role_command.add_argument("role")
     commands.add_parser("migrate", help="Apply migrations to the explicitly configured dedicated database")
     provision = commands.add_parser("provision", help="Provision a principal using SKYBUILD_TOKEN or --token-stdin")
     provision.add_argument("principal_id")
@@ -39,26 +71,76 @@ def main(argv: list[str] | None = None) -> int:
     provision.add_argument("--token-stdin", action="store_true")
     serve = commands.add_parser("serve", help="Serve an already migrated database on loopback")
     serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument("--ssl-certfile", type=Path)
+    serve.add_argument("--ssl-keyfile", type=Path)
+    serve.add_argument("--host", choices=("127.0.0.1", "0.0.0.0"), default="127.0.0.1",
+                       help="Bind inside a private container; keep the published host port on loopback")
     for command in ("tasks", "get", "history"):
         view = commands.add_parser(command, help="Read tasks through the authenticated API")
+        view.add_argument("--ca-file", type=Path, default=argparse.SUPPRESS)
         view.add_argument("project_id")
         if command != "tasks":
             view.add_argument("task_id")
         if command != "get":
             view.add_argument("--limit", type=int, default=100)
             view.add_argument("--offset", type=int, default=0)
+    execution = commands.add_parser("execution-status", help="Read one task's bounded cached execution evidence")
+    execution.add_argument("--ca-file", type=Path, default=argparse.SUPPRESS)
+    execution.add_argument("project_id")
+    execution.add_argument("task_id")
+    execution.add_argument("--limit", type=int, default=20)
+    for command in ("cpu-control-get", "cpu-control-set", "cpu-local-control-set"):
+        control = commands.add_parser(command, help="Inspect or update owner CPU restrictions; never launch work")
+        control.add_argument("--ca-file", type=Path, default=argparse.SUPPRESS)
+        control.add_argument("project_id")
+        if command != "cpu-control-get":
+            enabled = control.add_mutually_exclusive_group(required=True)
+            enabled.add_argument("--enable", dest="enabled", action="store_true")
+            enabled.add_argument("--disable", dest="enabled", action="store_false")
+            control.add_argument("--expected-generation", type=int, required=True)
+            control.add_argument("--reason", required=True)
+            control.add_argument("--idempotency-key")
+            if command == "cpu-control-set":
+                control.add_argument("--capacity", type=int, required=True)
+    inbox = commands.add_parser("cord-inbox", help="Read pending Cord messages for this credential")
+    inbox.add_argument("--ca-file", type=Path, default=argparse.SUPPRESS)
+    inbox.add_argument("project_id")
+    inbox.add_argument("--limit", type=int, default=100)
+    inbox.add_argument("--offset", type=int, default=0)
+    inbox.add_argument("--wait-seconds", type=int, choices=range(26), default=0,
+                       help="Wait once for a pending inbox page, up to 25 seconds; never execute messages")
+    for command in ("cord-send", "cord-reply"):
+        message = commands.add_parser(command, help="Send a Cord JSON message from a UTF-8 file or standard input")
+        message.add_argument("--ca-file", type=Path, default=argparse.SUPPRESS)
+        message.add_argument("project_id")
+        if command == "cord-reply":
+            message.add_argument("message_id")
+        source = message.add_mutually_exclusive_group(required=True)
+        source.add_argument("--body-file", type=Path)
+        source.add_argument("--body-stdin", action="store_true")
+        message.add_argument("--idempotency-key")
+    for command in ("cord-receipt", "cord-handle"):
+        action = commands.add_parser(command, help="Acknowledge a Cord message transition")
+        action.add_argument("--ca-file", type=Path, default=argparse.SUPPRESS)
+        action.add_argument("project_id")
+        action.add_argument("message_id")
+        action.add_argument("--idempotency-key")
     due = commands.add_parser("reconcile-due", help="Run one bounded CPU-only pass over due deferrals through the API")
+    due.add_argument("--ca-file", type=Path, default=argparse.SUPPRESS)
     due.add_argument("project_id")
     due.add_argument("--page-size", type=int, default=100)
     due.add_argument("--max-pages", type=int, default=20)
     due.add_argument("--after-task-id")
     schedule = commands.add_parser("schedule-due", help="Run a finite CPU-only due-deferral catch-up timer")
+    schedule.add_argument("--ca-file", type=Path, default=argparse.SUPPRESS)
     schedule.add_argument("project_id")
     schedule.add_argument("--interval-seconds", type=int, default=60)
     schedule.add_argument("--max-ticks", type=int, default=60)
     schedule.add_argument("--page-size", type=int, default=100)
     schedule.add_argument("--max-pages", type=int, default=20)
     args = parser.parse_args(argv)
+    if args.command == "serve" and bool(args.ssl_certfile) != bool(args.ssl_keyfile):
+        parser.error("--ssl-certfile and --ssl-keyfile must be supplied together")
     try:
         if args.command == "ledger-manifest":
             from .ledger import build_manifest
@@ -88,9 +170,54 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(json.dumps(plan, ensure_ascii=False, indent=2))
             return 0
-        if args.command in {"tasks", "get", "history"}:
-            with Client(_environment("SKYBUILD_API_URL"), _environment("SKYBUILD_TOKEN")) as client:
-                if args.command == "get":
+        if args.command == "ledger-cutover":
+            from .cutover import verify_backup
+            from .importer import cutover_live, prepare_import
+
+            plan = prepare_import(args.ledger_dir, args.contract)
+            if not args.apply_live:
+                print(json.dumps(plan, ensure_ascii=False, indent=2))
+                return 0
+            if not args.expected_import_sha256 or plan["import_sha256"] != args.expected_import_sha256:
+                raise ValueError("Live cutover requires the reviewed exact import-plan SHA-256")
+            if (args.backup_file is None or not args.backup_sha256 or args.backup_evidence is None
+                    or not args.backup_evidence_sha256 or not args.expected_system_identifier):
+                raise ValueError("Live cutover requires a private backup, pinned source evidence, and retained cluster identity")
+            if not args.database_container_id:
+                raise ValueError("Live cutover requires the retained PostgreSQL container ID")
+            repository = args.ledger_dir.resolve().parent.parent
+            expected_database = _environment("SKYBUILD_EXPECTED_DATABASE")
+            if expected_database != "skybuild_pilot":
+                raise ValueError("Live cutover requires the exact skybuild_pilot database")
+            backup = verify_backup(
+                args.backup_file, args.backup_sha256, repository,
+                evidence_path=args.backup_evidence,
+                expected_evidence_sha256=args.backup_evidence_sha256,
+                expected_database=expected_database,
+                expected_system_identifier=args.expected_system_identifier,
+                expected_container_id=args.database_container_id,
+            )
+            status = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"],
+                                    cwd=repository, capture_output=True, check=False)
+            if status.returncode or status.stdout:
+                raise ValueError("Live cutover requires a clean reviewed checkout")
+            ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", plan["commit"], "HEAD"],
+                                     cwd=repository, capture_output=True, check=False)
+            if ancestor.returncode:
+                raise ValueError("Frozen ledger commit must be an ancestor of the reviewed checkout")
+            from .store import Store
+
+            result = cutover_live(Store(_environment("SKYBUILD_ROLE_ADMIN_DSN"), expected_database,
+                                        args.expected_system_identifier),
+                                  args.ledger_dir, args.contract, args.expected_import_sha256)
+            print(json.dumps({**result, "content_sha256": plan["content_sha256"], "backup": backup},
+                             ensure_ascii=False, indent=2))
+            return 0
+        if args.command in {"tasks", "get", "history", "execution-status"}:
+            with Client(_environment("SKYBUILD_API_URL"), _environment("SKYBUILD_TOKEN"), ca_file=args.ca_file) as client:
+                if args.command == "execution-status":
+                    result = client.execution_status(args.project_id, args.task_id, limit=args.limit)
+                elif args.command == "get":
                     result = client.get_task(args.project_id, args.task_id)
                 elif args.command == "history":
                     result = client.task_history(args.project_id, args.task_id, limit=args.limit, offset=args.offset)
@@ -98,10 +225,38 @@ def main(argv: list[str] | None = None) -> int:
                     result = client.list_tasks(args.project_id, limit=args.limit, offset=args.offset)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
+        if args.command in {"cpu-control-get", "cpu-control-set", "cpu-local-control-set"}:
+            with Client(_environment("SKYBUILD_API_URL"), _environment("SKYBUILD_TOKEN"), ca_file=args.ca_file) as client:
+                if args.command == "cpu-control-get":
+                    result = client.cpu_control_status(args.project_id)
+                elif args.command == "cpu-control-set":
+                    result = client.configure_cpu_pool(args.project_id, args.capacity, args.enabled,
+                                                       args.expected_generation, reason=args.reason,
+                                                       idempotency_key=args.idempotency_key)
+                else:
+                    result = client.set_cpu_local_control(args.project_id, args.enabled, args.expected_generation,
+                                                          reason=args.reason, idempotency_key=args.idempotency_key)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+        if args.command.startswith("cord-"):
+            with Client(_environment("SKYBUILD_API_URL"), _environment("SKYBUILD_TOKEN"), ca_file=args.ca_file) as client:
+                if args.command == "cord-inbox":
+                    result = client.inbox(args.project_id, limit=args.limit, offset=args.offset,
+                                          **({"wait_seconds": args.wait_seconds} if args.wait_seconds else {}))
+                elif args.command == "cord-send":
+                    result = client.send_message(args.project_id, _cord_payload(args),
+                                                 idempotency_key=args.idempotency_key)
+                else:
+                    action = args.command.removeprefix("cord-")
+                    body = _cord_payload(args) if action == "reply" else None
+                    result = client.message_action(args.project_id, args.message_id, action, body,
+                                                   idempotency_key=args.idempotency_key)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
         if args.command == "schedule-due":
             from .scheduler import schedule_due
 
-            with Client(_environment("SKYBUILD_API_URL"), _environment("SKYBUILD_TOKEN")) as client:
+            with Client(_environment("SKYBUILD_API_URL"), _environment("SKYBUILD_TOKEN"), ca_file=args.ca_file) as client:
                 result = schedule_due(client, args.project_id, interval_seconds=args.interval_seconds,
                                       max_ticks=args.max_ticks, page_size=args.page_size, max_pages=args.max_pages,
                                       report=lambda tick: print(json.dumps(tick, ensure_ascii=False), flush=True))
@@ -110,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
             if not 1 <= args.page_size <= 100 or not 1 <= args.max_pages <= 100:
                 raise ValueError("Reconciliation bounds are invalid")
             cursor, scanned, reassessed = args.after_task_id, 0, []
-            with Client(_environment("SKYBUILD_API_URL"), _environment("SKYBUILD_TOKEN")) as client:
+            with Client(_environment("SKYBUILD_API_URL"), _environment("SKYBUILD_TOKEN"), ca_file=args.ca_file) as client:
                 for _ in range(args.max_pages):
                     try:
                         result = client.reconcile_due_deferrals(args.project_id, limit=args.page_size, after_task_id=cursor)
@@ -137,6 +292,17 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"scanned": scanned, "reassessed": reassessed,
                               "complete": next_cursor is None, "next_after_task_id": next_cursor}, ensure_ascii=False, indent=2))
             return 0
+        if args.command in ("audit-runtime-role", "provision-runtime-role"):
+            import psycopg
+            from .runtime_role import audit_runtime_role, provision_runtime_role
+
+            action = audit_runtime_role if args.command == "audit-runtime-role" else provision_runtime_role
+            with psycopg.connect(_environment("SKYBUILD_ROLE_ADMIN_DSN"), connect_timeout=5) as connection:
+                connection.execute("SET LOCAL statement_timeout = '10s'")
+                connection.execute("SET LOCAL lock_timeout = '5s'")
+                result = action(connection, _environment("SKYBUILD_EXPECTED_DATABASE"), args.role)
+            print(json.dumps(result, indent=2))
+            return 0 if result["ok"] else 1
         from .store import Store
 
         store = Store(_environment("SKYBUILD_DSN"), _environment("SKYBUILD_EXPECTED_DATABASE"))
@@ -162,7 +328,9 @@ def main(argv: list[str] | None = None) -> int:
             from .api import create_app
             import uvicorn
 
-            uvicorn.run(create_app(store), host="127.0.0.1", port=args.port)
+            uvicorn.run(create_app(store), host=args.host, port=args.port,
+                        **({"ssl_certfile": str(args.ssl_certfile), "ssl_keyfile": str(args.ssl_keyfile)}
+                           if args.ssl_certfile else {}))
         return 0
     except (ValueError, DomainError, ClientError) as error:
         # Driver failures may contain connection strings; never print arbitrary exceptions.

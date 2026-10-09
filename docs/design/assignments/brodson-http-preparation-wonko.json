@@ -1,0 +1,27 @@
+{
+  "schema": "manual-work-brief-v1",
+  "assignment_id": "MWP-20261009-WONKO-BRODSON-HTTP-010",
+  "task_id": "SKYBUILD-SHARED-INFERENCE",
+  "worker": "wonko",
+  "dispatcher": "pilot_dispatcher",
+  "branch": "task/brodson-spike-http-preparation-20261009",
+  "owned_paths": [
+    "docs/research/brodson-spike/plan.md",
+    "docs/research/brodson-spike/cases.json",
+    "docs/research/brodson-spike/recorded-responses.json",
+    "docs/research/brodson-spike/preparation-results.json",
+    "scripts/brodson_spike.py",
+    "tests/test_brodson_spike.py"
+  ],
+  "checks": [
+    "Continue existing manual assignment010 on its owned branch/worktree; source preparation is baa71c431bf74229974ec117b1fb8e05e1ce86fa. Reconcile the published committed-brief base into that same branch before result reporting; do not duplicate work or reset another task.",
+    "Implement/test bounded HTTP transport using fake clients only. All live requests, including discovery and credential reads, remain disabled until independent exact-head review and a separate verified REST live assignment plus explicit parent clearance.",
+    "Future ceiling: one loaded-model discovery GET plus six serial generation POSTs for three cases, one proposal and one correction each; 512 output tokens, 60-second total wall deadline, bounded streamed bytes, zero redirects, retries, inherited proxies or fallback.",
+    "Keep 2048 input and 15360 total token ceilings fail-closed pending qualified tokenizer/chat-template or reviewed conservative bound. No extra tokenize call. Durably consume attempts before effects; unresolved pending attempts stop restart without redispatch.",
+    "Only complete valid semantic failure permits correction. Timeout, HTTP error, malformed/truncated output, unknown usage, ambiguous completion or exhausted budget stops the run. Persist exact sanitized prompts/corrections/settings/responses/metadata/usage and separate wall latency.",
+    "Use only existing inference base URL/secret-file references; inspect local metadata only and never transfer/read a friend's secret during preparation. No paid API, infrastructure, reload, stress, model launcher or returned-code execution; retain bounded AST CPU evaluation.",
+    "Run meaningful focused CPU tests; label fake responses synthetic. Commit/push only six owned paths, report exact clean head, confirmed push and test counts. Stronger design/review lead is parent's provision_second_opinion; no task PR or direct development merge."
+  ],
+  "model_limit": "Existing approved Wonko session only; stronger review by parent provision_second_opinion. No paid/new model profile. Keep 8 GiB reserve; nice 10 CPU work. Hard cutoff 2026-10-09 15:20:53 UTC.",
+  "next_action": "Receive this exact committed brief through pinned manual-work-v1 REST transport using your own qualified worker credential and CA. Verify pilot_dispatcher sender, reconcile the same existing assignment010 ownership and published base, then continue CPU-only HTTP preparation. No endpoint calls or secret transfer. Parent owns exact-head review, bundle integration and any later distinct live clearance. Return ready-for-review or blocked with exact branch/head and checks through Cord."
+}

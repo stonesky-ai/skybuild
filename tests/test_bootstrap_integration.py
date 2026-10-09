@@ -5,6 +5,8 @@ import socket
 import subprocess
 import sys
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
 import httpx
@@ -14,10 +16,11 @@ from psycopg.conninfo import conninfo_to_dict
 
 from skybuild.api import create_app
 from skybuild.store import Store
+from test_store import seed_api_authority
 
 
-@pytest.fixture
-def service():
+@pytest.fixture(params=["migration-owner", "runtime"])
+def service(request):
     dsn = os.environ.get("SKYBUILD_HTTP_TEST_DSN")
     if not dsn:
         pytest.skip("Set SKYBUILD_HTTP_TEST_DSN to a task-owned disposable database")
@@ -27,12 +30,16 @@ def service():
     store = Store(dsn, database)
     store.migrate()
     project = "http-" + uuid4().hex
+    seed_api_authority(store, project)
     owner, worker = "owner-" + uuid4().hex, "worker-" + uuid4().hex
     owner_token, worker_token = uuid4().hex + uuid4().hex, uuid4().hex + uuid4().hex
     store.provision_principal(owner, owner_token, is_admin=True)
     store.provision_principal(worker, worker_token, grants={project: [
         "tasks:read", "tasks:write", "cord:send", "cord:read", "cord:handle",
     ]})
+    if request.param == "runtime":
+        _, runtime_dsn, _, _ = request.getfixturevalue("restricted_database")
+        store = Store(runtime_dsn, database)
     with TestClient(create_app(store), raise_server_exceptions=False) as client:
         yield client, store, project, owner, worker, owner_token, worker_token
 
@@ -44,6 +51,52 @@ def headers(token, key=None, revision=None):
     if revision is not None:
         result["If-Match"] = str(revision)
     return result
+
+
+def test_http_cord_wait_observes_committed_message(service, monkeypatch):
+    client, store, project, _, worker, owner_token, worker_token = service
+    read = threading.Event()
+    original = store.inbox
+    def observed(*args, **kwargs):
+        result = original(*args, **kwargs)
+        read.set()
+        return result
+    monkeypatch.setattr(store, "inbox", observed)
+    base = f"/api/v1/projects/{project}/cord"
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        waiting = executor.submit(client.get, base + "/inbox", params={"wait_seconds": 2},
+                                  headers=headers(worker_token))
+        assert read.wait(2)
+        sent = client.post(base + "/messages", headers=headers(owner_token, "wait-arrival"),
+                           json={"recipient": worker, "subject": "Pinned assignment", "body": "Data only"})
+        assert sent.status_code == 201, sent.text
+        response = waiting.result(timeout=3)
+    assert response.status_code == 200
+    assert response.json() == [sent.json()]
+    assert response.json()[0]["handled_at"] is None
+    assert client.get(base + "/inbox", headers=headers(worker_token)).json() == response.json()
+
+
+@pytest.mark.parametrize("revoke_token,status", [(True, 401), (False, 403)])
+def test_http_cord_wait_enforces_live_revocation(service, monkeypatch, revoke_token, status):
+    client, store, project, _, worker, _, worker_token = service
+    read = threading.Event()
+    original = store.inbox
+    def observed(*args, **kwargs):
+        result = original(*args, **kwargs)
+        read.set()
+        return result
+    monkeypatch.setattr(store, "inbox", observed)
+    dsn = os.environ["SKYBUILD_HTTP_TEST_DSN"]
+    registry = Store(dsn, conninfo_to_dict(dsn)["dbname"])
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        waiting = executor.submit(client.get, f"/api/v1/projects/{project}/cord/inbox",
+                                  params={"wait_seconds": 2}, headers=headers(worker_token))
+        assert read.wait(2)
+        registry.provision_principal(worker, uuid4().hex + uuid4().hex if revoke_token else worker_token,
+                                     grants={project: ["cord:read"]} if revoke_token else {})
+        response = waiting.result(timeout=3)
+    assert response.status_code == status
 
 
 def test_http_task_revision_replay_and_scope(service):
@@ -215,8 +268,8 @@ def test_http_preserves_literal_unicode_escape_but_rejects_nul(service):
 
 
 def test_cli_service_process_restart_preserves_task(service, tmp_path):
-    _, _, project, _, _, token, _ = service
-    dsn = os.environ["SKYBUILD_HTTP_TEST_DSN"]
+    _, store, project, _, _, token, _ = service
+    dsn = store.dsn
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]

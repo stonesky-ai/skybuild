@@ -1,0 +1,47 @@
+[
+  {
+    "id": "bge-m3",
+    "status": "loaded",
+    "meta": {
+      "vocab_type": 4,
+      "n_vocab": 250002,
+      "n_ctx": 8192,
+      "n_ctx_train": 8192,
+      "n_embd": 1024,
+      "n_params": 566703104,
+      "size": 1150828544,
+      "ftype": "F16"
+    },
+    "parallel": "1"
+  },
+  {
+    "id": "qwen3.5-think",
+    "status": "loaded",
+    "meta": {
+      "vocab_type": 2,
+      "n_vocab": 248320,
+      "n_ctx": 16384,
+      "n_ctx_train": 262144,
+      "n_embd": 4096,
+      "n_params": 8953803264,
+      "size": 6566873088,
+      "ftype": "Q5_K - Medium"
+    },
+    "parallel": "4"
+  },
+  {
+    "id": "recall-honcho-8b",
+    "status": "loaded",
+    "meta": {
+      "vocab_type": 2,
+      "n_vocab": 151936,
+      "n_ctx": 8192,
+      "n_ctx_train": 40960,
+      "n_embd": 4096,
+      "n_params": 8190735360,
+      "size": 5845155840,
+      "ftype": "Q5_K - Medium"
+    },
+    "parallel": "2"
+  }
+]
