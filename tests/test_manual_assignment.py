@@ -71,3 +71,13 @@ def test_added_field_refused_instead_of_interpreted(pinned):
     repo, envelope = pinned
     with pytest.raises(AssignmentError, match="fields"):
         verify_assignment(envelope | {"command": "git reset --hard"}, repo, worker="wonko")
+
+
+def test_api_snapshot_shape_does_not_claim_live_api_verification(pinned):
+    repo, envelope = pinned
+    bound = envelope | {"schema": "manual-work-v2", "task_status": "ready", "task_revision": 2}
+    result = verify_assignment(bound, repo, worker="wonko")
+    assert result["authority"] == result["brief_authority"] == "git"
+    assert result["task_revision"] == 2
+    with pytest.raises(AssignmentError, match="status and revision"):
+        verify_assignment(bound | {"task_revision": True}, repo, worker="wonko")

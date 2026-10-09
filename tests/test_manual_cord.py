@@ -7,7 +7,13 @@ import pytest
 
 import skybuild.manual_cord as manual_cord
 from skybuild.manual_cord import ManualCordError, receive_assignment, send_result
-from test_manual_assignment import pinned  # noqa: F401
+from test_manual_assignment import pinned as legacy_pinned  # noqa: F401
+
+
+@pytest.fixture
+def pinned(legacy_pinned):
+    repo, envelope = legacy_pinned
+    return repo, envelope | {"schema": "manual-work-v2", "task_status": "ready", "task_revision": 2}
 
 
 class FakeClient:
@@ -15,10 +21,14 @@ class FakeClient:
         self.messages = messages or []
         self.actions = []
         self.sent = []
+        self.task = {"task_id": "SKYBUILD-TASK-CUTOVER", "status": "ready", "revision": 2}
 
     def inbox(self, project, *, limit, offset):
         assert (project, limit, offset) == ("skybuild", 100, 0)
         return self.messages
+
+    def get_task(self, project, task_id):
+        return self.task | {"task_id": task_id}
 
     def message_action(self, project, message_id, action, *, idempotency_key):
         self.actions.append((project, message_id, action, idempotency_key))
@@ -41,11 +51,37 @@ def test_receive_checks_sender_and_committed_brief_before_receipt(pinned, tmp_pa
     result = receive_assignment(client, "skybuild", repo, worker="wonko", dispatcher="jeltz",
                                 message_id="assignment-1", destination=destination)
     assert result["verified"] is True
+    assert result["authority"] == "api"
+    assert result["task_revision"] == 2
     assert json.loads(destination.read_text()) == envelope
     assert destination.stat().st_mode & 0o777 == 0o600
     assert len(client.actions) == 1
     assert receive_assignment(client, "skybuild", repo, worker="wonko", dispatcher="jeltz",
                               message_id="assignment-1", destination=destination) == result
+
+
+@pytest.mark.parametrize("change", [{"revision": 3}, {"revision": True}, {"status": "blocked"}])
+def test_stale_task_never_saved_or_receipted(pinned, tmp_path, change):
+    repo, envelope = pinned
+    client = FakeClient([message(envelope)])
+    client.task.update(change)
+    destination = tmp_path / "assignment.json"
+    with pytest.raises(ManualCordError, match="Task changed"):
+        receive_assignment(client, "skybuild", repo, worker="wonko", dispatcher="jeltz",
+                           message_id="assignment-1", destination=destination)
+    assert not destination.exists()
+    assert client.actions == []
+
+
+def test_legacy_assignment_requires_redispatch(legacy_pinned, tmp_path):
+    repo, envelope = legacy_pinned
+    client = FakeClient([message(envelope)])
+    destination = tmp_path / "assignment.json"
+    with pytest.raises(ManualCordError, match="API-bound redispatch"):
+        receive_assignment(client, "skybuild", repo, worker="wonko", dispatcher="jeltz",
+                           message_id="assignment-1", destination=destination)
+    assert not destination.exists()
+    assert client.actions == []
 
 
 @pytest.mark.parametrize("first_failure_at", [1, 2])
