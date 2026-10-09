@@ -85,6 +85,357 @@
   "cases_sha256": "dd0c8fd2b6ec27af57ab51d705d131e274a23d1b2dba8f92c0f8442e469444a0",
   "corrected_accepted": 2,
   "first_pass_accepted": 1,
+  "http_protocol_preparation": {
+    "evidence": {
+      "entries": [
+        {
+          "packet": {
+            "latency_ms": 4.635,
+            "response": {
+              "data": [
+                {
+                  "id": "qwen3.5-think",
+                  "status": "loaded",
+                  "synthetic_capacity_reserved": true
+                }
+              ]
+            }
+          },
+          "parent_elapsed_wall_ms": 19.531,
+          "request": {
+            "body": null,
+            "case_id": null,
+            "method": "GET",
+            "path": "/v1/models"
+          },
+          "status": "completed"
+        },
+        {
+          "packet": {
+            "latency_ms": 4.533,
+            "response": {
+              "choices": [
+                {
+                  "finish_reason": "stop",
+                  "message": {
+                    "content": "{\"replacement\":\"text[:byte_limit]\"}",
+                    "role": "assistant"
+                  }
+                }
+              ],
+              "model": "qwen3.5-think",
+              "usage": {
+                "completion_tokens": 16,
+                "prompt_tokens": 180,
+                "total_tokens": 196
+              }
+            }
+          },
+          "parent_elapsed_wall_ms": 9.012,
+          "request": {
+            "body": {
+              "chat_template_kwargs": {
+                "enable_thinking": false
+              },
+              "max_tokens": 512,
+              "messages": [
+                {
+                  "content": "Repair only the return expression in clip_utf8 below. Return JSON with exactly one string field, replacement, containing an expression. Preserve the existing validation. For a valid text and byte_limit, return the longest Unicode code-point prefix whose UTF-8 bytes fit the limit. Keep the original text unchanged within that prefix; do not normalize or split a code point. Allowed expression operations are text/byte_limit names, bounded literals, slicing, and UTF-8 str.encode/bytes.decode using strict or ignore decoding. No imports, other calls, statements or unrelated changes.\ndef clip_utf8(text, byte_limit):\n    if not isinstance(text, str) or type(byte_limit) is not int:\n        raise ValueError(\"Invalid clipping arguments\")\n    if not 0 <= byte_limit <= 512:\n        raise ValueError(\"Invalid clipping arguments\")\n    return text[:byte_limit]\n",
+                  "role": "user"
+                }
+              ],
+              "model": "qwen3.5-think",
+              "stream": false,
+              "temperature": 0
+            },
+            "case_id": "utf8-clip",
+            "method": "POST",
+            "path": "/v1/chat/completions"
+          },
+          "status": "completed",
+          "validation": {
+            "accepted": false,
+            "reason": "prefix_or_byte_budget_assertion_failed"
+          }
+        },
+        {
+          "packet": {
+            "latency_ms": 4.567,
+            "response": {
+              "choices": [
+                {
+                  "finish_reason": "stop",
+                  "message": {
+                    "content": "{\"replacement\":\"text.encode(\\\"utf-8\\\")[:byte_limit].decode(\\\"utf-8\\\", errors=\\\"ignore\\\")\"}",
+                    "role": "assistant"
+                  }
+                }
+              ],
+              "model": "qwen3.5-think",
+              "usage": {
+                "completion_tokens": 32,
+                "prompt_tokens": 240,
+                "total_tokens": 272
+              }
+            }
+          },
+          "parent_elapsed_wall_ms": 8.827,
+          "request": {
+            "body": {
+              "chat_template_kwargs": {
+                "enable_thinking": false
+              },
+              "max_tokens": 512,
+              "messages": [
+                {
+                  "content": "Repair only the return expression in clip_utf8 below. Return JSON with exactly one string field, replacement, containing an expression. Preserve the existing validation. For a valid text and byte_limit, return the longest Unicode code-point prefix whose UTF-8 bytes fit the limit. Keep the original text unchanged within that prefix; do not normalize or split a code point. Allowed expression operations are text/byte_limit names, bounded literals, slicing, and UTF-8 str.encode/bytes.decode using strict or ignore decoding. No imports, other calls, statements or unrelated changes.\ndef clip_utf8(text, byte_limit):\n    if not isinstance(text, str) or type(byte_limit) is not int:\n        raise ValueError(\"Invalid clipping arguments\")\n    if not 0 <= byte_limit <= 512:\n        raise ValueError(\"Invalid clipping arguments\")\n    return text[:byte_limit]\n",
+                  "role": "user"
+                },
+                {
+                  "content": "{\"replacement\":\"text[:byte_limit]\"}",
+                  "role": "assistant"
+                },
+                {
+                  "content": "Correction required: prefix_or_byte_budget_assertion_failed. Return only corrected JSON. This is the final attempt.",
+                  "role": "user"
+                }
+              ],
+              "model": "qwen3.5-think",
+              "stream": false,
+              "temperature": 0
+            },
+            "case_id": "utf8-clip",
+            "method": "POST",
+            "path": "/v1/chat/completions"
+          },
+          "status": "completed",
+          "validation": {
+            "accepted": true,
+            "reason": "independent_assertions_passed"
+          }
+        },
+        {
+          "packet": {
+            "latency_ms": 5.077,
+            "response": {
+              "choices": [
+                {
+                  "finish_reason": "stop",
+                  "message": {
+                    "content": "{\"findings\":[{\"a\":[0,2],\"actual\":true,\"b\":[2,4],\"expected\":false,\"line\":3}]}",
+                    "role": "assistant"
+                  }
+                }
+              ],
+              "model": "qwen3.5-think",
+              "usage": {
+                "completion_tokens": 52,
+                "prompt_tokens": 210,
+                "total_tokens": 262
+              }
+            }
+          },
+          "parent_elapsed_wall_ms": 9.29,
+          "request": {
+            "body": {
+              "chat_template_kwargs": {
+                "enable_thinking": false
+              },
+              "max_tokens": 512,
+              "messages": [
+                {
+                  "content": "Review this one function under its stated contract: both intervals are nonempty integer half-open ranges, with endpoints in -32..32. There is one boundary defect. Return JSON {\"findings\":[{\"line\":integer,\"a\":[start,end],\"b\":[start,end],\"actual\":boolean,\"expected\":boolean}]}. Give one concrete counterexample, identify the faulty source line, and add no unverified findings.\ndef overlaps(a, b):\n    \"\"\"Nonempty integer half-open intervals, with endpoints in -32..32.\"\"\"\n    return max(a[0], b[0]) <= min(a[1], b[1])\n",
+                  "role": "user"
+                }
+              ],
+              "model": "qwen3.5-think",
+              "stream": false,
+              "temperature": 0
+            },
+            "case_id": "interval-review",
+            "method": "POST",
+            "path": "/v1/chat/completions"
+          },
+          "status": "completed",
+          "validation": {
+            "accepted": true,
+            "reason": "independent_assertions_passed"
+          }
+        },
+        {
+          "packet": {
+            "latency_ms": 4.584,
+            "response": {
+              "choices": [
+                {
+                  "finish_reason": "stop",
+                  "message": {
+                    "content": "{\"tests\":[{\"expected\":[],\"input\":\"\"},{\"expected\":[[\"a\",1]],\"input\":\"a\"},{\"expected\":[[\"a\",2]],\"input\":\"aa\"},{\"expected\":[[\"b\",2]],\"input\":\"bb\"}]}",
+                    "role": "assistant"
+                  }
+                }
+              ],
+              "model": "qwen3.5-think",
+              "usage": {
+                "completion_tokens": 60,
+                "prompt_tokens": 200,
+                "total_tokens": 260
+              }
+            }
+          },
+          "parent_elapsed_wall_ms": 8.896,
+          "request": {
+            "body": {
+              "chat_template_kwargs": {
+                "enable_thinking": false
+              },
+              "max_tokens": 512,
+              "messages": [
+                {
+                  "content": "Design four to eight distinct parameter cases for this run-length encoder. Return JSON {\"tests\":[{\"input\":string,\"expected\":[[one_character,positive_count],...]}]}. Include empty input, adjacent repeats, equal characters separated by another run, and Unicode. Every expected result must reconstruct the input and have distinct adjacent run labels. The cases must detect mutants that merge nonadjacent equal characters or drop the final run. Input length is at most 128 characters. Return data only.\ndef rle(text):\n    runs = []\n    for char in text:\n        if runs and runs[-1][0] == char:\n            runs[-1][1] += 1\n        else:\n            runs.append([char, 1])\n    return runs\n",
+                  "role": "user"
+                }
+              ],
+              "model": "qwen3.5-think",
+              "stream": false,
+              "temperature": 0
+            },
+            "case_id": "rle-test-design",
+            "method": "POST",
+            "path": "/v1/chat/completions"
+          },
+          "status": "completed",
+          "validation": {
+            "accepted": false,
+            "reason": "coverage_or_mutation_assertion_failed"
+          }
+        },
+        {
+          "packet": {
+            "latency_ms": 4.356,
+            "response": {
+              "choices": [
+                {
+                  "finish_reason": "stop",
+                  "message": {
+                    "content": "{\"tests\":[{\"expected\":[],\"input\":\"\"},{\"expected\":[[\"a\",2]],\"input\":\"aa\"},{\"expected\":[[\"a\",1],[\"b\",1],[\"a\",1]],\"input\":\"aba\"},{\"expected\":[[\"\u00e9\",2],[\"\ud83d\ude42\",1]],\"input\":\"\u00e9\u00e9\ud83d\ude42\"}]}",
+                    "role": "assistant"
+                  }
+                }
+              ],
+              "model": "qwen3.5-think",
+              "usage": {
+                "completion_tokens": 96,
+                "prompt_tokens": 260,
+                "total_tokens": 356
+              }
+            }
+          },
+          "parent_elapsed_wall_ms": 8.651,
+          "request": {
+            "body": {
+              "chat_template_kwargs": {
+                "enable_thinking": false
+              },
+              "max_tokens": 512,
+              "messages": [
+                {
+                  "content": "Design four to eight distinct parameter cases for this run-length encoder. Return JSON {\"tests\":[{\"input\":string,\"expected\":[[one_character,positive_count],...]}]}. Include empty input, adjacent repeats, equal characters separated by another run, and Unicode. Every expected result must reconstruct the input and have distinct adjacent run labels. The cases must detect mutants that merge nonadjacent equal characters or drop the final run. Input length is at most 128 characters. Return data only.\ndef rle(text):\n    runs = []\n    for char in text:\n        if runs and runs[-1][0] == char:\n            runs[-1][1] += 1\n        else:\n            runs.append([char, 1])\n    return runs\n",
+                  "role": "user"
+                },
+                {
+                  "content": "{\"tests\":[{\"expected\":[],\"input\":\"\"},{\"expected\":[[\"a\",1]],\"input\":\"a\"},{\"expected\":[[\"a\",2]],\"input\":\"aa\"},{\"expected\":[[\"b\",2]],\"input\":\"bb\"}]}",
+                  "role": "assistant"
+                },
+                {
+                  "content": "Correction required: coverage_or_mutation_assertion_failed. Return only corrected JSON. This is the final attempt.",
+                  "role": "user"
+                }
+              ],
+              "model": "qwen3.5-think",
+              "stream": false,
+              "temperature": 0
+            },
+            "case_id": "rle-test-design",
+            "method": "POST",
+            "path": "/v1/chat/completions"
+          },
+          "status": "completed",
+          "validation": {
+            "accepted": true,
+            "reason": "independent_assertions_passed"
+          }
+        }
+      ],
+      "identity": {
+        "assignment_id": "synthetic-http-preparation",
+        "expires_at": 1791536644.2903266,
+        "head": "baa71c431bf74229974ec117b1fb8e05e1ce86fa",
+        "journal_root": "/tmp/brodson-synthetic-http-od042ze9",
+        "limits": {
+          "attempts_per_case": 2,
+          "cases": 3,
+          "concurrency": 1,
+          "input_tokens": 2048,
+          "latency_ms": 60000,
+          "output_tokens": 512,
+          "prompt_bytes": 8192,
+          "requests": 6,
+          "response_bytes": 16384,
+          "returned_tokens": 15360
+        },
+        "manifest_sha256": "f493e9d4707f49b82660438195b9bb2b18831cff9c6e65d34dbadfc35e797bbe",
+        "model": "qwen3.5-think",
+        "origin": "https://llm.brodson.net",
+        "synthetic": true
+      },
+      "synthetic": true
+    },
+    "note": "Authored synthetic server responses and token counts; parent_elapsed_wall_ms is a local parent mock-operation measurement. packet.latency_ms separately measures child mock response processing. Synthetic authority is not live permission. This artifact is not a resumable journal.",
+    "result": {
+      "cases": [
+        {
+          "accepted": false,
+          "attempt": 1,
+          "case_id": "utf8-clip",
+          "reason": "prefix_or_byte_budget_assertion_failed"
+        },
+        {
+          "accepted": true,
+          "attempt": 2,
+          "case_id": "utf8-clip",
+          "reason": "independent_assertions_passed"
+        },
+        {
+          "accepted": true,
+          "attempt": 1,
+          "case_id": "interval-review",
+          "reason": "independent_assertions_passed"
+        },
+        {
+          "accepted": false,
+          "attempt": 1,
+          "case_id": "rle-test-design",
+          "reason": "coverage_or_mutation_assertion_failed"
+        },
+        {
+          "accepted": true,
+          "attempt": 2,
+          "case_id": "rle-test-design",
+          "reason": "independent_assertions_passed"
+        }
+      ],
+      "consumed_discovery": 1,
+      "consumed_generation": 5,
+      "live_calls": 0,
+      "mode": "mock-http",
+      "reserved_token_exposure": 12800,
+      "returned_tokens": 1346,
+      "status": "prepared",
+      "synthetic": true,
+      "synthetic_tokenization": true
+    }
+  },
   "limits": {
     "attempts_per_case": 2,
     "cases": 3,

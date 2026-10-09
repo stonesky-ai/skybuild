@@ -171,3 +171,446 @@ def test_oversized_fixture_read_is_bounded(tmp_path):
     path.write_bytes(b" " * 131073)
     with pytest.raises(spike.SpikeError, match="fixture_file_too_large"):
         spike.read_json(path)
+
+
+@pytest.fixture
+def http_setup(fixtures, tmp_path):
+    import time
+    manifest, recordings = fixtures
+    root = tmp_path / "journal"
+    root.mkdir(mode=0o700)
+    authority = {"synthetic": True, "assignment_id": "synthetic-http-preparation",
+                 "head": "a" * 40, "expires_at": time.time() + 300}
+    return manifest, recordings, root, authority
+
+
+def http_transport(manifest, recordings, *, generation_change=None, discovery_change=None):
+    """Assertions run inside the owned child; failures stop the parent run."""
+    import httpx
+
+    def handler(request):
+        assert request.headers["authorization"] == "Bearer " + spike.SYNTHETIC_TOKEN
+        assert str(request.url).startswith(spike.HTTP_ORIGIN + "/v1/")
+        if request.method == "GET":
+            assert request.url.path == "/v1/models"
+            document = {"data": [{"id": spike.HTTP_MODEL, "status": "loaded",
+                                   "synthetic_capacity_reserved": True}]}
+            if discovery_change:
+                document = discovery_change(document)
+        else:
+            assert request.method == "POST" and request.url.path == "/v1/chat/completions"
+            body = json.loads(request.content)
+            assert body["model"] == spike.HTTP_MODEL
+            assert body["stream"] is False and body["max_tokens"] == 512
+            assert body["temperature"] == 0
+            assert body["chat_template_kwargs"] == {"enable_thinking": False}
+            messages = body["messages"]
+            assert len(messages) in (1, 3)
+            case = next(case for case in manifest["cases"]
+                        if spike.sanitized(case["prompt"]) == messages[0]["content"])
+            index = int(len(messages) == 3)
+            if index:
+                assert messages[1]["role"] == "assistant"
+                assert "final attempt" in messages[2]["content"]
+            recorded = recordings["cases"][case["id"]][index]
+            usage = recorded["synthetic_usage"]
+            document = {"model": spike.HTTP_MODEL, "choices": [{"finish_reason": "stop",
+                        "message": {"role": "assistant", "content": recorded["content"]}}],
+                        "usage": usage | {"total_tokens": sum(usage.values())}}
+            if generation_change:
+                document = generation_change(document)
+        return httpx.Response(200, json=document)
+
+    return httpx.MockTransport(handler)
+
+
+def run_http(setup, transport=None, **options):
+    manifest, recordings, root, authority = setup
+    return spike.run_fake_http(manifest, recordings,
+                               transport or http_transport(manifest, recordings), root,
+                               authority=authority, count_tokens=options.pop("count_tokens", lambda _: 32),
+                               **options)
+
+
+def test_fake_http_roundtrip_and_restart_keep_original_requests(http_setup):
+    import httpx
+    result = run_http(http_setup)
+    assert result["status"] == "prepared" and result["live_calls"] == 0
+    assert result["synthetic"] is True and result["synthetic_tokenization"] is True
+    assert (result["consumed_discovery"], result["consumed_generation"]) == (1, 5)
+    assert [row["accepted"] for row in result["cases"]] == [False, True, True, False, True]
+    root = http_setup[2]
+    before = (root / "attempts.json").read_bytes()
+    state = json.loads(before)
+    assert len(state["entries"]) == 6
+    assert all(entry["status"] == "completed" for entry in state["entries"])
+    assert all(entry["packet"]["latency_ms"] >= 0 for entry in state["entries"])
+    assert stat.S_IMODE((root / "attempts.json").stat().st_mode) == 0o600
+
+    def forbidden(request):
+        raise AssertionError("completed restart must not request again")
+
+    assert run_http(http_setup, httpx.MockTransport(forbidden)) == result
+    assert (root / "attempts.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("change,reason", [
+    ({"usage": None}, "usage_unknown"),
+    ({"usage": {}}, "usage_unknown"),
+    ({"usage": {"prompt_tokens": -1, "completion_tokens": 1, "total_tokens": 0}}, "usage_unknown"),
+    ({"usage": {"prompt_tokens": True, "completion_tokens": 1, "total_tokens": 2}}, "usage_unknown"),
+    ({"usage": {"prompt_tokens": 1, "completion_tokens": 513, "total_tokens": 514}}, "usage_unknown"),
+    ({"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 3}}, "usage_unknown"),
+    ({"model": "another-model"}, "model_mismatch"),
+    ({"choices": []}, "partial_or_ambiguous"),
+    ({"choices": [{}, {}]}, "partial_or_ambiguous"),
+    ({"choices": [{"finish_reason": "length", "message": {"role": "assistant", "content": "{}"}}]}, "partial_or_ambiguous"),
+    ({"choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "{"}}]}, "malformed_candidate"),
+])
+def test_fake_http_invalid_generation_stops_without_correction(http_setup, change, reason):
+    manifest, recordings, root, _ = http_setup
+    transport = http_transport(manifest, recordings, generation_change=lambda doc: doc | change)
+    result = run_http(http_setup, transport)
+    assert result["status"] == "stopped" and reason in result["stop_reason"]
+    assert result["consumed_generation"] == 1
+    assert len(json.loads((root / "attempts.json").read_text())["entries"]) == 2
+    assert run_http(http_setup, transport)["consumed_generation"] == 1
+
+
+@pytest.mark.parametrize("model", [{"id": "unknown"}, {"id": "qwen3.5-think", "status": "unloaded"},
+                                   {"id": "qwen3.5-think", "status": "loaded", "synthetic_capacity_reserved": False}])
+def test_fake_http_unknown_discovery_never_generates(http_setup, model):
+    manifest, recordings, _, _ = http_setup
+    result = run_http(http_setup, http_transport(manifest, recordings,
+                      discovery_change=lambda _: {"data": [model]}))
+    assert result["status"] == "stopped"
+    assert result["consumed_discovery"] == 1 and result["consumed_generation"] == 0
+
+
+@pytest.mark.parametrize("mode", ["blocked", "trickle"])
+def test_fake_http_hard_deadline_preserves_ambiguous_attempt(http_setup, mode):
+    import httpx
+    import time
+
+    class SlowStream(httpx.SyncByteStream):
+        def __iter__(self):
+            for _ in range(100):
+                time.sleep(0.03)
+                yield b" "
+
+    def handler(request):
+        if mode == "blocked":
+            time.sleep(5)
+        return httpx.Response(200, stream=SlowStream())
+
+    started = time.monotonic()
+    result = run_http(http_setup, httpx.MockTransport(handler), deadline_seconds=0.1)
+    assert time.monotonic() - started < 2
+    assert result["stop_reason"] == "wall_deadline_ambiguous_exposure"
+    assert result["consumed_discovery"] == 1 and result["consumed_generation"] == 0
+    state = json.loads((http_setup[2] / "attempts.json").read_text())
+    assert state["entries"][0]["status"] == "consumed_uncertain"
+    restarted = run_http(http_setup)
+    assert restarted["stop_reason"] == "consumed_attempt_not_reconciled"
+    assert restarted["consumed_discovery"] == 1
+
+
+@pytest.mark.parametrize("failure,reason", [("oversized", "response_too_large"),
+                                            ("compressed", "compressed_response_refused"),
+                                            ("malformed", "transport_or_response_error"),
+                                            ("redirect", "HTTP_status_error"),
+                                            ("transport", "transport_or_response_error")])
+def test_fake_http_wire_failures_are_consumed_and_never_retried(http_setup, failure, reason):
+    import httpx
+
+    def handler(request):
+        if failure == "transport":
+            raise httpx.ReadTimeout("Bearer secret-that-must-not-be-persisted")
+        if failure == "oversized":
+            return httpx.Response(200, content=b"x" * (spike.LIMITS["response_bytes"] + 1))
+        if failure == "compressed":
+            return httpx.Response(200, headers={"content-encoding": "gzip"},
+                                  stream=httpx.ByteStream(b"garbage"))
+        if failure == "redirect":
+            return httpx.Response(302, headers={"location": "https://example.invalid"})
+        return httpx.Response(200, content=b"{")
+
+    result = run_http(http_setup, httpx.MockTransport(handler))
+    assert result["stop_reason"] == reason and result["consumed_discovery"] == 1
+    assert result["consumed_generation"] == 0
+    persisted = (http_setup[2] / "attempts.json").read_text()
+    assert "secret-that-must-not-be-persisted" not in persisted
+    assert run_http(http_setup)["stop_reason"] == "consumed_attempt_not_reconciled"
+
+
+def test_fake_http_sanitizes_nested_metadata_and_prompts(http_setup):
+    manifest, recordings, root, _ = http_setup
+    manifest["cases"][0]["prompt"] += " Authorization: Bearer " + spike.SYNTHETIC_TOKEN
+
+    def secrets(document):
+        return document | {"authorization": "opaque-secret", "metadata": {
+            "api_key": "another-opaque-secret", "token": "standalone-token-secret",
+            "token_file": "/private/credential-reference", "note": "Bearer secret-echo " + spike.SYNTHETIC_TOKEN}}
+
+    result = run_http(http_setup, http_transport(manifest, recordings,
+                      generation_change=secrets, discovery_change=secrets))
+    assert result["status"] == "prepared"
+    persisted = (root / "attempts.json").read_text()
+    for secret in ("opaque-secret", "another-opaque-secret", "standalone-token-secret",
+                   "/private/credential-reference", "secret-echo", spike.SYNTHETIC_TOKEN):
+        assert secret not in persisted
+    assert "[redacted]" in persisted and '"usage"' in persisted
+
+
+def test_fake_http_second_defect_stops_later_cases(http_setup):
+    manifest, recordings, _, _ = http_setup
+    recordings["cases"]["utf8-clip"][1] = deepcopy(recordings["cases"]["utf8-clip"][0])
+    result = run_http(http_setup)
+    assert result["stop_reason"] == "second_defective_proposal"
+    assert result["consumed_generation"] == 2
+    assert [row["case_id"] for row in result["cases"]] == ["utf8-clip", "utf8-clip"]
+
+
+@pytest.mark.parametrize("tokens", [None, True, 0, 2049])
+def test_fake_http_unknown_tokenization_never_reserves_generation(http_setup, tokens):
+    result = run_http(http_setup, count_tokens=lambda _: tokens)
+    assert result["stop_reason"] == "tokenization_unknown_or_input_budget_exceeded"
+    assert result["consumed_discovery"] == 1 and result["consumed_generation"] == 0
+
+
+def test_fake_http_rejects_real_transport_and_live_authority_before_journal(http_setup):
+    import httpx
+    manifest, recordings, root, authority = http_setup
+    with pytest.raises(spike.SpikeError, match="only_explicit_fake"):
+        spike.run_fake_http(manifest, recordings, object(), root,
+                            authority=authority, count_tokens=lambda _: 1)
+    with pytest.raises(spike.SpikeError, match="explicit_synthetic_authority"):
+        spike.run_fake_http(manifest, recordings, httpx.MockTransport(lambda _: None), root,
+                            authority=authority | {"synthetic": False}, count_tokens=lambda _: 1)
+    assert list(root.iterdir()) == []
+
+
+def test_fake_http_expired_authority_consumes_no_request(http_setup):
+    http_setup[3]["expires_at"] = 1
+    result = run_http(http_setup)
+    assert result["stop_reason"] == "synthetic_authority_expired"
+    assert result["consumed_discovery"] == result["consumed_generation"] == 0
+
+
+def test_fake_http_changed_manifest_cannot_reuse_journal(http_setup):
+    assert run_http(http_setup)["status"] == "prepared"
+    http_setup[0]["cases"][0]["prompt"] += " changed"
+    with pytest.raises(spike.SpikeError, match="journal_identity_changed"):
+        run_http(http_setup)
+
+
+@pytest.mark.parametrize("removed", ["attempts.json", "attempts.lock"])
+def test_fake_http_missing_durable_state_never_renews_budget(http_setup, removed):
+    assert run_http(http_setup)["status"] == "prepared"
+    (http_setup[2] / removed).unlink()
+    with pytest.raises((OSError, spike.SpikeError)):
+        run_http(http_setup)
+
+
+def test_fake_http_reservation_survives_crash_before_transport(http_setup, monkeypatch):
+    def interrupted(*args, **kwargs):
+        raise SystemExit("simulated process interruption")
+
+    monkeypatch.setattr(spike, "fake_http_request", interrupted)
+    with pytest.raises(SystemExit):
+        run_http(http_setup)
+    state = json.loads((http_setup[2] / "attempts.json").read_text())
+    assert len(state["entries"]) == 1 and state["entries"][0]["status"] == "consumed_uncertain"
+    assert run_http(http_setup)["stop_reason"] == "consumed_attempt_not_reconciled"
+
+
+def test_fake_http_private_journal_lock_blocks_concurrent_run(http_setup):
+    import fcntl
+    import os
+    root = http_setup[2]
+    lock = os.open(root / "attempts.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises((BlockingIOError, spike.SpikeError)):
+            run_http(http_setup)
+        assert not (root / "attempts.json").exists()
+    finally:
+        os.close(lock)
+
+
+@pytest.mark.parametrize("kind", ["discovery", "generation", "case"])
+def test_fake_http_journal_enforces_consumed_budget_before_transport(http_setup, monkeypatch, kind):
+    run_http(http_setup)
+    root = http_setup[2]
+    identity = json.loads((root / "attempts.json").read_text())["identity"]
+    journal = spike.FakeHTTPJournal(root, identity)
+    try:
+        entries = journal.state["entries"]
+        request = deepcopy(entries[0 if kind == "discovery" else 1]["request"])
+        if kind == "generation":
+            entries.append(deepcopy(entries[1]))
+            request["case_id"] = "interval-review"
+        journal.cursor = len(entries)
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("exhausted budgets must not request")
+
+        monkeypatch.setattr(spike, "fake_http_request", forbidden)
+        with pytest.raises(spike.SpikeError, match="budget_exhausted"):
+            journal.obtain(request, object(), deadline_seconds=60)
+    finally:
+        journal.close()
+
+
+@pytest.mark.parametrize("failed_save", [2, 3])
+def test_fake_http_failed_reservation_or_receipt_write_preserves_effect_boundary(
+        http_setup, monkeypatch, failed_save):
+    real_save = spike.FakeHTTPJournal.save
+    writes, effects = [], []
+
+    def save(journal):
+        writes.append(len(journal.state["entries"]))
+        if len(writes) == failed_save:
+            raise OSError("simulated durable write failure")
+        return real_save(journal)
+
+    def request(*args, **kwargs):
+        effects.append(True)
+        return {"latency_ms": 1, "response": {"data": [{"id": spike.HTTP_MODEL,
+                "status": "loaded", "synthetic_capacity_reserved": True}]}}
+
+    monkeypatch.setattr(spike.FakeHTTPJournal, "save", save)
+    monkeypatch.setattr(spike, "fake_http_request", request)
+    with pytest.raises(OSError, match="durable write failure"):
+        run_http(http_setup)
+    state = json.loads((http_setup[2] / "attempts.json").read_text())
+    if failed_save == 2:
+        assert effects == [] and state["entries"] == []
+    else:
+        assert effects == [True]
+        assert state["entries"][0]["status"] == "consumed_uncertain"
+        monkeypatch.setattr(spike.FakeHTTPJournal, "save", real_save)
+        assert run_http(http_setup)["stop_reason"] == "consumed_attempt_not_reconciled"
+        assert effects == [True]
+
+
+def test_fake_http_prompt_envelope_cap_stops_before_generation(http_setup):
+    http_setup[0]["cases"][0]["prompt"] = "x" * spike.LIMITS["prompt_bytes"]
+    result = run_http(http_setup)
+    assert result["stop_reason"] == "prompt_budget_exceeded"
+    assert result["consumed_discovery"] == 1 and result["consumed_generation"] == 0
+
+
+def test_live_cli_refuses_before_file_or_client_access(monkeypatch, capsys):
+    import httpx
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("live refusal must precede credentials, files and client construction")
+
+    monkeypatch.setattr(httpx, "Client", forbidden)
+    monkeypatch.setattr(Path, "open", forbidden)
+    monkeypatch.setattr(Path, "read_text", forbidden)
+    monkeypatch.setattr(spike, "fake_http_request", forbidden)
+    assert spike.main(["--live", "--cases", "/private/nonexistent"]) == 2
+    assert "Live mode is disabled" in capsys.readouterr().out
+
+
+def test_fake_http_rejects_live_admission_before_file_or_client_access(http_setup, monkeypatch):
+    import httpx
+    manifest, recordings, root, authority = http_setup
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("live admission must not inspect files or construct a client")
+
+    transport = httpx.MockTransport(forbidden)
+    monkeypatch.setattr(httpx, "Client", forbidden)
+    monkeypatch.setattr(Path, "open", forbidden)
+    monkeypatch.setattr(Path, "read_text", forbidden)
+    with pytest.raises(spike.SpikeError, match="explicit_synthetic_authority"):
+        spike.run_fake_http(manifest, recordings, transport, root,
+                            authority=authority | {"synthetic": False}, count_tokens=lambda _: 1)
+    with pytest.raises(spike.SpikeError, match="live_disabled"):
+        spike.live_admission(authority=authority)
+
+
+def test_fake_http_discovery_endpoint_error_stops_even_with_model_metadata(http_setup):
+    manifest, recordings, _, _ = http_setup
+    transport = http_transport(manifest, recordings,
+                              discovery_change=lambda doc: doc | {"error": {"message": "endpoint unavailable"}})
+    result = run_http(http_setup, transport)
+    assert result["status"] == "stopped"
+    assert result["consumed_discovery"] == 1 and result["consumed_generation"] == 0
+
+
+def test_fake_http_success_persists_parent_wall_latency_independent_of_child(http_setup, monkeypatch):
+    import httpx
+    import math
+    import time
+    request = spike.fake_http_request
+
+    def delayed_request(*args, **kwargs):
+        time.sleep(0.03)
+        packet = request(*args, **kwargs)
+        packet["latency_ms"] = 0  # Child-reported latency cannot erase parent elapsed time.
+        return packet
+
+    monkeypatch.setattr(spike, "fake_http_request", delayed_request)
+    result = run_http(http_setup)
+    assert result["status"] == "prepared"
+    path = http_setup[2] / "attempts.json"
+    original = path.read_bytes()
+    entries = json.loads(original)["entries"]
+    assert len(entries) == 6
+    for entry in entries:
+        elapsed = entry["parent_elapsed_wall_ms"]
+        assert type(elapsed) in (int, float) and math.isfinite(elapsed) and elapsed >= 25
+        assert entry["packet"]["latency_ms"] == 0
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("restart must preserve original timings without extra effects")
+
+    monkeypatch.setattr(spike, "fake_http_request", forbidden)
+    assert run_http(http_setup, httpx.MockTransport(forbidden)) == result
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("outcome", ["http503", "timeout"])
+def test_fake_http_failed_generation_retains_parent_wall_latency_and_exposure(http_setup, outcome):
+    import httpx
+    import math
+    import time
+    manifest, recordings, root, _ = http_setup
+    happy = http_transport(manifest, recordings)
+
+    def handler(request):
+        if request.method == "GET":
+            return happy.handle_request(request)
+        time.sleep(5 if outcome == "timeout" else 0.03)
+        return httpx.Response(503, json={"error": "synthetic service unavailable"})
+
+    result = run_http(http_setup, httpx.MockTransport(handler),
+                      deadline_seconds=0.1 if outcome == "timeout" else 60)
+    assert result["status"] == "stopped"
+    assert result["stop_reason"] == ("wall_deadline_ambiguous_exposure" if outcome == "timeout"
+                                      else "HTTP_status_error")
+    assert result["consumed_discovery"] == result["consumed_generation"] == 1
+    assert result["reserved_token_exposure"] == 2560
+    path = root / "attempts.json"
+    original = path.read_bytes()
+    entries = json.loads(original)["entries"]
+    assert len(entries) == 2
+    assert all(type(entry["parent_elapsed_wall_ms"]) in (int, float)
+               and math.isfinite(entry["parent_elapsed_wall_ms"])
+               and entry["parent_elapsed_wall_ms"] >= 0 for entry in entries)
+    generation = entries[1]
+    assert generation["request"]["method"] == "POST"
+    assert generation["status"] == "consumed_uncertain"
+    assert generation["parent_elapsed_wall_ms"] >= (95 if outcome == "timeout" else 25)
+
+    def forbidden(request):
+        raise AssertionError("failed generation remains consumed on restart")
+
+    restarted = run_http(http_setup, httpx.MockTransport(forbidden))
+    assert restarted["stop_reason"] == "consumed_attempt_not_reconciled"
+    assert restarted["consumed_generation"] == 1 and restarted["reserved_token_exposure"] == 2560
+    assert json.loads(path.read_text())["entries"] == entries
