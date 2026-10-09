@@ -31,6 +31,10 @@ class Inbox:
         self.receipts = []
         self.lose_receipt = False
 
+    def whoami(self):
+        return {"principal_id": "wonko", "is_admin": False,
+                "grants": {"skybuild": ["cord:read", "cord:send", "cord:handle"]}}
+
     def inbox(self, project, *, limit, offset, wait_seconds):
         assert (project, limit, offset) == ("skybuild", 100, 0)
         assert 0 <= wait_seconds <= 25
@@ -157,6 +161,31 @@ def test_monotonic_limit_survives_wall_clock_rollback(armed):
     assert len(client.waits) == 2
 
 
+def test_shorter_approval_remains_monotonically_bounded_after_rollback(armed):
+    client, options, _ = armed
+    client.messages = []
+    options.update(duration=6, deadline=102)
+    options["clock"] = lambda: 100.0
+    assert listen(client, **options)["status"] == "timeout"
+    assert client.clock.now == 102
+    assert len(client.waits) == 2
+
+
+def test_receipt_after_original_approval_is_refused_despite_wall_rollback(armed, monkeypatch):
+    import skybuild.manual_cord as cord
+    client, options, _ = armed
+    options.update(duration=6, deadline=102, clock=lambda: 100.0)
+    original = cord._private_write
+    def expire_after_save(path, payload):
+        original(path, payload)
+        client.clock.now = 103
+    monkeypatch.setattr(cord, "_private_write", expire_after_save)
+    with pytest.raises(ListenerError, match="before receipt"):
+        listen(client, **options)
+    assert options["destination"].exists()
+    assert client.receipts == []
+
+
 def test_arrival_after_wait_deadline_is_not_saved_or_receipted(armed):
     client, options, _ = armed
     original = client.inbox
@@ -207,3 +236,84 @@ def test_cli_rejects_non_utc_or_expired_approval_before_preflight(armed, approve
         args.extend(("--" + key, value))
     assert module.main(args) == 1
     assert json.loads(capsys.readouterr().out)["status"] == "blocked"
+
+
+@pytest.mark.parametrize("change", ["token", "ca", "rollback-expiry"])
+def test_cli_binds_original_approval_and_credential_material(armed, tmp_path, monkeypatch, capsys, change):
+    import scripts.manual_pilot_listener as module
+    client, options, _ = armed
+    token, ca = tmp_path / "token", tmp_path / "ca.pem"
+    token.write_text("x" * 32)
+    token.chmod(0o600)
+    ca.write_text("original-public-ca")
+    ca_digest = module.ca_file_sha256(ca)
+    monotonic = Clock()
+    wall = Clock()
+    monkeypatch.setattr(module.time, "time", wall)
+    monkeypatch.setattr(module.time, "monotonic", monotonic)
+
+    def preflight(*_args, **_kwargs):
+        if change == "token":
+            token.write_text("y" * 32)
+        elif change == "ca":
+            ca.write_text("replacement-public-ca")
+        else:
+            monotonic.now = 103
+            wall.now = 1
+
+    constructed = []
+    actual_client = module.Client
+    def factory(_url, actual_token, **kwargs):
+        constructed.append(actual_token)
+        assert actual_token == "x" * 32
+        assert kwargs["expected_ca_sha256"] == ca_digest
+        # Exercise the real Client CA digest guard before TLS/network setup.
+        if change == "ca":
+            return actual_client(_url, actual_token, **kwargs)
+        pytest.fail("Expired approval and changed files must not reach receiving client")
+
+    monkeypatch.setattr(module, "probe_private_api", preflight)
+    monkeypatch.setattr(module, "Client", factory)
+    values = {"url": "https://controller.ts.net", "project": "skybuild", "worker": "wonko",
+              "dispatcher": "jeltz", "assignment-id": "pilot-001", "base-sha": options["base_sha"],
+              "brief-path": options["brief_path"], "brief-sha256": options["brief_sha256"],
+              "approved-until": "1970-01-01T00:01:42Z", "duration": "6", "token-file": str(token),
+              "ca-file": str(ca), "checkout": str(options["checkout"]),
+              "destination": str(options["destination"]), "state-dir": str(options["state_dir"])}
+    args = [arg for key, value in values.items() for arg in ("--" + key, value)]
+    assert module.main(args) == 1
+    assert len(constructed) == (1 if change == "ca" else 0)
+    assert client.waits == client.receipts == []
+    assert json.loads(capsys.readouterr().out)["status"] == "blocked"
+
+
+@pytest.mark.parametrize("identity", [
+    {"principal_id": "foreign", "is_admin": False, "grants": {"skybuild": ["cord:read", "cord:send", "cord:handle"]}},
+    {"principal_id": "wonko", "is_admin": True, "grants": {"skybuild": ["cord:read", "cord:send", "cord:handle"]}},
+    {"principal_id": "wonko", "is_admin": False, "grants": {"skybuild": ["cord:read", "tasks:write"]}},
+])
+def test_actual_receiving_client_requires_exact_identity_and_scopes(armed, identity):
+    client, options, _ = armed
+    client.whoami = lambda: identity
+    with pytest.raises(ListenerError):
+        listen(client, **options)
+    assert client.waits == client.receipts == []
+
+
+def test_receiving_identity_is_rechecked_before_receipt(armed):
+    client, options, _ = armed
+    original = client.whoami()
+    identities = iter([original, original | {"principal_id": "foreign"}])
+    client.whoami = lambda: next(identities)
+    with pytest.raises(ListenerError, match="scoped worker"):
+        listen(client, **options)
+    assert options["destination"].exists()
+    assert client.receipts == []
+
+
+def test_preflight_original_monotonic_endpoint_cannot_be_rearmed(armed):
+    client, options, _ = armed
+    options.update(duration=6, deadline=102, clock=lambda: 1.0, monotonic_deadline=102)
+    client.clock.now = 103
+    assert listen(client, **options)["status"] == "timeout"
+    assert client.waits == client.receipts == []
