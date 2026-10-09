@@ -47,7 +47,7 @@ def promotion(tmp_path, monkeypatch):
                        'RW': False} for name in ('server.crt', 'server.key')]}
     data = {'current': current, 'candidate': candidate, 'installed': current.copy(), 'api': api,
             'db': {'Id': db_id}, 'cluster': '123456', 'ready': {'status': 'ready'},
-            'findings': [],
+            'findings': [], 'controller_kwargs': {},
             'serve': {}, 'statements': [], 'calls': []}
     data['applied'] = [(i, current[f'migrations/{i:03}_migration.sql']) for i in range(1, 12)]
     arguments = dict(checkout=tmp_path / 'checkout', expected_sha='b' * 40,
@@ -91,7 +91,7 @@ def promotion(tmp_path, monkeypatch):
             return data['applied']
 
     monkeypatch.setattr(tls, 'command', command)
-    monkeypatch.setattr(tls, 'controller', lambda *args: None)
+    monkeypatch.setattr(tls, 'controller', lambda *args, **kwargs: data['controller_kwargs'].update(kwargs))
     monkeypatch.setattr(tls, 'check', lambda *args: {'ca_sha256': 'public-ca-fingerprint', 'service_changes': False})
     monkeypatch.setattr(controller, '_source_manifest', lambda path, sha: data['current' if sha == 'a' * 40 else 'candidate'])
     monkeypatch.setattr(controller, '_available_gib', lambda: 20)
@@ -111,6 +111,7 @@ def test_promotion_checks_are_read_only_and_refuse_binary_rollback(promotion):
     assert report['binary_rollback_after_migration'] is False
     assert report['candidate_role_audit_required'] is True
     assert (report['current_schema'], report['candidate_schema']) == (11, 12)
+    assert data['controller_kwargs']['expected_api_image'] == arguments['api_image']
     assert all(statement.startswith(('SELECT ', 'SET TRANSACTION ')) for statement in data['statements'])
     assert not any(any(word in args for word in ('stop', 'start', 'build', 'up', 'restart', 'migrate')) for args in data['calls'])
     assert 'password' not in json.dumps(report)

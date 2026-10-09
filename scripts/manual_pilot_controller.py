@@ -164,7 +164,8 @@ def promotion_preflight(checkout: Path, expected_sha: str, published_ref: str, *
     if published_ref not in {"refs/heads/dev-002", "refs/heads/main"}:
         raise ValueError("Require the approved publication ref")
     checkout = checkout.absolute()
-    tls.controller(checkout, expected_sha, state_dir, hostname, tailnet_ip)
+    tls.controller(checkout, expected_sha, state_dir, hostname, tailnet_ip,
+                   expected_api_image=api_image)
     if tls.command("git", "-C", str(checkout), "ls-remote", "--exit-code", "origin", published_ref) != \
             f"{expected_sha}\t{published_ref}":
         raise ValueError("Candidate differs from the exact approved published ref")
