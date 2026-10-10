@@ -120,10 +120,11 @@ def service_command(args, unit):
     # The main command's exit stops the service and all remaining descendants.
     props = ["Type=exec", "ExitType=main", "RemainAfterExit=no", "KillMode=control-group",
              "TimeoutStopSec=10", "SendSIGKILL=yes", "OOMPolicy=kill", "MemoryAccounting=yes",
-             f"MemoryHigh={args.memory_high_gib * GIB}", f"MemoryMax={args.memory_max_gib * GIB}",
+             f"MemoryHigh={int(args.memory_high_gib * GIB)}", f"MemoryMax={args.memory_max_gib * GIB}",
              "MemorySwapMax=0", f"RuntimeMaxSec={args.runtime_seconds}", "NoNewPrivileges=yes",
              f"WorkingDirectory={args.checkout}", f"Nice={10 if args.profile == 'analysis' else 0}",
-             f"OOMScoreAdjust={300 if args.profile == 'analysis' else 0}"]
+             f"OOMScoreAdjust={300 if args.profile == 'analysis' else 0}",
+             f"ManagedOOMPreference={'avoid' if args.profile == 'merge' else 'none'}"]
     hook = Path(__file__).with_name("managed_session_cleanup.py")
     hook_args = ["/usr/bin/python3", str(hook), str(args.state_dir / f"{unit}.json")]
     props.append("ExecStopPost=" + " ".join(shlex.quote(value.replace("%", "%%")) for value in hook_args))
@@ -135,6 +136,7 @@ def service_command(args, unit):
     environment = {key: os.environ[key] for key in ("HOME", "USER", "LOGNAME", "LANG", "TERM", "PATH")
                    if key in os.environ}
     environment["UV_CACHE_DIR"] = str(args.state_dir / "uv-cache")
+    environment["PATH"] = str(Path.home() / ".local/bin") + os.pathsep + environment.get("PATH", os.defpath)
     environment["SKYBUILD_SESSION_UNIT"] = unit
     return argv + ["--", "/usr/bin/env", "-i", *[f"{key}={value}" for key, value in environment.items()],
                    *args.command]
@@ -220,7 +222,7 @@ def main(argv=None):
     parser.add_argument("--checkout", type=Path, required=True)
     parser.add_argument("--state-dir", type=Path, default=Path.home() / "my_code/skybuild-managed-state")
     parser.add_argument("--target-ref")
-    parser.add_argument("--memory-high-gib", type=int, default=3)
+    parser.add_argument("--memory-high-gib", type=float, default=3)
     parser.add_argument("--memory-max-gib", type=int, default=4)
     parser.add_argument("--runtime-seconds", type=int, default=3600)
     parser.add_argument("command", nargs=argparse.REMAINDER)

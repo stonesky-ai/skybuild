@@ -112,6 +112,15 @@ def test_service_keeps_arguments_and_stops_all_children(tmp_path):
     assert argv[-3:] == args.command
     assert argv.index("--") > argv.index("--property")
     assert {"KillMode=control-group", "RemainAfterExit=no", "OOMPolicy=kill",
-            "MemoryHigh=3221225472", "MemoryMax=4294967296", "MemorySwapMax=0"} <= set(argv)
+            "MemoryHigh=3221225472", "MemoryMax=4294967296", "MemorySwapMax=0",
+            "ManagedOOMPreference=avoid"} <= set(argv)
     assert any(value.startswith("ExecStopPost=") for value in argv)
     assert not any(value.startswith("GH_TOKEN=") for value in argv)
+
+
+def test_fractional_threshold_and_user_tool_path(tmp_path):
+    args = arguments(tmp_path, memory_high_gib=1.9999, memory_max_gib=2)
+    argv = session.service_command(args, "skybuild-merge-test.service")
+    assert f"MemoryHigh={int(1.9999 * session.GIB)}" in argv
+    path = next(value.removeprefix("PATH=") for value in argv if value.startswith("PATH="))
+    assert path.split(":")[0] == str(Path.home() / ".local/bin")

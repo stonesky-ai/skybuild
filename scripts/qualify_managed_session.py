@@ -52,7 +52,7 @@ def qualify(args):
         case_dir.mkdir(mode=0o700)
         command = [sys.executable, str(runner), "--profile", "merge", "--expected-host", args.expected_host,
                    "--checkout", str(args.checkout), "--target-ref", args.target_ref,
-                   "--memory-high-gib", "1", "--memory-max-gib", "2",
+                   "--memory-high-gib", "1.9999" if case == "oom" else "1", "--memory-max-gib", "2",
                    "--runtime-seconds", "8" if case == "timeout" else "45", "--",
                    sys.executable, str(Path(__file__).resolve()), "--payload", "--case", case,
                    "--output", str(case_dir), "--target-ref", args.target_ref]
