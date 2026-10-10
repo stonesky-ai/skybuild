@@ -170,7 +170,7 @@ def _apply_plan(store: Store, project_id: str, plan: dict, authority: str) -> di
                     or receipt["task_count"] != plan["task_count"] or receipt["status_counts"] != plan["counts"]
                     or receipt["authority"] != authority):
                 _refuse("Destination already has a different import")
-            rows = connection.execute("SELECT project_id, task_id, title, description, status, priority, acceptance_criteria, architecture_refs, phase, next_action, responsible, metadata, revision FROM tasks ORDER BY priority").fetchall()
+            rows = connection.execute("SELECT project_id, task_id, title, description, status, priority, acceptance_criteria, architecture_refs, phase, next_action, responsible, assignee, blocker, metadata, revision FROM tasks ORDER BY priority").fetchall()
             if len(rows) != plan["task_count"] or connection.execute("SELECT count(*) AS count FROM task_journal").fetchone()["count"] != len(rows):
                 _refuse("Imported destination changed")
             if connection.execute("SELECT 1 FROM task_lineage LIMIT 1").fetchone():
@@ -179,6 +179,9 @@ def _apply_plan(store: Store, project_id: str, plan: dict, authority: str) -> di
                 actual = _public(row)
                 for field in ("task_id", "title", "description", "status", "priority", "acceptance_criteria", "architecture_refs", "phase", "next_action", "responsible", "metadata"):
                     if actual[field] != expected[field]:
+                        _refuse("Imported destination changed")
+                for field in ("assignee", "blocker"):
+                    if actual[field] != expected.get(field):
                         _refuse("Imported destination changed")
                 if actual["project_id"] != project_id or actual["revision"] != 1:
                     _refuse("Imported destination changed")
@@ -201,11 +204,12 @@ def _apply_plan(store: Store, project_id: str, plan: dict, authority: str) -> di
                            (actor, hashlib.sha256(uuid4().bytes).hexdigest()))
         for record in plan["records"]:
             connection.execute(
-                "INSERT INTO tasks (project_id, task_id, title, description, status, priority, acceptance_criteria, architecture_refs, phase, next_action, responsible, metadata) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                "INSERT INTO tasks (project_id, task_id, title, description, status, priority, acceptance_criteria, architecture_refs, phase, next_action, responsible, assignee, blocker, metadata) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 (project_id, record["task_id"], record["title"], record["description"], record["status"],
                  record["priority"], record["acceptance_criteria"], record["architecture_refs"],
-                 record["phase"], record["next_action"], record["responsible"], Jsonb(record["metadata"])),
+                 record["phase"], record["next_action"], record["responsible"],
+                 record.get("assignee"), record.get("blocker"), Jsonb(record["metadata"])),
             )
         for record in plan["records"]:
             for dependency in record["dependencies"]:
