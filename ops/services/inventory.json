@@ -41,14 +41,6 @@
     },
     {
       "host": "wonko",
-      "kind": "unit",
-      "name": "skybuild-host-watch-gate-6a3b123.service",
-      "fragment": "/run/user/1000/systemd/transient/skybuild-host-watch-gate-6a3b123.service",
-      "management": "observation",
-      "observation_only": true
-    },
-    {
-      "host": "wonko",
       "kind": "capability",
       "name": "skybuild-managed-runtime",
       "checkout": "/home/kevin/my_code/skybuild-managed-runtime-20261010",
@@ -72,14 +64,6 @@
       "management": "capability"
     },
     {
-      "host": "wowbagger",
-      "kind": "unit",
-      "name": "skybuild-analysis-9788b47506d045a4abb6a2698a56425c.service",
-      "fragment": "/run/user/1000/systemd/transient/skybuild-analysis-9788b47506d045a4abb6a2698a56425c.service",
-      "observation_only": true,
-      "management": "observation"
-    },
-    {
       "host": "wonko",
       "kind": "capability",
       "name": "skybuild-cpu-worker-image",
@@ -98,6 +82,20 @@
       "required_files": [],
       "image": "sha256:1e3c86c11dd59ed56dc463eeb19a6c372465e3343b7f3f35e7f32a045eb66e07",
       "management": "capability"
+    },
+    {
+      "host": "wonko",
+      "kind": "unit",
+      "name": "skybuild-host-watch-fleet.service",
+      "fragment": "/home/kevin/.config/systemd/user/skybuild-host-watch-fleet.service",
+      "management": "persistent"
+    },
+    {
+      "host": "wowbagger",
+      "kind": "unit",
+      "name": "skybuild-host-watch-fleet.service",
+      "fragment": "/home/kevin/.config/systemd/user/skybuild-host-watch-fleet.service",
+      "management": "persistent"
     }
   ]
 }
