@@ -117,6 +117,12 @@ existing internal port. The gateway connects to the fixed Docker service name,
 verifies the installation CA and the explicit certificate hostname, and ignores
 ambient proxy and CA environment settings. Redirects are not followed.
 
+Private Workbench mode binds only to loopback or an explicit Tailscale address.
+It permits a wildcard bind only with `--container-listener`, for the reviewed
+Compose deployment whose host port mappings stay on approved interfaces. It
+rejects public IP and DNS listeners. Default caller-token mode keeps its existing
+listener behavior.
+
 In default mode, the gateway forwards caller bearer authentication, If-Match, and
 Idempotency-Key unchanged. It drops cookies and forwarded-host headers. Cross-origin
 mutations are refused. Requests and responses have bounded sizes. Upstream errors
@@ -130,11 +136,16 @@ rtk proxy scripts/project_python -m pytest \
   tests/test_runtime_stack_startup.py -q
 ```
 
-Result: 34 passed. These checks cover routes, empty lists, installation trust,
+Result: 44 passed. These checks cover routes, empty lists, installation trust,
 SNI, fixed destination, caller and server credential boundaries, task CRUD/history/
 workflow loading, mutation intent, request limits, unavailable panels, origin/Host
 checks, redirects, sanitized failures, qualified database checks, startup ordering,
-changed-asset refusal, oversized upstream responses and refusal after readiness failure.
+changed-asset refusal, oversized upstream responses, refusal after readiness failure,
+private listener boundaries, and executed Node VM DOM tests for both generated
+private page scripts. Those tests verify automatic task/workflow-board reads,
+rendered real task IDs/counts, and tokenless mutation headers. They do not run a
+live browser or a browser CSS rendering engine; private pages serve a `[hidden]`
+override so the retained form layout cannot reveal the hidden login form.
 
 The independently reviewed startup command was exercised against the retained
 installation on 2026-10-10. Both API and Workbench reported ready; authenticated
