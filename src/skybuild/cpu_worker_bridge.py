@@ -130,6 +130,10 @@ def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _attempt_log_path(state_dir: Path, attempt_id: str) -> Path:
+    return state_dir / ('worker-' + _digest(attempt_id.encode()) + '.log')
+
+
 def _write_exclusive(path: Path, data: bytes, mode: int = 0o600) -> None:
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
     with os.fdopen(descriptor, 'wb') as stream:
@@ -345,11 +349,12 @@ def prepare_worker(client: Any, plan: CPUWorkerPlan, *, action_id: str, operatio
     worker_state = plan.assignment_dir
     if worker_state.parent.resolve() != plan.external_state_dir.resolve():
         raise CPUWorkerBridgeError('Assignment snapshot must be a direct private state child')
+    attempt_id = preclaim['attempt_id']
     stdin_path = plan.external_state_dir / 'stdin.empty'
     if not stdin_path.exists():
         _write_exclusive(stdin_path, b'')
     _file_bytes(stdin_path, limit=1, private=True, allow_empty=True)
-    log_path = plan.external_state_dir / 'worker.log'
+    log_path = _attempt_log_path(plan.external_state_dir, attempt_id)
     if not log_path.exists():
         _write_exclusive(log_path, b'')
     if log_path.is_symlink() or not log_path.is_file() or log_path.stat().st_uid != os.geteuid() or log_path.stat().st_mode & 0o077:
@@ -369,7 +374,6 @@ def prepare_worker(client: Any, plan: CPUWorkerPlan, *, action_id: str, operatio
                                       'ca_sha256': _digest(ca_bytes), 'source_head': source_head},
                                      sort_keys=True, separators=(',', ':')).encode())
     task_id = assignment.get('task_id')
-    attempt_id = preclaim['attempt_id']
     remaining_seconds = int((approved_until - datetime.now(timezone.utc)).total_seconds())
     if remaining_seconds < 2:
         raise CPUWorkerBridgeError('Approval interval is too short for a bounded worker launch')
