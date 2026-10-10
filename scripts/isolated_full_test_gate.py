@@ -976,10 +976,49 @@ def _check_candidate_inspect(row: dict, *, name: str, run_id: str, container_id:
             or not _has_no_new_privileges(host.get("SecurityOpt"))
             or set(host.get("Tmpfs") or {}) != {"/scratch"}
             or not _tmpfs_matches_options(host.get("Tmpfs"), "/scratch",
-                                      {"rw", "exec", "nosuid", "nodev", "size=2147483648",
+                                      {"rw", "exec", "nosuid", "nodev", "size=2g",
                                        "uid=10001", "gid=10001", "mode=0700"})
             or host.get("ExtraHosts") != ["db:" + postgres_ip]):
-        raise GateError("Candidate container lacks reviewed isolation/resource settings")
+        mismatches = []
+        checks = (
+            ("entrypoint", config.get("Entrypoint") == ["/runner/entrypoint.py"],
+             ["/runner/entrypoint.py"], config.get("Entrypoint")),
+            ("readonly_rootfs", host.get("ReadonlyRootfs") is True, True, host.get("ReadonlyRootfs")),
+            ("network_mode", host.get("NetworkMode") == network, network, host.get("NetworkMode")),
+            ("memory", host.get("Memory") == 4 * 1024**3, 4 * 1024**3, host.get("Memory")),
+            ("memory_swap", host.get("MemorySwap") == 4 * 1024**3, 4 * 1024**3, host.get("MemorySwap")),
+            ("nano_cpus", host.get("NanoCpus") == 2_000_000_000, 2_000_000_000,
+             host.get("NanoCpus")),
+            ("pids_limit", host.get("PidsLimit") == 256, 256, host.get("PidsLimit")),
+            ("shm_size", host.get("ShmSize") == 256 * 1024**2, 256 * 1024**2,
+             host.get("ShmSize")),
+            ("privileged", host.get("Privileged") is False, False, host.get("Privileged")),
+            ("log_config", log_config.get("Type") == "local"
+             and log_config.get("Config") == {"max-size": "128m", "max-file": "2"},
+             {"Type": "local", "Config": {"max-size": "128m", "max-file": "2"}}, log_config),
+            ("pid_mode", host.get("PidMode") != "host", "not host", host.get("PidMode")),
+            ("ipc_mode", host.get("IpcMode") != "host", "not host", host.get("IpcMode")),
+            ("port_bindings", host.get("PortBindings") in ({}, None), "empty or absent",
+             host.get("PortBindings")),
+            ("cap_add", host.get("CapAdd") in ([], None), "empty or absent", host.get("CapAdd")),
+            ("cap_drop", "ALL" in host.get("CapDrop", []), ["ALL"], host.get("CapDrop")),
+            ("security_opt", _has_no_new_privileges(host.get("SecurityOpt")),
+             ["no-new-privileges"], host.get("SecurityOpt")),
+            ("tmpfs_targets", set(host.get("Tmpfs") or {}) == {"/scratch"}, ["/scratch"],
+             sorted(host.get("Tmpfs") or {})),
+            ("tmpfs_options", _tmpfs_matches_options(
+                host.get("Tmpfs"), "/scratch",
+                {"rw", "exec", "nosuid", "nodev", "size=2g", "uid=10001", "gid=10001", "mode=0700"}),
+             ["rw", "exec", "nosuid", "nodev", "size=2g", "uid=10001", "gid=10001", "mode=0700"],
+             (host.get("Tmpfs") or {}).get("/scratch")),
+            ("extra_hosts", host.get("ExtraHosts") == ["db:" + postgres_ip],
+             ["db:" + postgres_ip], host.get("ExtraHosts")),
+        )
+        mismatches = [{"field": field, "expected": expected, "actual": actual}
+                      for field, matched, expected, actual in checks if not matched]
+        if mismatches:
+            raise GateError("Candidate inspect mismatches: "
+                            + json.dumps(mismatches, sort_keys=True, separators=(",", ":")))
     networks = (row.get("NetworkSettings", {}).get("Networks") or {})
     if set(networks) != {network}:
         raise GateError("Candidate is attached to an unapproved Docker network")
@@ -1086,7 +1125,7 @@ def _check_firewall_inspect(row: dict, *, name: str, run_id: str, container_id: 
             or host.get("CapAdd") != ["NET_ADMIN"] or "ALL" not in host.get("CapDrop", [])
             or host.get("Privileged") is not False or host.get("ReadonlyRootfs") is not True
             or not _tmpfs_matches_options(host.get("Tmpfs"), "/run",
-                                      {"rw", "nosuid", "nodev", "size=1048576", "mode=0755"})
+                                      {"rw", "nosuid", "nodev", "size=1m", "mode=0755"})
             or set(host.get("Tmpfs") or {}) != {"/run"}
             or host.get("Memory") != 128 * 1024**2 or host.get("MemorySwap") != 128 * 1024**2
             or host.get("NanoCpus") != 250_000_000 or host.get("PidsLimit") != 32
@@ -1643,7 +1682,10 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path | None, key_path
             _ACTIVE_POLICY_AUTHORIZATION = None
         exit_code = 1
         failure = type(error).__name__
-        journal.event("gate_execution_failed", error=failure)
+        failure_fields = {"error": failure}
+        if isinstance(error, GateError):
+            failure_fields["detail"] = str(error)[:2048]
+        journal.event("gate_execution_failed", **failure_fields)
         if ids["candidate"] and attempted["candidate"]:
             try:
                 row = _container_info(resource_names["candidate"], run_id, ids["candidate"], "candidate")
