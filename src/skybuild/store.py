@@ -86,6 +86,42 @@ def _body(value, fields):
         _invalid('Body exceeds 64 KiB')
 
 
+MANAGED_METADATA_KEYS = frozenset({'_skybuild_workflow', '_skybuild_completion'})
+USER_METADATA_LIMIT = 16 * 1024
+MANAGED_METADATA_LIMIT = 64 * 1024
+
+
+def _validate_metadata(value):
+    """Keep caller data bounded separately from internally managed evidence.
+
+    Public mutations reject reserved keys before reaching this shared validator.
+    Nested workflow records keep their own 16 KiB limits. The larger aggregate
+    budget lets valid user data coexist with bounded task and acceptance records.
+    """
+    if not isinstance(value, dict):
+        _invalid('metadata must be an object')
+    user = {key: item for key, item in value.items() if key not in MANAGED_METADATA_KEYS}
+    if len(_json(user).encode()) > USER_METADATA_LIMIT:
+        _invalid('User metadata must be an object of at most 16 KiB')
+    if len(_json(value).encode()) > MANAGED_METADATA_LIMIT:
+        _invalid('Managed task metadata exceeds 64 KiB')
+    for key in MANAGED_METADATA_KEYS & value.keys():
+        if not isinstance(value[key], dict):
+            _invalid('Reserved task metadata must contain objects')
+    workflow = value.get('_skybuild_workflow', {})
+    if 'generation' in workflow and (type(workflow['generation']) is not int or
+                                     not 0 <= workflow['generation'] < 2**63):
+        _invalid('Workflow generation must be a nonnegative bigint')
+    if 'petri' in workflow:
+        from .workflow import TaskToken
+        petri = workflow['petri']
+        if (not isinstance(petri, dict) or type(petri.get('schema_version')) is not int
+                or petri['schema_version'] != 1 or not isinstance(petri.get('token'), dict)):
+            _invalid('Petri metadata requires a versioned task token')
+        TaskToken.from_dict(petri['token'])
+    return value
+
+
 def _public(value):
     if isinstance(value, dict):
         return {key: _public(item) for key, item in value.items()}
@@ -279,8 +315,7 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
                     _text(item, field, 4096)
             if field == 'dependencies':
                 values[field] = sorted(set(items))
-        if not isinstance(values['metadata'], dict) or len(_json(values['metadata']).encode()) > 16384:
-            _invalid('metadata must be an object of at most 16 KiB')
+        _validate_metadata(values['metadata'])
         if values['status'] != 'done' and not (str(values['next_action'] or '').strip() or str(values['blocker'] or '').strip()):
             _invalid('Unfinished tasks need a next action or blocker')
         return values
@@ -546,8 +581,7 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
                 metadata = json.loads(json.dumps(task['metadata']))
                 metadata.setdefault('_skybuild_workflow', {})['petri'] = {
                     'schema_version': 1, 'token': token.to_dict(), 'place_entered_at': datetime.now(timezone.utc).isoformat()}
-                if len(_json(metadata).encode()) > 16384:
-                    _invalid('metadata must be an object of at most 16 KiB')
+                _validate_metadata(metadata)
                 connection.execute('UPDATE tasks SET metadata = %s, revision = revision + 1 WHERE project_id = %s AND task_id = %s',
                                    (Jsonb(metadata), project_id, task_id))
                 after = self._task(connection, project_id, task_id)
@@ -574,8 +608,7 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
                 'task_revision': after_token.revision, 'input_generation': after_token.input_generation,
                 'attempt_id': after_token.attempt_id, 'claim_fence': after_token.claim_fence}
         # Validate the complete metadata budget, including retained legacy data.
-        if len(_json(metadata).encode()) > 16384:
-            _invalid('metadata must be an object of at most 16 KiB')
+        _validate_metadata(metadata)
         status = {Place.READY: 'ready', Place.WORKING: 'in-progress', Place.VALIDATING: 'in-progress',
                   Place.INTEGRATING: 'in-progress', Place.DONE: 'done', Place.DEFERRED: 'deferred', Place.HOLD: 'blocked'}[after_token.place]
         connection.execute('UPDATE tasks SET metadata = %s, status = %s, phase = %s, responsible = %s, '
