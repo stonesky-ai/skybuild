@@ -594,6 +594,23 @@ def _validate_permit(plan: CPUWorkerPlan, assignment: dict, assignment_digest: s
     return permit, approved_until
 
 
+def _worker_interpreter(checkout: Path) -> tuple[Path, str]:
+    """Keep virtual-environment identity while pinning the executable bytes."""
+    interpreter = Path(sys.executable).absolute()
+    executable = interpreter.resolve(strict=True)
+    if not stat.S_ISREG(executable.stat().st_mode) or not os.access(interpreter, os.X_OK):
+        raise CPUWorkerBridgeError('Trusted Python interpreter is unavailable')
+    digest = _digest(_file_bytes(executable, limit=256 * 1024 * 1024,
+                                 private=False, owner=False))
+    probe = subprocess.run(
+        [str(interpreter), '-I', '-c', 'import skybuild; print(skybuild.__file__)'],
+        cwd=checkout, env={key: os.environ[key] for key in _SAFE_ENV if key in os.environ},
+        capture_output=True, timeout=5, check=False)
+    if (probe.returncode or probe.stdout.decode().strip() != str(checkout / 'src/skybuild/__init__.py')):
+        raise CPUWorkerBridgeError('Worker interpreter does not import the approved checkout')
+    return interpreter, digest
+
+
 def prepare_worker(plan: CPUWorkerPlan, *, action_id: str, operation_id: str) -> PreparedCPUWorker:
     """Validate immutable inputs, prepare API intent, then return one fixed JobSpec."""
     for name, value in [('project_id', plan.project_id), ('worker_id', plan.worker_id),
@@ -630,12 +647,7 @@ def prepare_worker(plan: CPUWorkerPlan, *, action_id: str, operation_id: str) ->
     ca_bytes = _file_bytes(plan.ca_file, limit=1_048_576, private=False, owner=False)
     ca_digest = _digest(ca_bytes)
     permit, approved_until = _validate_permit(plan, assignment, assignment_digest)
-    interpreter = Path(sys.executable).resolve(strict=True)
-    interpreter_info = interpreter.stat()
-    if not stat.S_ISREG(interpreter_info.st_mode) or not os.access(interpreter, os.X_OK):
-        raise CPUWorkerBridgeError('Trusted Python interpreter is unavailable')
-    interpreter_digest = _digest(_file_bytes(interpreter, limit=256 * 1024 * 1024,
-                                             private=False, owner=False))
+    interpreter, interpreter_digest = _worker_interpreter(checkout)
     controller_head, controller_source_digest, controller_profile_digest = _controller_pin(
         plan, interpreter_digest)
     if not re.fullmatch(r'https://[^\s]+', plan.url):
@@ -659,7 +671,7 @@ def prepare_worker(plan: CPUWorkerPlan, *, action_id: str, operation_id: str) ->
     worker_id = plan.worker_id
     if not isinstance(preclaim.get('message_id'), str) or not preclaim['message_id']:
         raise CPUWorkerBridgeError('Fenced preclaim has no message identity')
-    args = (str(interpreter), '-m', 'skybuild.auto_patch_worker', '--url', plan.url,
+    args = (str(interpreter), '-I', '-m', 'skybuild.auto_patch_worker', '--url', plan.url,
             '--project', plan.project_id, '--worker', worker_id, '--dispatcher', plan.dispatcher_id,
             '--message-id', preclaim.get('message_id'), '--checkout', str(checkout),
             '--token-file', str(plan.worker_token_file), '--git-token-file', str(plan.git_token_file),
@@ -894,7 +906,7 @@ def _launch_worker(client: Client, prepared: PreparedCPUWorker) -> dict:
             raise CPUWorkerBridgeError('Worker import checkout differs from the controller source root')
         if _source_head(prepared.plan.checkout) != prepared.source_head:
             raise CPUWorkerBridgeError('Trusted source checkout changed after preparation')
-        interpreter = Path(prepared.spec.argv[0])
+        interpreter = Path(prepared.spec.argv[0]).resolve(strict=True)
         if _digest(_file_bytes(interpreter, limit=256 * 1024 * 1024,
                                private=False, owner=False)) != prepared.interpreter_digest:
             raise CPUWorkerBridgeError('Trusted interpreter changed after preparation')

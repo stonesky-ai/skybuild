@@ -1,5 +1,7 @@
 import json
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 from types import SimpleNamespace
@@ -13,6 +15,21 @@ def test_worker_source_profile_matches_checkout_bytes():
     checkout = Path(bridge.__file__).resolve().parents[2]
     for relative, expected in bridge.WORKER_SOURCE.items():
         assert bridge._digest((checkout / relative).read_bytes()) == expected, relative
+
+
+def test_worker_interpreter_keeps_virtualenv_in_sanitized_launch(tmp_path):
+    checkout = Path(bridge.__file__).resolve().parents[2]
+    interpreter, digest = bridge._worker_interpreter(checkout)
+    assert interpreter == Path(sys.executable).absolute()
+    assert digest == bridge._digest(interpreter.resolve().read_bytes())
+    result = subprocess.run([str(interpreter), '-I', '-m', 'skybuild.auto_patch_worker', '--help'],
+                            cwd=tmp_path, env={}, capture_output=True, timeout=5)
+    assert result.returncode == 0, result.stderr.decode()
+
+
+def test_worker_interpreter_rejects_another_checkout(tmp_path):
+    with pytest.raises(CPUWorkerBridgeError, match='approved checkout'):
+        bridge._worker_interpreter(tmp_path)
 
 
 def test_empty_stdin_is_allowed_only_when_explicit(tmp_path):
