@@ -356,11 +356,15 @@ def create_app(store: Any) -> FastAPI:
     @app.get(base + "/tasks")
     def list_tasks(project_id: ProjectPath, actor: Actor, limit: Limit = 100, offset: Offset = 0,
                    after_task_id: Identifier | None = None, by_id: bool = False) -> list:
-        return store.list_tasks(actor, project_id, limit=limit, offset=offset, after_task_id=after_task_id, by_id=by_id)
+        from .store import Store
+        tasks = store.list_tasks(actor, project_id, limit=limit, offset=offset, after_task_id=after_task_id, by_id=by_id)
+        return [{**task, **Store.workflow_projection(task)} for task in tasks]
 
     @app.get(base + "/tasks/{task_id}")
     def get_task(project_id: ProjectPath, task_id: RecordPath, actor: Actor) -> dict:
-        return store.get_task(actor, project_id, task_id)
+        from .store import Store
+        task = store.get_task(actor, project_id, task_id)
+        return {**task, **Store.workflow_projection(task)}
 
     @app.get(base + "/tasks/{task_id}/workflow")
     def task_workflow(project_id: ProjectPath, task_id: RecordPath, actor: Actor) -> dict:
