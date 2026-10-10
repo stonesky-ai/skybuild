@@ -20,7 +20,9 @@ launch. It does not request or claim physical stop capability.
 Before each API mutation or local start, the bridge compares the loaded bridge,
 dispatch, Client, contracts, and JobUnitManager modules with bytes at a clean
 controller Git HEAD. It also requires an owner-controlled, mode-0600 profile
-manifest outside both source checkouts. The manifest schema is
+manifest outside the controller checkout and private worker attempt state. The
+worker import checkout must equal the verified controller source root; the
+candidate clone is made separately under private attempt state. The manifest schema is
 `skybuild.cpu-worker-controller-profile.v1` and has exactly these fields:
 
 ```json
@@ -42,7 +44,10 @@ manifest outside both source checkouts. The manifest schema is
 
 The manifest must be provisioned from an independently reviewed source head;
 the bridge refuses an absent, malformed, stale, or mismatched manifest. No
-manifest provisioning or live launch is part of this source change. Same-UID
-tampering is outside this boundary. The finite TLA+ model covers one action,
+manifest provisioning or live launch is part of this source change. This branch
+does not contain the reviewed auto-worker module set; its source checks remain
+default-deny until the exact reviewed worker files are installed and the
+combined `client.py` matches the pinned digest. Same-UID tampering is outside
+this boundary. The finite TLA+ model covers one action,
 one invocation, a replacement unit, terminal observation, and task advancement;
 TLC execution remains pending a bounded remote run.
