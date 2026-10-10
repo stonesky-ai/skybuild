@@ -163,6 +163,32 @@ class Client:
     def get_task(self, project_id: str, task_id: str) -> dict:
         return self.request("GET", self._path(project_id, f"tasks/{self._segment(task_id)}"))
 
+    def claim_task(self, project_id: str, task_id: str, *, expected_revision: int,
+                   idempotency_key: str | None = None, lease_seconds: int = 60) -> dict:
+        """Claim work through the existing atomic claim endpoint."""
+        if type(lease_seconds) is not int or not 1 <= lease_seconds <= 300:
+            raise ValueError("Claim lease must be 1–300 whole seconds")
+        return self.request("POST", self._path(project_id, f"tasks/{self._segment(task_id)}/claim"),
+                            body={"lease_seconds": lease_seconds}, revision=expected_revision,
+                            idempotency_key=idempotency_key)
+
+    def task_workflow(self, project_id: str, task_id: str) -> dict:
+        """Read task state and permitted actions without external operations."""
+        return self.request("GET", self._path(project_id, f"tasks/{self._segment(task_id)}/workflow"))
+
+    def workflow_transition(self, project_id: str, task_id: str, event: str, body: dict | None = None, *,
+                            expected_revision: int, idempotency_key: str | None = None) -> dict:
+        """Submit caller details. Store computes all guards in one transaction."""
+        from .workflow import TRANSITIONS
+
+        if event not in {spec.event for spec in TRANSITIONS} | {"initialize"}:
+            raise ValueError("Unknown workflow event")
+        if body is not None and (not isinstance(body, dict) or "event" in body):
+            raise ValueError("Workflow details cannot replace the event")
+        return self.request("POST", self._path(project_id, f"tasks/{self._segment(task_id)}/workflow"),
+                            body={"event": event, **(body or {})}, revision=expected_revision,
+                            idempotency_key=idempotency_key)
+
     def execution_status(self, project_id: str, task_id: str, *, limit: int = 20) -> dict:
         """Read one task's bounded cached evidence; never probe or reconcile."""
         return self.request("GET", self._path(project_id, f"tasks/{self._segment(task_id)}/execution-status"),
