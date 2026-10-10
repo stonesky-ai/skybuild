@@ -47,7 +47,7 @@ def test_transient_unit_is_not_replayed():
     data="Id=skybuild-watch.service\nFragmentPath="+item["fragment"]+"\nTransient=yes\nActiveState=inactive\nSubState=dead"
     with patch.object(services.socket,"gethostname",return_value="wonko"), patch.object(services.Path,"exists",return_value=True), patch.object(services,"command",return_value=data):
         result = services.local(item,"ensure-running")
-        assert result["skipped"] and result["observation_only"]
+        assert result["skipped"] and result["observation_only"] and not result["ok"]
 
 
 def test_host_failure_does_not_hide_other_hosts(tmp_path,capsys):
@@ -103,3 +103,19 @@ def test_missing_watch_blocks_start(container):
         with pytest.raises(services.ServiceError,match="watch"):
             services.local(container,"start")
         assert command.call_count==2
+
+
+def test_stop_is_idempotent_for_an_initially_stopped_container(container):
+    with patch.object(services.socket,"gethostname",return_value="wonko"), patch.object(services,"command",side_effect=["wonko",inspected(container,running=False)]) as command:
+        result = services.local(container,"stop")
+        assert result["ok"] and result["desired_state"] == "stopped"
+        assert command.call_count == 2
+
+
+def test_stop_skips_an_inactive_observation_without_failure():
+    item=dict(kind="unit",host="wonko",name="skybuild-watch.service",fragment="/run/user/1000/systemd/transient/skybuild-watch.service")
+    data="Id=skybuild-watch.service\nFragmentPath="+item["fragment"]+"\nTransient=yes\nActiveState=inactive\nSubState=dead"
+    with patch.object(services.socket,"gethostname",return_value="wonko"), patch.object(services.Path,"exists",return_value=True), patch.object(services,"command",return_value=data) as command:
+        result = services.local(item,"stop")
+        assert result["skipped"] and result["ok"]
+        assert command.call_count == 1

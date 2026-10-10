@@ -104,7 +104,7 @@ def local(item, action):
             raise ServiceError("User service identity does not match")
         running = data.get("ActiveState") == "active" and (data.get("SubState") == "running" or (item.get("oneshot") is True and data.get("SubState") == "exited"))
         if item.get("observation_only") is True or data.get("Transient") == "yes":
-            return {"state": data.get("SubState", "unknown"), "ok": running if action == "status" else True, "managed": False, "skipped": action != "status", "observation_only": True}
+            return {"state": data.get("SubState", "unknown"), "ok": True if action == "stop" else running, "managed": False, "skipped": action != "status", "observation_only": True}
         if action != "status":
             if action == "stop":
                 unit("stop", item["name"])
@@ -132,9 +132,12 @@ def local(item, action):
     if row["HostConfig"].get("Memory") != item["memory_max_bytes"]:
         raise ServiceError("Container memory limit does not match")
     running = row["State"]["Running"]
-    if action == "stop" and running:
-        command(["docker", "stop", "--time", "10", item["id"]])
-        result = local(item, "status")
+    if action == "stop":
+        if running:
+            command(["docker", "stop", "--time", "10", item["id"]])
+            result = local(item, "status")
+        else:
+            result = {"state": "stopped", "ready": False, "health": None, "managed": True}
         result.update(desired_state="stopped", ok=result["state"] == "stopped")
         return result
     if action in {"start", "ensure-running"} and not running:
