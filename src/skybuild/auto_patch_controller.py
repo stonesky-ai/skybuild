@@ -102,6 +102,11 @@ def _save_new(path: Path, value: dict) -> None:
         stream.write("\n")
         stream.flush()
         os.fsync(stream.fileno())
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def _cpu_controls(client: Client, project: str) -> None:
@@ -234,7 +239,8 @@ def run(*, repo: Path, manifest: Path, project: str, dispatcher: str, url: str,
                                         if key in os.environ})
             unit = spec.unit()
             record = {"task_id": item["task_id"], "worker": item["worker"],
-                      "attempt_id": received["attempt_id"], "unit": unit, "phase": "launch_intent",
+                      "assignment_id": item["assignment_id"], "attempt_id": received["attempt_id"],
+                      "unit": unit, "phase": "launch_intent",
                       "log": str(log)}
             _save_new(state_dir / ("worker-" + item["worker"] + ".launch-intent.json"), record)
             owned.append(record)
@@ -247,8 +253,19 @@ def run(*, repo: Path, manifest: Path, project: str, dispatcher: str, url: str,
     _observe_owned(manager, owned, deadline)
     results = []
     for record in owned:
-        submitted = (record.get("phase") == "completed" and record.get("exit_status") == 0
-                     and (state_dir / ("worker-" + record["worker"]) / "submitted.json").is_file())
+        submitted_path = state_dir / ("worker-" + record["worker"]) / "submitted.json"
+        try:
+            submitted_record = json.loads(submitted_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            submitted_record = None
+        submitted = (record.get("phase") == "completed" and record.get("result") == "success"
+                     and record.get("exit_status") == 0
+                     and isinstance(submitted_record, dict)
+                     and submitted_record.get("assignment_id") == record["assignment_id"]
+                     and submitted_record.get("sent") is True
+                     and isinstance(submitted_record.get("message_id"), str)
+                     and isinstance(submitted_record.get("head_sha"), str)
+                     and re.fullmatch(r"[0-9a-f]{40}", submitted_record.get("head_sha", "")) is not None)
         results.append({**record, "submitted": submitted})
     output = {"schema": "skybuild.auto-patch-run.v1", "selected": len(selected),
               "workers": results, "state_dir": str(state_dir),
