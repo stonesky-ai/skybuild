@@ -1,0 +1,123 @@
+"""Policy and real Git behavior for the bounded automatic CPU patch route."""
+
+import hashlib
+from pathlib import Path
+import subprocess
+
+import pytest
+
+from skybuild import auto_patch_controller as controller
+from skybuild import auto_patch_worker as worker
+
+
+def task(task_id, assignment_id, digest, *, priority=1, approved=True):
+    return {"task_id": task_id, "status": "ready", "revision": 2, "priority": priority,
+            "acceptance_criteria": ["Apply the deterministic approved patch; verify exact bytes."],
+            "metadata": {"_skybuild_cpu_patch": {
+                "schema": "skybuild.cpu-patch.v1", "sha256": digest,
+                "assignment_id": assignment_id if approved else "another-assignment"},
+                "_skybuild_workflow": {"petri": {"token": {"place": "ready",
+                    "pending_action": None, "superseded": False}}}}}
+
+
+class Client:
+    def __init__(self, tasks):
+        self.tasks = tasks
+
+    def whoami(self):
+        return {"principal_id": "pilot_dispatcher", "is_admin": False,
+                "grants": {"skybuild": ["tasks:read", "cord:send", "cord:handle", "cord:read"]}}
+
+    def get_task(self, project, task_id):
+        assert project == "skybuild"
+        return self.tasks[task_id]
+
+
+def test_selector_chooses_two_distinct_ready_tasks_and_rejects_unapproved(tmp_path, monkeypatch):
+    patch = tmp_path / "approved.patch"
+    patch.write_bytes(b"bounded patch\n")
+    patch.chmod(0o600)
+    digest = hashlib.sha256(patch.read_bytes()).hexdigest()
+    candidates = []
+    tasks = {}
+    for index, (who, path, priority, approved) in enumerate([
+            ("worker_a", "docs/a.md", 2, True),
+            ("worker_b", "docs/b.md", 1, True),
+            ("worker_c", "docs/c.md", 0, False)], 1):
+        name = f"SKYBUILD-CPU-{index}"
+        assignment_id = f"CPU-{index}"
+        brief_path = f"docs/design/assignments/cpu-{index}.json"
+        candidates.append({"worker": who, "brief_path": brief_path,
+                           "patch": str(patch), "patch_sha256": digest,
+                           "token_file": str(tmp_path / f"token-{index}")})
+        tasks[name] = task(name, assignment_id, digest, priority=priority, approved=approved)
+
+    def envelope(_repo, brief_path, *, worker, dispatcher, base_ref):
+        index = int(Path(brief_path).stem.split("-")[-1])
+        assert dispatcher == "pilot_dispatcher" and base_ref == "refs/heads/dev-006"
+        return {"task_id": f"SKYBUILD-CPU-{index}", "assignment_id": f"CPU-{index}",
+                "branch": f"task/cpu-{index}", "base_sha": "a" * 40,
+                "owned_paths": [f"docs/{'abc'[index - 1]}.md"]}
+
+    monkeypatch.setattr(controller, "build_envelope", envelope)
+    selected = controller.select(Client(tasks), tmp_path, candidates, project="skybuild",
+                                 dispatcher="pilot_dispatcher", base_ref="refs/heads/dev-006")
+    assert [(item["task_id"], item["worker"]) for item in selected] == [
+        ("SKYBUILD-CPU-2", "worker_b"), ("SKYBUILD-CPU-1", "worker_a")]
+
+
+def test_worker_applies_patch_and_checks_real_committed_bytes(tmp_path, monkeypatch):
+    bare, source, destination = tmp_path / "origin.git", tmp_path / "source", tmp_path / "attempt" / "source"
+
+    def git(repo, *args):
+        return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True).stdout
+
+    git(None, "init", "--bare", str(bare))
+    source.mkdir()
+    git(source, "init")
+    git(source, "config", "user.name", "Test Author")
+    git(source, "config", "user.email", "test@example.invalid")
+    (source / "README.md").write_text("Original\n")
+    git(source, "add", "README.md")
+    git(source, "commit", "-m", "base")
+    base = git(source, "rev-parse", "HEAD").decode().strip()
+    git(source, "remote", "add", "origin", str(bare))
+    git(source, "push", "origin", "HEAD:refs/heads/dev-006")
+    (source / "README.md").write_text("Original\nUseful new note.\n")
+    patch = git(source, "diff", "--", "README.md")
+    git(source, "checkout", "--", "README.md")
+    patch_file = tmp_path / "approved.patch"
+    patch_file.write_bytes(patch)
+    with pytest.raises(worker.PatchWorkerError, match="outside exact assigned files"):
+        worker._patch_paths(source, base, patch_file, ["OTHER.md"])
+    destination.parent.mkdir()
+    original = worker._git
+
+    def local_git(repo, *args, timeout=30):
+        if args[:3] == ("remote", "get-url", "origin") or args[:4] == (
+                "remote", "get-url", "--push", "origin"):
+            return b"https://github.com/stonesky-ai/skybuild.git\n"
+        if args[:2] == ("clone", "--no-checkout"):
+            args = ("clone", "--no-checkout", str(bare), args[-1])
+        return original(repo, *args, timeout=timeout)
+
+    monkeypatch.setattr(worker, "_git", local_git)
+    head, paths = worker._clone_and_apply(source, destination,
+                                          {"base_sha": base, "branch": "task/approved-cpu-note",
+                                           "task_id": "SKYBUILD-CPU-NOTE",
+                                           "owned_paths": ["README.md"]}, patch)
+    assert paths == ["README.md"]
+    assert git(destination, "show", "HEAD:README.md") == b"Original\nUseful new note.\n"
+    assert git(destination, "rev-list", "--parents", "-n", "1", head).decode().split() == [head, base]
+
+
+def test_worker_refuses_changed_patch_and_unapproved_task(tmp_path):
+    patch = tmp_path / "approved.patch"
+    patch.write_bytes(b"changed bytes")
+    patch.chmod(0o600)
+    with pytest.raises(worker.PatchWorkerError, match="changed"):
+        worker._patch_bytes(patch, hashlib.sha256(b"approved bytes").hexdigest())
+    with pytest.raises(worker.PatchWorkerError, match="no matching"):
+        worker._approved_task(task("SKYBUILD-CPU-1", "CPU-1", "a" * 64, approved=False),
+                              {"task_id": "SKYBUILD-CPU-1", "task_revision": 2,
+                               "assignment_id": "CPU-1"}, "a" * 64)
