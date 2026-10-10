@@ -29,6 +29,7 @@ FIREWALL_ALIASES = {
     "iptables-save": "iptables-nft-save", "ip6tables-save": "ip6tables-nft-save",
 }
 FIREWALL_PLUGINS = ("libxt_conntrack.so",)
+GIT_PACKAGE_MANIFEST = Path(__file__).with_name("gate_images") / "trusted_git_packages.json"
 class BuildError(RuntimeError):
     """Local helper image inputs are incomplete or do not match the reviewed gate."""
 
@@ -137,6 +138,56 @@ def stage_firewall_payload(root: Path) -> dict:
     return manifest
 
 
+def stage_git_payload(root: Path, package_dir: Path) -> dict:
+    """Unpack only the SHA-pinned Git/runtime packages bootstrapped from Debian trixie."""
+    manifest = json.loads(GIT_PACKAGE_MANIFEST.read_bytes())
+    if set(manifest) != {"schema", "base_image_id", "repository_suite", "packages"}:
+        raise BuildError("trusted Git package manifest has an unexpected shape")
+    if (manifest["schema"] != "skybuild.isolated-gate-debian-git-packages.v1"
+            or manifest["base_image_id"] != PYTHON_BASE_ID
+            or manifest["repository_suite"] != "Debian trixie"
+            or not isinstance(manifest["packages"], list) or not manifest["packages"]):
+        raise BuildError("trusted Git package manifest does not match the pinned Debian base")
+    expected_files = {row.get("file") for row in manifest["packages"]
+                      if isinstance(row, dict) and isinstance(row.get("file"), str)}
+    actual_files = {path.name for path in package_dir.iterdir()}
+    if (len(expected_files) != len(manifest["packages"]) or actual_files != expected_files
+            or any(not path.is_file() or path.is_symlink() for path in package_dir.iterdir())):
+        raise BuildError("offline Git package directory differs from the exact package allowlist")
+    root.mkdir(mode=0o700, parents=True, exist_ok=False)
+    package_rows = []
+    for row in manifest["packages"]:
+        if (set(row) != {"file", "name", "version", "architecture", "sha256"}
+                or not re.fullmatch(r"[A-Za-z0-9.+_%~-]+\.deb", row["file"])
+                or not re.fullmatch(r"[0-9a-f]{64}", row["sha256"])):
+            raise BuildError("trusted Git package record is malformed")
+        package = package_dir / row["file"]
+        if _digest(package) != row["sha256"]:
+            raise BuildError("trusted Git package hash differs from the reviewed Debian payload")
+        for field in ("Package", "Version", "Architecture"):
+            actual = _run(["dpkg-deb", "-f", str(package), field], timeout=10).stdout.strip()
+            expected = row["name" if field == "Package" else field.lower()]
+            if actual != expected:
+                raise BuildError("trusted Git package metadata differs from the reviewed Debian payload")
+        _run(["dpkg-deb", "-x", str(package), str(root)], timeout=30)
+        package_rows.append(dict(row))
+    if (not (root / "usr/bin/git").is_file()
+            or not any((root / "usr/lib/git-core").glob("git-upload-pack*"))
+            or not (root / "usr/share/git-core/templates").is_dir()):
+        raise BuildError("trusted Debian package payload is missing Git runtime components")
+    files = {}
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            files[relative] = "symlink:" + os.readlink(path)
+        elif path.is_file():
+            files[relative] = _digest(path)
+        elif not path.is_dir():
+            raise BuildError("trusted Git package payload contains a special file")
+    return {"schema": "skybuild.isolated-gate-git-payload.v1", "base_image_id": PYTHON_BASE_ID,
+            "repository_suite": manifest["repository_suite"], "packages": package_rows, "files": files}
+
+
 def _image_digest(image_id: str) -> str:
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
         raise BuildError("Docker did not return an immutable image ID")
@@ -223,7 +274,7 @@ def _prepare_runner_environment(context: Path, uv_cache: Path) -> dict:
 
 
 def build(checkout: Path, output: Path, *, gate_policy_sha256: str, uv_binary: Path,
-          uv_cache: Path, runner_tag: str, firewall_tag: str) -> dict:
+          uv_cache: Path, git_package_dir: Path, runner_tag: str, firewall_tag: str) -> dict:
     checkout = checkout.resolve(strict=True)
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
     if not re.fullmatch(r"[0-9a-f]{64}", gate_policy_sha256):
@@ -260,6 +311,8 @@ def build(checkout: Path, output: Path, *, gate_policy_sha256: str, uv_binary: P
             "UV_VERSION": UV_VERSION,
         }
         runner_environment = _prepare_runner_environment(context, uv_cache)
+        git_rootfs = context / "runner-git-rootfs"
+        git_manifest = stage_git_payload(git_rootfs, git_package_dir.resolve(strict=True))
         runner_id = _build_image(context, "Dockerfile.runner", runner_tag, PYTHON_BASE_ID,
                                  runner_args)
         rootfs = context / "firewall-rootfs"
@@ -274,6 +327,7 @@ def build(checkout: Path, output: Path, *, gate_policy_sha256: str, uv_binary: P
         "python_base_image_id": PYTHON_BASE_ID,
         "firewall_payload": manifest,
         "runner_environment": runner_environment,
+        "git_payload": git_manifest,
         "runner_build": runner_args,
         "network": "none",
         "candidate_installation": False,
@@ -288,6 +342,7 @@ def main() -> int:
     parser.add_argument("--gate-policy-sha256", required=True)
     parser.add_argument("--uv-binary", type=Path, default=Path.home() / ".local/bin/uv")
     parser.add_argument("--uv-cache", type=Path, default=Path.home() / ".cache/uv")
+    parser.add_argument("--git-package-dir", type=Path, required=True)
     parser.add_argument("--runner-tag", required=True)
     parser.add_argument("--firewall-tag", required=True)
     parser.add_argument("--build", action="store_true",
@@ -297,6 +352,7 @@ def main() -> int:
         parser.error("pass --build only after independent source review and owner build approval")
     result = build(args.checkout, args.output, gate_policy_sha256=args.gate_policy_sha256,
                    uv_binary=args.uv_binary.resolve(strict=True), uv_cache=args.uv_cache.resolve(strict=True),
+                   git_package_dir=args.git_package_dir.resolve(strict=True),
                    runner_tag=args.runner_tag, firewall_tag=args.firewall_tag)
     (args.output / "image-build-result.json").write_text(
         json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8"
