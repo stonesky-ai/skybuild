@@ -119,7 +119,7 @@ def test_firewall_sidecar_requires_a_bounded_writable_lock_tmpfs():
         "HostConfig": {
             "NetworkMode": "container:" + "c" * 64, "CapAdd": ["NET_ADMIN"], "CapDrop": ["ALL"],
             "Privileged": False, "ReadonlyRootfs": True,
-            "Tmpfs": {"/run": "rw,nosuid,nodev,size=1048576,mode=0755"},
+            "Tmpfs": {"/run": "rw,nosuid,nodev,size=1m,mode=0755"},
             "Memory": 128 * 1024**2, "MemorySwap": 128 * 1024**2,
             "NanoCpus": 250_000_000, "PidsLimit": 32, "PortBindings": {},
             "SecurityOpt": ["no-new-privileges:true"],
@@ -271,7 +271,7 @@ def _candidate_row(tmp_path):
                        "ShmSize": 256 * 1024**2, "Privileged": False,
                        "LogConfig": {"Type": "local", "Config": {"max-size": "128m", "max-file": "2"}},
                        "PidMode": "private", "IpcMode": "private", "PortBindings": {},
-                       "Tmpfs": {"/scratch": "rw,exec,nosuid,nodev,size=2147483648,uid=10001,gid=10001,mode=0700"},
+                       "Tmpfs": {"/scratch": "rw,exec,nosuid,nodev,size=2g,uid=10001,gid=10001,mode=0700"},
                        "ExtraHosts": ["db:172.18.0.3"],
                        "CapDrop": ["ALL"], "SecurityOpt": ["no-new-privileges:true"]},
         "Mounts": mounts,
@@ -314,6 +314,20 @@ def test_candidate_inspection_accepts_docker_29_tmpfs_representation(tmp_path):
     assert any(item == {"target": "/scratch", "mode": "rw", "kind": "tmpfs",
                        "source_class": "scratch", "source": "tmpfs"}
                for item in result["mounts"])
+
+
+def test_candidate_inspection_rejects_normalized_tmpfs_size(tmp_path):
+    row, archive, fixture, probe, env = _candidate_row(tmp_path)
+    row["HostConfig"]["Tmpfs"]["/scratch"] = (
+        "rw,exec,nosuid,nodev,size=2147483648,uid=10001,gid=10001,mode=0700")
+    with pytest.raises(gate.GateError, match='"field":"tmpfs_options"'):
+        gate._check_candidate_inspect(
+            row, name="candidate-run", run_id="run", container_id="a" * 64,
+            image_id="sha256:" + "b" * 64, archive_root=archive, fixture_path=fixture,
+            probe_path=probe, env=env, network="internal-net", archive_sha256="d" * 64,
+            fixture_sha256="e" * 64, probe_sha256="f" * 64,
+            postgres_ip="172.18.0.3",
+        )
 
 
 @pytest.mark.parametrize("mutation", ["extra_mount", "extra_env", "port_bind", "extra_network", "privileged"])
@@ -644,8 +658,6 @@ class _DockerModel:
                 target, value = item.split(":", 1)
                 normalized = []
                 for field in value.split(","):
-                    if field.startswith("size="):
-                        field = "size=" + str(self._bytes(field.split("=", 1)[1]))
                     normalized.append(field)
                 tmpfs[target] = ",".join(normalized)
                 mounts.append({"Type": "tmpfs", "Destination": target, "RW": True})
