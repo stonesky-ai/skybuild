@@ -243,6 +243,7 @@ def _archive(checkout: Path, commit: str, destination: Path) -> tuple[str, int]:
 def _history_fixture(checkout: Path, destination: Path) -> tuple[str, int]:
     """Construct only pinned source objects; never copy operational Git metadata."""
     destination.mkdir(mode=0o755)
+    destination.chmod(0o755)
     objects = destination / "objects"
     packs = objects / "pack"
     packs.mkdir(parents=True, mode=0o755)
