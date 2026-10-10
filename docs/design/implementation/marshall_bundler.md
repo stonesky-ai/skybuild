@@ -64,6 +64,14 @@ The script imports its own checkout even when the interpreter belongs to another
 
 Planning records REST snapshots, skip reasons, related paths, dependency edges, full frozen inputs, and candidate manifests. Validated policy/review bytes are copied into the output with their SHA-256 digests. Preparation freezes only the next group through `prepare_bundle.py`; later manifests are provisional and need a fresh base after preceding publication. Conflicts retain the candidate and child report. Existing outputs are never overwritten by a new run.
 
+Admission failures retain their exception category. The CLI and retained report
+also expose `error_detail` only for three exact static messages: memory below the
+6 GiB reserve, unavailable memory measurement, and moved or missing frozen remote
+refs. Other exception text, command stderr and credential-shaped suffixes remain
+suppressed. This diagnostic does not weaken admission, retry a failed run or
+authorize publication; preserve its evidence and use a new output after resolving
+the blocker.
+
 ## Gate and handoff
 
 `--gate-next` implies preparation and runs the existing disposable PostgreSQL combined gate with the owner's 6 GiB reserve. Gate success requires process success, `ok: true`, confirmed cleanup, unchanged remote refs, unchanged frozen evidence, a durable terminal gate artifact pinned to the exact run, head and tree, a clean candidate with the same head and tree, and unchanged REST task status/revision. Failure reports never claim publication.
