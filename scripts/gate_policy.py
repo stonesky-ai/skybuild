@@ -414,6 +414,35 @@ def _verify_sources(checkout: Path, policy: dict, frozen: dict, reviewers: list[
             raise PolicyError("Candidate tree differs from both approved patches")
 
 
+def _check_usage(usage_pin: dict, now: datetime) -> None:
+    """Check truthful fresh usage, optionally under an explicitly pinned owner revision."""
+    names = {"path", "sha256", "valid_until"}
+    revised = "owner_policy" in usage_pin
+    fields(usage_pin, names | ({"owner_policy"} if revised else set()))
+    if revised:
+        owner_pin = fields(usage_pin["owner_policy"], {"path", "sha256"})
+        owner_data = private(Path(owner_pin["path"]), maximum=16384)
+        owner = parse(owner_data)
+        if (digest(owner_data) != sha(owner_pin["sha256"])
+                or owner.get("schema") != "skybuild.usage-policy-owner-revision.v1"
+                or owner.get("production_allowed") is not True
+                or "weekly_production_stop_percent" not in owner
+                or owner["weekly_production_stop_percent"] is not None):
+            raise PolicyError("Pinned owner revision does not remove the weekly cutoff")
+    usage_data = private(Path(usage_pin["path"]), observation=True)
+    usage = parse(usage_data)
+    if (digest(usage_data) != usage_pin["sha256"]
+            or type(usage.get("weekly_used_percent")) not in (int, float)
+            or not 0 <= usage["weekly_used_percent"] <= 100
+            or usage.get("valid_until") != usage_pin["valid_until"]
+            or not timestamp(usage["confirmed_at"]) <= now < timestamp(usage["valid_until"])):
+        raise PolicyError("Fresh truthful owner usage evidence is absent")
+    if not revised and (usage.get("production_must_drain") is not False
+                        or not usage["weekly_used_percent"] < 50
+                        or usage.get("stop_production_percent") != 50):
+        raise PolicyError("Legacy owner usage evidence requires production to drain")
+
+
 class Authorization:
     """A consumed permit plus continuously checked CPU-only admission evidence."""
 
@@ -441,16 +470,7 @@ class Authorization:
         now = datetime.now(timezone.utc)
         if now >= timestamp(self.policy["expires_at"]) or time.monotonic() >= self.deadline:
             raise PolicyError("One-shot approval expired")
-        usage_pin = self.policy["usage"]
-        usage_data = private(Path(usage_pin["path"]), observation=True)
-        usage = parse(usage_data)
-        if (digest(usage_data) != usage_pin["sha256"] or usage.get("production_must_drain") is not False
-                or type(usage.get("weekly_used_percent")) not in (int, float)
-                or not 0 <= usage["weekly_used_percent"] < 50
-                or usage.get("stop_production_percent") != 50
-                or usage.get("valid_until") != usage_pin["valid_until"]
-                or not timestamp(usage["confirmed_at"]) <= now < timestamp(usage["valid_until"])):
-            raise PolicyError("Fresh owner usage evidence is absent or production must drain")
+        _check_usage(self.policy["usage"], now)
         watch = self.policy["host_watch"]
         host = parse(private(Path(watch["path"]), observation=True))
         age = (now - timestamp(host.get("sampled_at"))).total_seconds()
@@ -624,7 +644,13 @@ def authorize(checkout: Path, predicate: dict, key_id: str, policy_path: Path,
     fields(policy["gate_profile"], PROFILE_FIELDS)
     if any(predicate[name] != value for name, value in policy["gate_profile"].items()):
         raise PolicyError("Frozen gate profile differs from owner permit")
-    fields(policy["usage"], {"path", "sha256", "valid_until"})
+    usage_fields = {"path", "sha256", "valid_until"}
+    if "owner_policy" in policy["usage"]:
+        usage_fields.add("owner_policy")
+        owner_pin = fields(policy["usage"]["owner_policy"], {"path", "sha256"})
+        outside(Path(owner_pin["path"]), checkout)
+        sha(owner_pin["sha256"])
+    fields(policy["usage"], usage_fields)
     fields(policy["host_watch"], {"path", "max_age_seconds", "reserve_bytes", "required_available_bytes",
                                  "disk_path", "disk_reserve_bytes"})
     watch = policy["host_watch"]
