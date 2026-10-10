@@ -194,6 +194,7 @@ class TaskToken:
     definition_revision: int = 0
     input_generation: int = 0
     policy_version: str = ""
+    policy_reason: str | None = None
     requirements: tuple[ValidationStage, ...] = ()
     dependencies: tuple[str, ...] = ()
     evidence: tuple[ValidationResult, ...] = ()
@@ -230,7 +231,7 @@ class TaskToken:
             _text_field(getattr(self, name), name, maximum=200)
         _text_field(self.next_action, "next_action")
         for name in ("source_branch", "source_head", "target_base", "blocker", "hold_reason",
-                     "deferred_until", "milestone_task_id", "attempt_id", "bundle_id", "pending_action"):
+                     "deferred_until", "milestone_task_id", "attempt_id", "bundle_id", "pending_action", "policy_reason"):
             _text_field(getattr(self, name), name, optional=True)
         for name in ("links", "findings", "faults", "dependencies"):
             _items(getattr(self, name), name, identifier=name == "dependencies")
@@ -454,6 +455,8 @@ class TaskWorkflow:
                            responsible=context["responsible"])
         elif spec.event == "freeze":
             changes["bundle_id"] = context.get("bundle_id") if context["publication_required"] else None
+        if spec.event in {"freeze", "accept"}:
+            changes["policy_reason"] = None if context["publication_required"] else context["policy_reason"]
         return replace(token, **changes)
 
     @staticmethod
@@ -473,7 +476,9 @@ class TaskWorkflow:
                 "attempt_id": after.attempt_id, "claim_fence": after.claim_fence,
                 "source_head": after.source_head, "target_base": after.target_base,
                 "definition_revision": after.definition_revision, "policy_version": after.policy_version,
-                "bundle_id": after.bundle_id}
+                "bundle_id": after.bundle_id, "policy_reason": after.policy_reason,
+                "acceptance_mode": ("without_publication" if after.policy_reason is not None else "publication")
+                if after.place in {Place.INTEGRATING, Place.DONE} else None}
 
 
 ACTION_FIELDS = frozenset({"reason", "next_action", "responsible", "until", "milestone_task_id"})
