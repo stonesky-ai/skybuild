@@ -1,0 +1,22 @@
+{
+  "schema": "manual-work-brief-v1",
+  "assignment_id": "MVP-RETIRE-LEGACY-DISPATCH-20261010-001",
+  "task_id": "SKYBUILD-MVP-RETIRE-LEGACY-DISPATCH-GUIDE",
+  "worker": "wonko_cpu_patch_20261010_b",
+  "dispatcher": "pilot_dispatcher",
+  "branch": "task/mvp-retire-legacy-dispatch-guide-20261010",
+  "owned_paths": [
+    "docs/design/implementation/manual_dispatch.md"
+  ],
+  "checks": [
+    "Apply only the approved hash-pinned documentation patch to the owned path.",
+    "Mark the pre-cutover ledger dispatch procedure as retired and link to the current REST-backed manual worker pilot.",
+    "Remove obsolete dev-002, ledger-authority, and legacy manual-work-v1 steps from the active runbook text; retain no credentials or private endpoint data.",
+    "Do not change task authority, API records, code, or any other path.",
+    "Do not execute candidate code, project tests, hooks, or configuration. Do not call models, providers, paid APIs, services, or create tasks.",
+    "Check git diff --check, exact tree parent, regular file mode, owned path, and target-base lineage. Stop on any drift.",
+    "Parent validates documentation scope and reviews the exact pushed head; do not claim publication or task acceptance."
+  ],
+  "model_limit": "One bounded CPU-only hash-pinned patch; no model, paid API, candidate execution, service daemon, or additional task launch.",
+  "next_action": "Apply the approved patch, commit and push only the owned path, then preserve exact head and checks for parent result relay and independent review."
+}
