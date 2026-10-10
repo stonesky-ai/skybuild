@@ -17,3 +17,9 @@ ALTER TABLE cpu_reservations ADD COLUMN claim_task_revision bigint;
 ALTER TABLE cpu_reservations ADD CHECK (claim_task_revision IS NULL OR claim_task_revision > 0);
 -- Null is the legacy encoding: its claim revision equals task_revision. Never
 -- rewrite existing reservation records or bypass their immutable triggers.
+
+-- Preserve the incoming bounded event, including a full failed validation result
+-- when the current token carries only a compact fault reference.
+ALTER TABLE task_journal ADD COLUMN event_facts jsonb;
+ALTER TABLE task_journal ADD CHECK (event_facts IS NULL OR
+    (jsonb_typeof(event_facts) = 'object' AND octet_length(event_facts::text) <= 65536));
