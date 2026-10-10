@@ -1,4 +1,6 @@
-# The manual pilot image needs only its package and pinned dependencies.
+# The manual pilot image needs only its package and pinned dependencies. The
+# Workbench image needs its runtime and pinned UI snapshot, but not its docs,
+# Compose files or captured API-source copy; API source comes from its base image.
 # Exclude the checkout's ignored secrets, virtualenv, Git data and graph index.
 **
 !pyproject.toml
@@ -8,6 +10,12 @@
 !ops/manual-pilot/
 !ops/manual-pilot/Dockerfile
 !ops/manual-pilot/requirements.txt
+!ops/runtime-ui/
+!ops/runtime-ui/runtime_ui.py
+!ops/runtime-ui/asset-pins.json
+!ops/runtime-ui/navigation.html
+!ops/runtime-ui/ui/
+!ops/runtime-ui/ui/**
 **/.env
 **/.env.*
 **/__pycache__/
