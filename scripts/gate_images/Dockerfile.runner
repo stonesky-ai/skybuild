@@ -1,0 +1,25 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE} AS python_base
+
+# Start from the exact local Python image filesystem while dropping inherited
+# image environment variables that the candidate environment allowlist forbids.
+FROM scratch
+COPY --from=python_base / /
+COPY runner-git-rootfs/ /
+ARG GATE_POLICY_SHA256
+ARG UV_LOCK_SHA256
+ARG PYPROJECT_SHA256
+ARG COMMAND_SHA256
+ARG ENTRYPOINT_SHA256
+ARG NETWORK_PROBE_SHA256
+ARG UV_VERSION=0.11.22
+LABEL org.skybuild.full-test.policy-sha256=${GATE_POLICY_SHA256} \
+      org.skybuild.full-test.uv-lock-sha256=${UV_LOCK_SHA256} \
+      org.skybuild.full-test.pyproject-sha256=${PYPROJECT_SHA256} \
+      org.skybuild.full-test.command-sha256=${COMMAND_SHA256} \
+      org.skybuild.full-test.entrypoint-sha256=${ENTRYPOINT_SHA256} \
+      org.skybuild.full-test.network-probe-sha256=${NETWORK_PROBE_SHA256} \
+      org.skybuild.full-test.uv-version=${UV_VERSION}
+ENV PATH=/opt/skybuild-venv/bin:/usr/local/bin:/usr/bin:/bin
+COPY uv /usr/local/bin/uv
+COPY runner-environment/skybuild-venv/ /opt/skybuild-venv/
