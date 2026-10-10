@@ -1,12 +1,13 @@
 """One-shot, permit-bound delivery of two approved deterministic CPU patches.
 
 The controller selects Ready tasks itself, durably dispatches and claims each
-assignment, and launches distinct bounded systemd attempt units. A used run
-directory is never replayed; uncertain effects require operator reconciliation.
+assignment, and launches distinct bounded systemd attempt units. `--resume`
+reconstructs only pinned handles for reconciliation; it never dispatches or starts.
 """
 
 import argparse
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -25,7 +26,8 @@ from .client import Client, ClientError, ca_file_sha256
 from .fleet_preflight import PreflightError, _token_from_file, _resolved_addresses, probe_private_api
 from .manual_cord import ManualCordError, receive_assignment
 from .cpu_worker_bridge import (CPUWorkerBridgeError, CPUWorkerPlan, launch_worker,
-                                prepare_worker, reconcile_worker)
+                                prepare_worker, reconcile_worker, recover_worker,
+                                _file_bytes)
 from .manual_dispatch import (DispatchError, _private_endpoint, _state_directory,
                               build_envelope, dispatch)
 
@@ -149,16 +151,137 @@ def _observe_owned(manager: JobUnitManager, owned: list[dict], deadline: datetim
         time.sleep(5)
 
 
+def _private_json(path: Path, *, limit: int = 131072) -> dict:
+    try:
+        raw = _file_bytes(path, limit=limit, private=True)
+        value = json.loads(raw)
+    except (CPUWorkerBridgeError, ValueError, UnicodeError):
+        raise AutoControllerError("Private recovery journal is malformed; preserve current exposure") from None
+    if not isinstance(value, dict):
+        raise AutoControllerError("Private recovery journal is not an object")
+    return value
+
+
+def _resume_run(*, repo: Path, manifest: Path, project: str, dispatcher: str, url: str,
+                owner_token: Path, ca_file: Path, base_ref: str, state_dir: Path,
+                permit_path: Path, permit_sha256: str, weekly_usage: Path,
+                hostwatch: Path, controller_profile: Path) -> dict:
+    """Recover only persisted dispatches. This path contains no start call."""
+    selection = _private_json(state_dir / "selection.json")
+    delivered = _private_json(state_dir / "delivered.json")
+    if (selection.get("schema") != "skybuild.auto-patch-selection.v1"
+            or selection.get("project_id") != project or selection.get("base_ref") != base_ref
+            or selection.get("permit_sha256") != permit_sha256
+            or selection.get("manifest_sha256") != hashlib.sha256(
+                _file_bytes(manifest, limit=16384, private=False, owner=False)).hexdigest()
+            or selection.get("approved_until") is None
+            or delivered.get("messages") is None):
+        raise AutoControllerError("Recovery inputs differ from the original approved run")
+    selected = selection.get("selected")
+    messages = delivered.get("messages")
+    if not isinstance(selected, list) or len(selected) != 2 or not isinstance(messages, list) or len(messages) != 2:
+        raise AutoControllerError("Recovery journal does not contain exactly two selected assignments")
+    candidate_entries = _read_manifest(manifest)
+    candidates = {entry["worker"]: entry for entry in candidate_entries}
+    message_by_worker = {entry.get("worker"): entry for entry in messages if isinstance(entry, dict)}
+    if len(message_by_worker) != 2:
+        raise AutoControllerError("Delivered message journal is ambiguous")
+    results = []
+    ca_digest = ca_file_sha256(ca_file)
+    for saved in selected:
+        worker = saved.get("worker") if isinstance(saved, dict) else None
+        item = candidates.get(worker)
+        delivery = message_by_worker.get(worker)
+        if not isinstance(item, dict) or not isinstance(delivery, dict):
+            raise AutoControllerError("Recovery manifest omits an original worker")
+        envelope = build_envelope(repo, item["brief_path"], worker=worker,
+                                  dispatcher=dispatcher, base_ref=base_ref)
+        if (envelope["task_id"] != saved.get("task_id")
+                or envelope["assignment_id"] != saved.get("assignment_id")
+                or envelope["branch"] != saved.get("branch")
+                or envelope["base_sha"] != saved.get("base_sha")
+                or envelope["brief_sha256"] != saved.get("brief_sha256")
+                or item["patch_sha256"] != saved.get("patch_sha256")
+                or delivery.get("task_id") != saved.get("task_id")
+                or delivery.get("message_id") is None):
+            raise AutoControllerError("Recovery assignment differs from the original dispatch")
+        _patch_bytes(Path(item["patch"]), item["patch_sha256"])
+        worker_root = state_dir / ("worker-" + worker)
+        runtime_state = worker_root / "runtime"
+        assignment_dir = runtime_state / "assignment"
+        dispatch_path = worker_root / "dispatch-intent.json"
+        launch_path = worker_root / "launch-intent.json"
+        dispatch_intent = _private_json(dispatch_path, limit=16384)
+        if not launch_path.is_file() or launch_path.is_symlink():
+            results.append({"worker": worker, "task_id": saved["task_id"], "submitted": False,
+                            "settled": False,
+                            "reason": "No durable pre-start identity exists; retain exposure for owner reconciliation"})
+            continue
+        journal = _private_json(launch_path, limit=16384)
+        if (dispatch_intent.get("schema") != "skybuild.auto-patch-cpu-dispatch-intent.v1"
+                or dispatch_intent.get("task_id") != saved["task_id"]
+                or dispatch_intent.get("worker") != worker
+                or dispatch_intent.get("assignment_id") != saved["assignment_id"]
+                or dispatch_intent.get("permit_sha256") != permit_sha256
+                or dispatch_intent.get("action_id") != journal.get("action_id")
+                or dispatch_intent.get("operation_id") != journal.get("operation_id")
+                or dispatch_intent.get("attempt_id") != journal.get("attempt_id")
+                or dispatch_intent.get("claim_fence") != journal.get("claim_fence")):
+            raise AutoControllerError("Recovery dispatch and launch journals disagree")
+        reservation = dispatch_intent.get("reservation")
+        if (not isinstance(reservation, dict) or reservation.get("task_id") != saved["task_id"]
+                or reservation.get("action_id") != journal.get("action_id")
+                or reservation.get("attempt_id") != journal.get("attempt_id")
+                or reservation.get("claim_fence") != journal.get("claim_fence")):
+            raise AutoControllerError("Recovery reservation does not bind the original claim")
+        plan = CPUWorkerPlan(
+            project_id=project, worker_id=worker, dispatcher_id=dispatcher, url=url,
+            checkout=repo, assignment_dir=assignment_dir, patch_file=Path(item["patch"]),
+            patch_digest=item["patch_sha256"], worker_token_file=Path(item["token_file"]),
+            git_token_file=Path(item["git_token_file"]), ca_file=ca_file,
+            permit_file=permit_path, permit_digest=permit_sha256, owner_token_file=owner_token,
+            weekly_usage_file=weekly_usage, hostwatch_file=hostwatch,
+            external_state_dir=runtime_state, controller_profile_file=controller_profile)
+        try:
+            prepared = recover_worker(plan, journal)
+            outcome = reconcile_worker(prepared)
+            results.append({"worker": worker, "task_id": saved["task_id"],
+                            "operation_id": prepared.operation_id,
+                            "unit": prepared.unit_name, **outcome})
+        except (AutoControllerError, ClientError, CPUWorkerBridgeError, JobUnitError,
+                OSError, ValueError, TypeError) as error:
+            results.append({"worker": worker, "task_id": saved["task_id"],
+                            "submitted": False, "settled": False,
+                            "reconciliation_error": type(error).__name__})
+    output = {"schema": "skybuild.auto-patch-run.v1", "resumed": True,
+              "selected": len(selected), "workers": results,
+              "state_dir": str(state_dir),
+              "submitted": len(results) == 2 and all(item.get("submitted") is True for item in results)}
+    _save_new(state_dir / ("recovery-" + uuid4().hex + ".json"), output)
+    return output
+
+
 def run(*, repo: Path, manifest: Path, project: str, dispatcher: str, url: str,
         dispatcher_token: Path, owner_token: Path, ca_file: Path, base_ref: str,
         state_dir: Path, permit_path: Path, permit_sha256: str, weekly_usage: Path,
-        hostwatch: Path, controller_profile: Path) -> dict:
+        hostwatch: Path, controller_profile: Path, resume: bool = False) -> dict:
     _private_endpoint(url, _resolved_addresses)
     repo = repo.resolve()
     state_dir = _state_directory(state_dir, repo)
-    if any(state_dir.iterdir()):
-        raise AutoControllerError("Run directory exists; reconcile before another launch")
+    existing = list(state_dir.iterdir())
+    if existing:
+        if not resume:
+            raise AutoControllerError("Run directory exists; use explicit reconcile-only --resume")
+        return _resume_run(repo=repo, manifest=manifest, project=project, dispatcher=dispatcher,
+                           url=url, owner_token=owner_token, ca_file=ca_file, base_ref=base_ref,
+                           state_dir=state_dir, permit_path=permit_path,
+                           permit_sha256=permit_sha256, weekly_usage=weekly_usage,
+                           hostwatch=hostwatch, controller_profile=controller_profile)
+    if resume:
+        raise AutoControllerError("No existing worker journal is available to resume")
     candidates = _read_manifest(manifest)
+    manifest_digest = hashlib.sha256(
+        _file_bytes(manifest, limit=16384, private=False, owner=False)).hexdigest()
     ca_digest = ca_file_sha256(ca_file)
     with Client(url, _token_from_file(dispatcher_token), retries=0, timeout=10,
                 trust_env=False, ca_file=ca_file, expected_ca_sha256=ca_digest) as client:
@@ -173,6 +296,7 @@ def run(*, repo: Path, manifest: Path, project: str, dispatcher: str, url: str,
         _cpu_controls(owner, project)
     _save_new(state_dir / "selection.json", {"schema": "skybuild.auto-patch-selection.v1",
               "project_id": project, "base_ref": base_ref, "permit_sha256": permit_sha256,
+              "manifest_sha256": manifest_digest,
               "approved_until": permit["approved_until"],
               "selected": [{key: item[key] for key in ("task_id", "assignment_id", "worker", "branch",
                                                      "priority", "revision", "base_sha", "brief_sha256",
@@ -276,9 +400,24 @@ def run(*, repo: Path, manifest: Path, project: str, dispatcher: str, url: str,
             check_weekly_usage(weekly_usage, permit)
             resource_admission(hostwatch, permit, selected_count=2)
             record = {"task_id": item["task_id"], "worker": item["worker"],
+                      "schema": "skybuild.cpu-worker-launch.v1",
                       "assignment_id": item["assignment_id"], "attempt_id": received["attempt_id"],
                       "claim_fence": received["claim_fence"], "action_id": action_id,
                       "operation_id": operation_id, "unit": prepared.unit_name,
+                      "launch_nonce": prepared.launch_nonce,
+                      "approved_until": prepared.approved_until.isoformat(),
+                      "source_head": prepared.source_head,
+                      "source_digest": prepared.source_digest,
+                      "interpreter_digest": prepared.interpreter_digest,
+                      "controller_head": prepared.controller_head,
+                      "controller_source_digest": prepared.controller_source_digest,
+                      "controller_profile_digest": prepared.controller_profile_digest,
+                      "ca_digest": prepared.ca_digest,
+                      "owner_token_digest": prepared.owner_token_digest,
+                      "worker_token_digest": prepared.worker_token_digest,
+                      "git_token_digest": prepared.git_token_digest,
+                      "assignment_digest": prepared.assignment_digest,
+                      "argv_digest": prepared.argv_digest,
                       "phase": "launch_intent", "assignment_dir": str(assignment_dir)}
             _save_new(worker_root / "launch-intent.json", record)
             owned.append(record)
@@ -312,7 +451,7 @@ def run(*, repo: Path, manifest: Path, project: str, dispatcher: str, url: str,
                 record.update(phase="unknown", result=None, exit_status=None)
             prepared = prepared_runs.get(record["operation_id"])
             if prepared is None:
-                raise AutoControllerError("Process restart requires explicit durable bridge reconstruction")
+                raise AutoControllerError("In-process worker handle is missing; use reconcile-only resume")
             outcome = reconcile_worker(prepared)
             record.update(settled=outcome.get("settled") is True,
                           submitted=outcome.get("submitted") is True,
@@ -336,6 +475,8 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("checkout", "manifest", "dispatcher-token", "owner-token", "ca-file", "state-dir",
                  "permit", "weekly-usage", "hostwatch", "controller-profile"):
         parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--resume", action="store_true",
+                        help="reconcile existing durable worker journals; never dispatch or start")
     args = parser.parse_args(argv)
     try:
         result = run(repo=args.checkout, manifest=args.manifest, project=args.project,
@@ -343,7 +484,7 @@ def main(argv: list[str] | None = None) -> int:
                      owner_token=args.owner_token, ca_file=args.ca_file, base_ref=args.base_ref,
                      state_dir=args.state_dir, permit_path=args.permit, permit_sha256=args.permit_sha256,
                      weekly_usage=args.weekly_usage, hostwatch=args.hostwatch,
-                     controller_profile=args.controller_profile)
+                     controller_profile=args.controller_profile, resume=args.resume)
         print(json.dumps(result, sort_keys=True))
         return 0 if result["submitted"] else 2
     except (AutoControllerError, DispatchError, ManualCordError, ClientError, PreflightError,

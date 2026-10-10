@@ -42,7 +42,8 @@ def test_result_intent_binds_original_claim_and_exact_cord_body(tmp_path):
               'head_sha': 'a' * 40, 'checks': ['focused checks passed'],
               'changed_paths': ['src/skybuild/client.py'], 'risks': [],
               'next_action': 'Independent review'}
-    message, key = bridge._manual_cord_module.result_message(assignment, result)
+    message, key = bridge._manual_cord_module.result_message(
+        assignment, result, relay_worker='worker-1')
     intent = {'schema': 'skybuild.cpu-result-intent.v1', 'project_id': 'skybuild',
               'task_id': assignment['task_id'], 'assignment_id': assignment['assignment_id'],
               'worker': 'worker-1', 'attempt_id': 'attempt-1', 'claim_fence': 7,
@@ -71,6 +72,88 @@ def test_result_intent_binds_original_claim_and_exact_cord_body(tmp_path):
     with pytest.raises(CPUWorkerBridgeError, match='exact assignment or worker fence'):
         bridge._result_intent(prepared, assignment,
                               {'attempt_id': 'attempt-1', 'claim_fence': 7}, {'token': token})
+
+
+def test_owner_relay_sends_the_exact_envelope_pinned_by_worker_intent(tmp_path, monkeypatch):
+    assignment = {'assignment_id': 'assignment-1', 'task_id': 'SKYBUILD-TASK-TEST',
+                  'worker': 'worker-1', 'dispatcher': 'owner-1', 'branch': 'task/test',
+                  'base_sha': 'b' * 40, 'brief_sha256': 'c' * 64}
+    token = {'project_id': 'skybuild', 'task_id': assignment['task_id'],
+             'attempt_id': 'attempt-1', 'claim_fence': 7, 'input_generation': 2,
+             'definition_revision': 3, 'policy_version': 1, 'place': 'working',
+             'source_head': None, 'target_base': assignment['base_sha']}
+    result = {'schema': 'manual-work-v1', 'assignment_id': 'assignment-1',
+              'phase': 'ready-for-review', 'branch': 'task/test', 'head_sha': 'a' * 40,
+              'checks': ['focused checks passed'], 'changed_paths': ['src/skybuild/client.py'],
+              'risks': [], 'next_action': 'Independent review'}
+    message, key = bridge._manual_cord_module.result_message(
+        assignment, result, relay_worker='worker-1')
+    intent = {'result': result, 'message': message, 'message_idempotency_key': key,
+              'source_branch': 'refs/heads/task/test', 'target_base': assignment['base_sha']}
+    workflow = {'token': {**token, 'source_head': 'a' * 40}}
+    plan = SimpleNamespace(project_id='skybuild', task_id=assignment['task_id'],
+                           worker_id='worker-1', assignment_id='assignment-1',
+                           assignment_dir=tmp_path, checkout=tmp_path,
+                           worker_id='worker-1')
+    prepared = SimpleNamespace(plan=plan, assignment_digest='d' * 64,
+                               task_id=assignment['task_id'], assignment_id='assignment-1',
+                               attempt_id='attempt-1', claim_fence=7)
+
+    class Owner:
+        def task_workflow(self, *_args):
+            return {'token': {**token, 'place': 'working'}}
+        def whoami(self):
+            return {'principal_id': 'owner-principal'}
+
+    observed = {}
+    def capture_send(client, project, checkout, worktree, **kwargs):
+        observed.update(kwargs)
+        actual, actual_key = bridge._manual_cord_module.result_message(
+            kwargs['assignment'], kwargs['result'], relay_worker=kwargs['relay_worker'])
+        assert actual == intent['message'] and actual_key == intent['message_idempotency_key']
+        return {'assignment_id': 'assignment-1', 'message_id': 'message-1',
+                'head_sha': 'a' * 40, 'sent': True}
+
+    monkeypatch.setattr(bridge, '_read_assignment',
+                        lambda *_args, **_kwargs: (assignment, {}, workflow, 'd' * 64))
+    monkeypatch.setattr(bridge, '_renew_worker_claim', lambda *_args: {'renewed': True})
+    monkeypatch.setattr(bridge._manual_cord_module, 'send_result', capture_send)
+    receipt = bridge._submit_after_settlement(Owner(), object(), prepared, intent)
+    assert observed['relay_worker'] == 'worker-1'
+    assert receipt['submitted'] is True and receipt['message_id'] == 'message-1'
+    assert json.loads((tmp_path / 'submitted.json').read_text())['sender_principal'] == 'owner-principal'
+
+
+def test_history_reconciliation_scans_past_first_page():
+    claim_rows = ([{'action': 'claim', 'after_state': {'held': True, 'holder': 'old', 'fence': i}}
+                   for i in range(100)]
+                  + [{'action': 'renew', 'after_state': {'held': True, 'holder': 'worker-1', 'fence': 101}}])
+    submit_receipt = {'attempt_id': 'attempt-1', 'claim_fence': 7, 'input_generation': 2,
+                      'definition_revision': 3, 'policy_version': 1,
+                      'source_head': 'a' * 40, 'source_branch': 'refs/heads/task/test',
+                      'target_base': 'b' * 40}
+    task_rows = ([{'operation': 'comment', 'event_facts': {}} for _ in range(100)]
+                 + [{'operation': 'workflow.submit',
+                     'event_facts': {'author_output_receipt': submit_receipt}}])
+
+    class PagedClient:
+        def request(self, method, path, *, params):
+            assert method == 'GET'
+            rows = claim_rows if path.endswith('/claim/history') else task_rows
+            start = params['offset']
+            return rows[start:start + params['limit']]
+
+    client = PagedClient()
+    assert bridge._latest_claim_event(client, 'skybuild', 'task-1') == claim_rows[-1]
+    assert bridge._history_has_submit(client, 'skybuild', 'task-1', submit_receipt) is True
+
+
+def test_reconstructed_handle_cannot_start(monkeypatch):
+    called = []
+    monkeypatch.setattr(bridge, '_trusted_client', lambda *_args: called.append('client'))
+    with pytest.raises(bridge.CPUWorkerBridgeError, match='reconcile-only'):
+        bridge.launch_worker(SimpleNamespace(spec=None))
+    assert called == []
 
 
 def test_terminal_observation_retries_settlement_without_new_observation(tmp_path, monkeypatch):

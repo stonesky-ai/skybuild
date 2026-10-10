@@ -311,7 +311,8 @@ def run(client: Client, *, project: str, worker: str, dispatcher: str, checkout:
     if (not isinstance(token, dict) or token.get("attempt_id") != received.get("attempt_id")
             or token.get("claim_fence") != received.get("claim_fence")):
         raise PatchWorkerError("Saved fenced claim differs from result intent")
-    message, message_key = result_message(assignment, result)
+    # Pin the envelope that the trusted owner relay will actually send.
+    message, message_key = result_message(assignment, result, relay_worker=worker)
     intent = {
         "schema": "skybuild.cpu-result-intent.v1",
         "project_id": project,

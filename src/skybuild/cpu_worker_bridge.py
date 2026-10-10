@@ -40,7 +40,7 @@ WORKER_SOURCE = {
     # Auto-worker client from 3bb plus this branch's CPU dispatch endpoints.
     'src/skybuild/client.py': '9a6ab69f0b3294e429375ada334d263d9df1b26878f11f928b98a5f024c9679e',
     'src/skybuild/fleet_preflight.py': 'f2ec5d39b6b1bc0c0a71354a7be89837bd153b5812a9be55f8a951a15fc9424c',
-    'src/skybuild/auto_patch_worker.py': '27de201da7f56a7e288f11116c6e38c02c3aef5e85311c642bb3f6b26911826e',
+    'src/skybuild/auto_patch_worker.py': 'bf16d653051d9a4da12585b5291449144c402930c62477146f20999096e5318f',
     'src/skybuild/auto_patch_permit.py': '5e7c5de5f3d29cd6ed1aa55d61d9ec1b2a6530163f71f06a68f99396294f7ad1',
     'src/skybuild/manual_assignment.py': '349dc9f367ba63e0bf6c2f3e2d63b7d45c6e5dadcb715f6b67295ad86b65daf7',
     'src/skybuild/manual_cord.py': '3cf3b393a18c39aa5c13dd19975211caba88171fd7be19025c24d47d9d59ca90',
@@ -99,7 +99,7 @@ class CPUWorkerPlan:
 @dataclass(frozen=True)
 class PreparedCPUWorker:
     plan: CPUWorkerPlan
-    spec: JobSpec
+    spec: JobSpec | None
     action_id: str
     operation_id: str
     assignment_id: str
@@ -239,16 +239,12 @@ def _renew_worker_claim(client: Client, prepared: PreparedCPUWorker, stage: str)
                     'definition_revision', 'policy_version', 'source_head', 'target_base'))
             or not isinstance(task, dict) or type(task.get('revision')) is not int):
         raise CPUWorkerBridgeError('Original worker claim or task fence changed; preserve result')
-    history = client.request('GET', Client._path(
-        prepared.plan.project_id, 'tasks/' + Client._segment(prepared.task_id) + '/claim/history'),
-        params={'limit': 100, 'offset': 0})
-    if (not isinstance(history, list) or not history
-            or not isinstance(history[-1], dict)
-            or history[-1].get('action') not in {'claim', 'renew'}
-            or not isinstance(history[-1].get('after_state'), dict)
-            or history[-1]['after_state'].get('held') is not True
-            or history[-1]['after_state'].get('holder') != prepared.plan.worker_id
-            or history[-1]['after_state'].get('fence') != prepared.claim_fence):
+    latest = _latest_claim_event(client, prepared.plan.project_id, prepared.task_id)
+    if (not isinstance(latest, dict) or latest.get('action') not in {'claim', 'renew'}
+            or not isinstance(latest.get('after_state'), dict)
+            or latest['after_state'].get('held') is not True
+            or latest['after_state'].get('holder') != prepared.plan.worker_id
+            or latest['after_state'].get('fence') != prepared.claim_fence):
         raise CPUWorkerBridgeError('Original worker claim is not current; preserve result')
     key = 'cpu-result-' + _digest((prepared.operation_id + ':' + stage).encode())
     intent = {'schema': 'skybuild.cpu-claim-renewal.v1', 'operation_id': prepared.operation_id,
@@ -277,6 +273,45 @@ def _renew_worker_claim(client: Client, prepared: PreparedCPUWorker, stage: str)
     return response
 
 
+def _history_pages(client: Client, project_id: str, task_id: str, *, claim: bool):
+    """Read ascending history to its actual tail; page bounds fail closed."""
+    path = Client._path(project_id, 'tasks/' + Client._segment(task_id) +
+                        ('/claim/history' if claim else '/history'))
+    latest = None
+    limit = 100
+    for page_number in range(1000):
+        page = client.request('GET', path, params={'limit': limit, 'offset': page_number * limit})
+        if not isinstance(page, list) or len(page) > limit:
+            raise CPUWorkerBridgeError('Task history page is malformed; preserve result')
+        if page:
+            latest = page[-1]
+        if len(page) < limit:
+            return latest
+    raise CPUWorkerBridgeError('Task history exceeds the bounded reconciliation scan')
+
+
+def _latest_claim_event(client: Client, project_id: str, task_id: str) -> dict | None:
+    return _history_pages(client, project_id, task_id, claim=True)
+
+
+def _history_has_submit(client: Client, project_id: str, task_id: str,
+                        expected_receipt: dict) -> bool:
+    path = Client._path(project_id, 'tasks/' + Client._segment(task_id) + '/history')
+    limit = 100
+    for page_number in range(1000):
+        page = client.request('GET', path, params={'limit': limit, 'offset': page_number * limit})
+        if not isinstance(page, list) or len(page) > limit:
+            raise CPUWorkerBridgeError('Task history page is malformed; preserve submit intent')
+        if any(isinstance(item, dict) and item.get('operation') == 'workflow.submit'
+               and isinstance(item.get('event_facts'), dict)
+               and item['event_facts'].get('author_output_receipt') == expected_receipt
+               for item in page):
+            return True
+        if len(page) < limit:
+            return False
+    raise CPUWorkerBridgeError('Task history exceeds the bounded submit reconciliation scan')
+
+
 def _result_intent(prepared: PreparedCPUWorker, assignment: dict, preclaim: dict,
                    workflow: dict) -> tuple[dict, bytes]:
     path = prepared.plan.assignment_dir / 'result-intent.json'
@@ -293,7 +328,7 @@ def _result_intent(prepared: PreparedCPUWorker, assignment: dict, preclaim: dict
     if not isinstance(result, dict):
         raise CPUWorkerBridgeError('Worker result intent has no exact result envelope')
     try:
-        message, key = result_message(assignment, result)
+        message, key = result_message(assignment, result, relay_worker=prepared.plan.worker_id)
     except (KeyError, ValueError, TypeError):
         raise CPUWorkerBridgeError('Worker result envelope cannot be reconstructed') from None
     expected = {
@@ -515,7 +550,8 @@ def _read_assignment(plan: CPUWorkerPlan, *, allow_runtime: bool = False) -> tup
     return assignment, preclaim, workflow, assignment_digest
 
 
-def _validate_permit(plan: CPUWorkerPlan, assignment: dict, assignment_digest: str) -> tuple[dict, datetime]:
+def _validate_permit(plan: CPUWorkerPlan, assignment: dict, assignment_digest: str, *,
+                     allow_expired: bool = False, check_admission: bool = True) -> tuple[dict, datetime]:
     raw = _file_bytes(plan.permit_file, limit=16384, private=True)
     if _digest(raw) != plan.permit_digest:
         raise CPUWorkerBridgeError('Worker permit bytes differ from approved digest')
@@ -528,7 +564,8 @@ def _validate_permit(plan: CPUWorkerPlan, assignment: dict, assignment_digest: s
             or permit.get('profile') != PROFILE or permit.get('project_id') != plan.project_id
             or permit.get('host_id') != socket.gethostname() or permit.get('slots') != 2
             or permit.get('source_head') != _source_head(plan.checkout)
-            or approved_until.tzinfo is None or approved_until <= datetime.now(timezone.utc)):
+            or approved_until.tzinfo is None
+            or (not allow_expired and approved_until <= datetime.now(timezone.utc))):
         raise CPUWorkerBridgeError('Worker permit scope or source pin is not current')
     selected = permit.get('workers')
     if not isinstance(selected, list) or not any(
@@ -547,12 +584,13 @@ def _validate_permit(plan: CPUWorkerPlan, assignment: dict, assignment_digest: s
             or not permit['memory_high_bytes'] < permit['memory_max_bytes'] <= 4 * 1024**3
             or permit['runtime_seconds'] > 1800):
         raise CPUWorkerBridgeError('Worker permit exceeds the approved CPU resource profile')
-    try:
-        from .auto_patch_permit import check_weekly_usage, resource_admission
-        check_weekly_usage(plan.weekly_usage_file, permit)
-        resource_admission(plan.hostwatch_file, permit, selected_count=2)
-    except (ImportError, ValueError, OSError) as error:
-        raise CPUWorkerBridgeError(f'Host or weekly CPU admission failed: {type(error).__name__}') from None
+    if check_admission:
+        try:
+            from .auto_patch_permit import check_weekly_usage, resource_admission
+            check_weekly_usage(plan.weekly_usage_file, permit)
+            resource_admission(plan.hostwatch_file, permit, selected_count=2)
+        except (ImportError, ValueError, OSError) as error:
+            raise CPUWorkerBridgeError(f'Host or weekly CPU admission failed: {type(error).__name__}') from None
     return permit, approved_until
 
 
@@ -675,6 +713,86 @@ def prepare_worker(plan: CPUWorkerPlan, *, action_id: str, operation_id: str) ->
                              assignment_digest, argv_digest, unit_name, launch_nonce)
 
 
+def recover_worker(plan: CPUWorkerPlan, journal: dict) -> PreparedCPUWorker:
+    """Reconstruct a reconcile-only handle from durable local and API pins.
+
+    This path never calls prepare, begin, or systemd start. A missing, changed,
+    or ambiguous pin fails closed and leaves the existing exposure held.
+    """
+    required = {'schema', 'task_id', 'worker', 'assignment_id', 'attempt_id', 'claim_fence',
+                'action_id', 'operation_id', 'unit', 'launch_nonce', 'approved_until',
+                'source_head', 'source_digest', 'interpreter_digest', 'controller_head',
+                'controller_source_digest', 'controller_profile_digest', 'ca_digest',
+                'owner_token_digest', 'worker_token_digest', 'git_token_digest',
+                'assignment_digest', 'argv_digest', 'phase', 'assignment_dir'}
+    if not isinstance(journal, dict) or set(journal) != required or journal.get('schema') != 'skybuild.cpu-worker-launch.v1':
+        raise CPUWorkerBridgeError('Durable launch journal is missing or has unknown fields')
+    if (journal['task_id'] == '' or journal['worker'] != plan.worker_id
+            or journal['assignment_dir'] != str(plan.assignment_dir)
+            or journal['phase'] not in {'launch_intent', 'running', 'unknown', 'completed'}):
+        raise CPUWorkerBridgeError('Durable launch journal differs from the supplied recovery plan')
+    assignment, preclaim, _, assignment_digest = _read_assignment(plan, allow_runtime=True)
+    if (assignment_digest != journal['assignment_digest']
+            or assignment.get('task_id') != journal['task_id']
+            or assignment.get('assignment_id') != journal['assignment_id']
+            or preclaim.get('attempt_id') != journal['attempt_id']
+            or preclaim.get('claim_fence') != journal['claim_fence']):
+        raise CPUWorkerBridgeError('Durable assignment or claim differs from launch journal')
+    source_head = _source_head(plan.checkout)
+    interpreter = Path(sys.executable).resolve(strict=True)
+    interpreter_digest = _digest(_file_bytes(interpreter, limit=256 * 1024 * 1024,
+                                             private=False, owner=False))
+    controller_head, controller_source_digest, controller_profile_digest = _controller_pin(
+        plan, interpreter_digest)
+    permit, approved_until = _validate_permit(plan, assignment, assignment_digest,
+                                              allow_expired=True, check_admission=False)
+    ca_digest = _digest(_file_bytes(plan.ca_file, limit=1_048_576, private=False, owner=False))
+    owner_token_digest = _digest(_file_bytes(plan.owner_token_file, limit=4096, private=True))
+    worker_token_digest = _digest(_file_bytes(plan.worker_token_file, limit=1024, private=True))
+    git_token_digest = _digest(_file_bytes(plan.git_token_file, limit=1024, private=True))
+    local_pins = {
+        'source_head': source_head, 'source_digest': SOURCE_DIGEST,
+        'interpreter_digest': interpreter_digest, 'controller_head': controller_head,
+        'controller_source_digest': controller_source_digest,
+        'controller_profile_digest': controller_profile_digest, 'ca_digest': ca_digest,
+        'owner_token_digest': owner_token_digest, 'worker_token_digest': worker_token_digest,
+        'git_token_digest': git_token_digest, 'assignment_digest': assignment_digest,
+    }
+    if any(journal.get(name) != value for name, value in local_pins.items()):
+        raise CPUWorkerBridgeError('Local recovery pins differ from the durable launch journal')
+    try:
+        saved_until = datetime.fromisoformat(journal['approved_until'].replace('Z', '+00:00'))
+    except (AttributeError, ValueError):
+        raise CPUWorkerBridgeError('Durable approval cutoff is malformed') from None
+    if saved_until.tzinfo is None or saved_until.astimezone(timezone.utc) != approved_until:
+        raise CPUWorkerBridgeError('Durable approval cutoff differs from the pinned permit')
+    with _trusted_client(plan, ca_digest, owner_token_digest) as owner:
+        remote = owner.get_cpu_worker_dispatch(plan.project_id, journal['operation_id'])
+    api_fields = {
+        'operation_id': journal['operation_id'], 'action_id': journal['action_id'],
+        'project_id': plan.project_id, 'task_id': journal['task_id'],
+        'worker_id': plan.worker_id, 'attempt_id': journal['attempt_id'],
+        'claim_fence': journal['claim_fence'], 'unit_name': journal['unit'],
+        'launch_nonce': journal['launch_nonce'], 'source_digest': SOURCE_DIGEST,
+        'controller_head': controller_head, 'controller_source_digest': controller_source_digest,
+        'controller_profile_digest': controller_profile_digest,
+        'interpreter_digest': interpreter_digest, 'permit_digest': plan.permit_digest,
+        'assignment_digest': assignment_digest, 'patch_digest': plan.patch_digest,
+        'argv_digest': journal['argv_digest'], 'host_id': socket.gethostname(),
+    }
+    if (not isinstance(remote, dict)
+            or remote.get('state') not in {'prepared', 'launch-intent', 'running', 'unknown', 'terminal', 'settled'}
+            or any(remote.get(name) != value for name, value in api_fields.items())):
+        raise CPUWorkerBridgeError('API dispatch identity differs from durable launch journal')
+    return PreparedCPUWorker(
+        plan, None, journal['action_id'], journal['operation_id'], journal['assignment_id'],
+        journal['task_id'], journal['attempt_id'], journal['claim_fence'], approved_until,
+        source_head, SOURCE_DIGEST, interpreter_digest, controller_head,
+        controller_source_digest, controller_profile_digest, ca_digest, owner_token_digest,
+        worker_token_digest, git_token_digest, assignment_digest, journal['argv_digest'],
+        journal['unit'], journal['launch_nonce'])
+
+
 def _submit_after_settlement(owner: Client, worker_client: Client,
                              prepared: PreparedCPUWorker, intent: dict) -> dict:
     assignment, _, workflow, digest = _read_assignment(prepared.plan, allow_runtime=True)
@@ -724,11 +842,8 @@ def _submit_after_settlement(owner: Client, worker_client: Client,
         if saved_submit is None:
             return {'submitted': False, 'settled': True,
                     'reason': 'validating task has no durable matching submit intent'}
-        history = owner.task_history(prepared.plan.project_id, prepared.task_id, limit=100, offset=0)
-        accepted = any(isinstance(item, dict) and item.get('operation') == 'workflow.submit'
-                       and isinstance(item.get('event_facts'), dict)
-                       and item['event_facts'].get('author_output_receipt') == expected_receipt
-                       for item in history)
+        accepted = _history_has_submit(owner, prepared.plan.project_id,
+                                       prepared.task_id, expected_receipt)
         if not accepted:
             return {'submitted': False, 'settled': True,
                     'reason': 'submit outcome is not confirmed in task history; preserve idempotency intent'}
@@ -739,7 +854,7 @@ def _submit_after_settlement(owner: Client, worker_client: Client,
     # .submit and deterministic Cord message key. It never creates a new key.
     owner.task_workflow(prepared.plan.project_id, prepared.task_id)
     if saved_submit is not None:
-        owner.task_history(prepared.plan.project_id, prepared.task_id, limit=100, offset=0)
+        _history_has_submit(owner, prepared.plan.project_id, prepared.task_id, expected_receipt)
     from .manual_cord import send_result
     sent = send_result(owner, prepared.plan.project_id, prepared.plan.checkout,
                        prepared.plan.assignment_dir / 'source', worker=prepared.plan.worker_id,
@@ -766,6 +881,8 @@ def _submit_after_settlement(owner: Client, worker_client: Client,
 
 
 def launch_worker(prepared: PreparedCPUWorker) -> dict:
+    if prepared.spec is None:
+        raise CPUWorkerBridgeError('Reconstructed dispatch handles are reconcile-only')
     with _trusted_client(prepared.plan, prepared.ca_digest,
                          prepared.owner_token_digest) as client:
         return _launch_worker(client, prepared)
