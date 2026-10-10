@@ -92,6 +92,35 @@ class TaskAction(Input):
     milestone_task_id: Identifier | None = None
 
 
+class SubmissionReceipt(Input):
+    """Author output identity. This receipt does not attest validation or acceptance."""
+
+    source_head: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")]
+    target_base: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")]
+    source_branch: Annotated[str, StringConstraints(min_length=12, max_length=200)]
+    attempt_id: Identifier
+    claim_fence: Annotated[StrictInt, Field(ge=1, lt=2**63)]
+    input_generation: Annotated[StrictInt, Field(ge=0, lt=2**63)]
+    definition_revision: Annotated[StrictInt, Field(ge=0, lt=2**63)]
+    policy_version: Annotated[str, StringConstraints(max_length=200)]
+
+    @field_validator("source_branch")
+    @classmethod
+    def branch_reference(cls, value):
+        if (not value.startswith("refs/heads/") or ".." in value or "@{" in value or
+                any(ord(char) <= 32 or ord(char) == 127 or char in "~^:?*[\\" for char in value) or
+                any(not part or part.startswith(".") or part.endswith((".", ".lock")) for part in value.split("/"))):
+            raise ValueError("Submission requires a full branch reference")
+        return value
+
+    @field_validator("policy_version")
+    @classmethod
+    def policy_text(cls, value):
+        if "\x00" in value:
+            raise ValueError("Policy version cannot contain NUL")
+        return value
+
+
 class WorkflowTransition(Input):
     """Caller details only. Headers supply revision and operation identity."""
 
@@ -102,15 +131,35 @@ class WorkflowTransition(Input):
     until: AwareDatetime | None = None
     milestone_task_id: Identifier | None = None
     result: dict[str, Any] | None = None
+    source_head: str | None = None
+    target_base: str | None = None
+    source_branch: str | None = None
+    attempt_id: str | None = None
+    claim_fence: StrictInt | None = None
+    input_generation: StrictInt | None = None
+    definition_revision: StrictInt | None = None
+    policy_version: str | None = None
 
     @model_validator(mode="after")
     def bounded_event(self):
         body = self.model_dump(mode="json", exclude_unset=True)
         if self.event not in {spec.event for spec in TRANSITIONS} | {"initialize"}:
             raise ValueError("Unknown workflow event")
-        _workflow_event({**body, "operation_id": "validate", "expected_revision": 0})
         details = set(body) - {"event"}
-        if self.event in {"initialize", "claim", "submit", "freeze", "accept"}:
+        receipt_fields = set(SubmissionReceipt.model_fields)
+        if self.event == "submit":
+            if details != receipt_fields:
+                raise ValueError("Submission requires the complete output receipt only")
+            SubmissionReceipt.model_validate({name: body[name] for name in receipt_fields})
+            try:
+                json.dumps(body, allow_nan=False, ensure_ascii=False).encode()
+            except (ValueError, UnicodeError):
+                raise ValueError("Submission receipt must be finite UTF-8 JSON") from None
+            return self
+        if details & receipt_fields:
+            raise ValueError("Only submission accepts an output receipt")
+        _workflow_event({**body, "operation_id": "validate", "expected_revision": 0})
+        if self.event in {"initialize", "claim", "freeze", "accept"}:
             if details:
                 raise ValueError("This event does not accept caller details")
         elif self.event == "validation_result":
