@@ -145,14 +145,25 @@ def _claim_assignment(client, project, assignment, task, destination, worker):
     path = _workflow_path(destination)
     intent_path = path.with_name(path.name + ".intent")
     existing = _read_state(intent_path)
+    saved = _read_state(path)
+    if saved is not None and (existing is None or
+            {name: saved.get(name) for name in intent} != intent or
+            not isinstance(saved.get("token"), dict) or not isinstance(saved.get("claim"), dict) or
+            saved["token"].get("project_id") != project or
+            saved["token"].get("task_id") != assignment["task_id"] or saved["claim"].get("holder") != worker):
+        raise ManualCordError("Saved workflow binding requires reconciliation before claiming")
     if existing is None:
         token = _petri_token(task)
         if (task.get("revision") != assignment["task_revision"] or token.get("place") != "ready"
                 or token.get("pending_action") is not None or token.get("superseded")):
             raise ManualCordError("Petri assignment is no longer permitted Ready work")
-        _private_write(intent_path, (json.dumps(intent, sort_keys=True) + "\n").encode())
     elif existing != intent:
         raise ManualCordError("Assignment differs from the durable claim intent")
+    # Validate local ownership and sync the pinned assignment before the API
+    # acquires ownership. Local collisions must never create a remote claim.
+    payload = (json.dumps(assignment, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
+    _private_write(destination, payload)
+    _private_write(intent_path, (json.dumps(intent, sort_keys=True) + "\n").encode())
     key = "manual-claim-" + hashlib.sha256((project + "\n" + assignment["assignment_id"] + "\n" + fingerprint).encode()).hexdigest()
     claim = client.claim_task(project, assignment["task_id"], expected_revision=intent["expected_revision"],
                               idempotency_key=key, lease_seconds=300)
@@ -245,7 +256,7 @@ def _submit_result(client, project, assignment, result, worker, path, key):
     receipt = {name: token[name] for name in ("attempt_id", "claim_fence", "input_generation",
                                              "definition_revision", "policy_version")}
     receipt.update(source_head=result["head_sha"], source_branch="refs/heads/" + assignment["branch"],
-                   target_base=token.get("target_base") or assignment["base_sha"])
+                   target_base=assignment["base_sha"])
     intent_path = path.with_name(path.name + ".submit")
     intent = _read_state(intent_path)
     if result["phase"] != "ready-for-review":
