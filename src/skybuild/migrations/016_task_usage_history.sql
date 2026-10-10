@@ -41,7 +41,8 @@ CREATE INDEX task_usage_events_task ON task_usage_events
 CREATE INDEX task_usage_events_attempt ON task_usage_events
     (project_id, task_id, attempt_id, provider, model, pool_id, policy_window_id);
 
-CREATE FUNCTION guard_task_usage_event() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE FUNCTION guard_task_usage_event() RETURNS trigger LANGUAGE plpgsql
+SET search_path = pg_catalog, skybuild AS $$
 DECLARE origin task_usage_events%ROWTYPE;
         task_event task_journal%ROWTYPE;
         attempt_binding jsonb;

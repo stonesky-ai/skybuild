@@ -42,9 +42,11 @@ def _usage(task, *, kind="consumed", operation="provider-request-1", quantity="0
 def _claim_attempt(store, people, project, task):
     owner, worker = people["owner"], people["worker"]
     petri = task.get("metadata", {}).get("_skybuild_workflow", {}).get("petri")
-    ready = store.task_action(owner, project, task["task_id"], "ready",
-                              {"reason": "Reviewed usage test definition"},
-                              task["revision"], "ready-" + task["task_id"])
+    ready = task
+    if task["status"] != "ready":
+        ready = store.task_action(owner, project, task["task_id"], "ready",
+                                  {"reason": "Reviewed usage test definition"},
+                                  task["revision"], "ready-" + task["task_id"])
     if not petri:
         task = store.initialize_workflow(owner, project, task["task_id"], ready["revision"],
                                          "initialize-" + task["task_id"])["task"]
@@ -134,7 +136,7 @@ def test_uncertain_usage_blocks_replacement_until_different_trusted_resolver(sto
     origin = store.record_task_usage(
         recorder, project, task["task_id"],
         _usage(task, kind="uncertain", operation="provider-unknown-1", quantity="2.5"), "uncertain-1")
-    task = _release_attempt(store, people, project, task, claim)
+    _error("usage_conflict", lambda: _release_attempt(store, people, project, task, claim))
 
     _error("usage_conflict", lambda: store.update_task(
         people["owner"], project, task["task_id"], {"description": "Replacement"},
@@ -162,6 +164,7 @@ def test_uncertain_usage_blocks_replacement_until_different_trusted_resolver(sto
         resolver, project, task["task_id"], origin["event_id"], self_resolution, "resolve-1")
     assert store.resolve_task_usage(
         resolver, project, task["task_id"], origin["event_id"], self_resolution, "resolve-1") == resolution
+    task = _release_attempt(store, people, project, task, claim)
     edited = store.update_task(people["owner"], project, task["task_id"],
                                {"description": "Replacement after reconciliation"}, task["revision"], "edit-after-resolve")
     history = store.task_usage_history(people["owner"], project, task["task_id"])
