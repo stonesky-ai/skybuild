@@ -516,7 +516,7 @@ def _candidate_row(tmp_path):
                    "User": "10001:10001", "Env": env_list},
         "HostConfig": {"ReadonlyRootfs": True, "NetworkMode": "internal-net",
                        "Memory": 4 * 1024**3, "MemorySwap": 4 * 1024**3,
-                       "NanoCpus": 2_000_000_000, "PidsLimit": 256,
+                       "NanoCpus": 2_000_000_000, "PidsLimit": 256, "Init": True,
                        "ShmSize": 256 * 1024**2, "Privileged": False,
                        "LogConfig": {"Type": "local", "Config": {"max-size": "128m", "max-file": "2"}},
                        "PidMode": "private", "IpcMode": "private", "PortBindings": {},
@@ -544,6 +544,7 @@ def test_candidate_inspection_accepts_only_exact_mount_and_environment_policy(tm
     assert result["source_mount_readonly"] is True
     assert result["docker_socket_mounted"] is False
     assert result["host_credentials_mounted"] is False
+    assert result["init_process_enabled"] is True
     assert {item["source"] for item in result["mounts"]} == {
         "sha256:" + "d" * 64, "tmpfs", "sha256:" + "e" * 64, "sha256:" + "f" * 64
     }
@@ -579,7 +580,8 @@ def test_candidate_inspection_rejects_normalized_tmpfs_size(tmp_path):
         )
 
 
-@pytest.mark.parametrize("mutation", ["extra_mount", "extra_env", "port_bind", "extra_network", "privileged"])
+@pytest.mark.parametrize("mutation", ["extra_mount", "extra_env", "port_bind", "extra_network",
+                                      "privileged", "init_disabled"])
 def test_candidate_inspection_fails_closed_on_isolation_changes(tmp_path, mutation):
     row, archive, fixture, probe, env = _candidate_row(tmp_path)
     if mutation == "extra_mount":
@@ -590,6 +592,8 @@ def test_candidate_inspection_fails_closed_on_isolation_changes(tmp_path, mutati
         row["HostConfig"]["PortBindings"] = {"5432/tcp": [{"HostPort": "5432"}]}
     elif mutation == "extra_network":
         row["NetworkSettings"]["Networks"]["bridge"] = {"NetworkID": "f" * 64}
+    elif mutation == "init_disabled":
+        row["HostConfig"]["Init"] = False
     else:
         row["HostConfig"]["Privileged"] = True
 
@@ -879,7 +883,7 @@ class _DockerModel:
         if args[0] == "run":
             options = {}
             index = 1
-            flags = {"--detach", "--read-only"}
+            flags = {"--detach", "--read-only", "--init"}
             while not args[index].startswith("sha256:"):
                 item = args[index]
                 if item in flags:
@@ -918,6 +922,7 @@ class _DockerModel:
                            "Cmd": command, "Entrypoint": [single("--entrypoint")],
                            "Env": options.get("--env", [])},
                 "HostConfig": {"ReadonlyRootfs": single("--read-only", False),
+                    "Init": single("--init", False),
                     "NetworkMode": network_mode, "Memory": self._bytes(single("--memory")),
                     "MemorySwap": self._bytes(single("--memory-swap")),
                     "NanoCpus": int(float(single("--cpus")) * 1_000_000_000),
@@ -1133,6 +1138,9 @@ def test_real_builder_inspect_cleanup_sign_and_verify_roundtrip(monkeypatch, tmp
     result, predicate, model, key = _execute_modeled_gate(monkeypatch, tmp_path)
     assert result["failure"] is None and result["exit_code"] == 0 and result["cleanup_confirmed"]
     assert not model.rows and model.network is None
+    candidate_run = next(call for call in model.calls if call[0] == "run"
+                        and gate.KIND_LABEL + "=candidate" in call)
+    assert "--init" in candidate_run
     receipt = json.loads(Path(result["attestation"]).read_bytes())
     expected = {**{name: predicate[name] for name in attestation.PINNED_PREDICATE_FIELDS
                    if name in predicate}, "environment_allowlist": gate.ENV_ALLOWLIST,

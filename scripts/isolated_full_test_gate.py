@@ -970,6 +970,7 @@ def _check_candidate_inspect(row: dict, *, name: str, run_id: str, container_id:
             or host.get("ReadonlyRootfs") is not True or host.get("NetworkMode") != network
             or host.get("Memory") != 4 * 1024**3 or host.get("MemorySwap") != 4 * 1024**3
             or host.get("NanoCpus") != 2_000_000_000 or host.get("PidsLimit") != 256
+            or host.get("Init") is not True
             or host.get("ShmSize") != 256 * 1024**2 or host.get("Privileged") is not False
             or log_config.get("Type") != "local"
             or log_config.get("Config") != {"max-size": "128m", "max-file": "2"}
@@ -994,6 +995,7 @@ def _check_candidate_inspect(row: dict, *, name: str, run_id: str, container_id:
             ("nano_cpus", host.get("NanoCpus") == 2_000_000_000, 2_000_000_000,
              host.get("NanoCpus")),
             ("pids_limit", host.get("PidsLimit") == 256, 256, host.get("PidsLimit")),
+            ("init", host.get("Init") is True, True, host.get("Init")),
             ("shm_size", host.get("ShmSize") == 256 * 1024**2, 256 * 1024**2,
              host.get("ShmSize")),
             ("privileged", host.get("Privileged") is False, False, host.get("Privileged")),
@@ -1036,6 +1038,7 @@ def _check_candidate_inspect(row: dict, *, name: str, run_id: str, container_id:
             mount["source"] = "sha256:" + probe_sha256
     return {"mounts": receipt_mounts, "environment_allowlist": sorted(actual_env),
             "network_mode": "internal", "egress_allowed": False,
+            "init_process_enabled": True,
             "source_mount_readonly": True, "scratch_mount_writable": True,
             "docker_socket_mounted": False, "host_home_mounted": False,
             "host_credentials_mounted": False, "credential_access": "synthetic_database_only",
@@ -1487,7 +1490,7 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path | None, key_path
         env["SKYBUILD_GATE_HOST_GATEWAY"] = gateway
         candidate_env = dict(env)
         candidate_args = [
-            "--network", resource_names["network"], "--add-host", "db:" + pg_ip,
+            "--init", "--network", resource_names["network"], "--add-host", "db:" + pg_ip,
             "--memory=4g", "--memory-swap=4g",
             "--cpus=2", "--pids-limit=256", "--shm-size=256m", "--read-only",
             "--log-driver=local", "--log-opt=max-size=128m", "--log-opt=max-file=2",
