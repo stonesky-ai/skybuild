@@ -439,7 +439,7 @@ def test_credential_replacement_preserves_identity_history_and_verifier(store, a
     worker = people['worker']
     task = create(store, worker, project)
     replacement = secrets.token_urlsafe(32)
-    store.provision_principal(worker.principal_id, replacement, grants={project: OPERATIONS})
+    store.provision_principal(worker.principal_id, replacement, grants={project: worker.grants[project]})
     error('authentication', lambda: store.authenticate(people['worker_token']))
     current = store.authenticate(replacement)
     assert current == worker
@@ -555,7 +555,7 @@ def test_concurrent_same_idempotency_key_creates_one_outcome(store, actors):
 @pytest.mark.parametrize('statement', [
     "UPDATE skybuild.task_journal SET reason = 'rewritten' WHERE project_id = %s",
     'DELETE FROM skybuild.task_journal WHERE project_id = %s',
-    'TRUNCATE skybuild.task_journal',
+    'TRUNCATE skybuild.task_journal, skybuild.task_usage_events',
 ])
 def test_journal_mutation_is_blocked_in_database(store, actors, statement):
     project, people = actors

@@ -48,7 +48,7 @@ def frozen_checkout(tmp_path):
     ledger.mkdir(parents=True)
     # A separate Git directory keeps the fixture read-only with respect to the checkout.
     subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
-    subprocess.run(["git", "fetch", "--quiet", str(ROOT), json.loads(CONTRACT.read_text())["commit"]], cwd=tmp_path, check=True)
+    subprocess.run(["git", "fetch", "--quiet", "--update-shallow", str(ROOT), json.loads(CONTRACT.read_text())["commit"]], cwd=tmp_path, check=True)
     for name in NAMES:
         blob = subprocess.run(["git", "show", f"FETCH_HEAD:docs/design/{name}"], cwd=tmp_path, capture_output=True, check=True).stdout
         (ledger / name).write_bytes(blob)
