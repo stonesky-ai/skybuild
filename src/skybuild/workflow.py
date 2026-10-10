@@ -326,6 +326,7 @@ class WorkflowEvent(TypedDict, total=False):
 
 
 class WorkflowContext(TypedDict, total=False):
+    definition_sufficient: bool
     """Trusted facts read by Store in the same transaction as the mutation.
 
     Never copy these facts from a caller request. The pure kernel cannot verify
@@ -537,7 +538,9 @@ def _control_guard(token, name, context):
         return context.get("failure_confirmed") is True
     if name == "work_failure":
         return context.get("failure_confirmed") is True or context.get("effects_resolved") is True
-    if name in {"release_hold", "resume_deferred", "reopen"}:
+    if name == "release_hold":
+        return context.get("definition_sufficient") is True and context.get("effects_resolved") is True
+    if name in {"resume_deferred", "reopen"}:
         return context.get("effects_resolved") is True
     return token.pending_action is None or token.pending_action == name
 

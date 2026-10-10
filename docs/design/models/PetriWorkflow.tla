@@ -20,7 +20,7 @@ Claim(w) == /\ At("Ready") /\ owner = "none"
             /\ captured' = [captured EXCEPT ![w] = fence + 1]
             /\ failed' = FALSE
             /\ UNCHANGED <<writes, pending, effect>>
-Expire == /\ owner # "none" /\ At("Working") /\ effect = "resolved"
+ReconcileClaim == /\ owner # "none" /\ At("Working") /\ effect = "resolved"
           /\ Move("Ready") /\ owner' = "none"
           /\ UNCHANGED <<fence, captured, writes, failed, pending, effect>>
 Submit(w) == /\ At("Working") /\ captured[w] > 0 /\ pending = "none"
@@ -32,8 +32,7 @@ Pass == /\ (At("Validating") \/ (BrokenLatePass /\ At("Ready") /\ failed))
         /\ Move("Validating")
         /\ UNCHANGED <<owner, fence, captured, writes, failed, pending, effect>>
 Fail == /\ At("Validating") /\ Move("Ready") /\ failed' = TRUE
-        /\ owner' = "none"
-        /\ UNCHANGED <<fence, captured, writes, pending, effect>>
+        /\ UNCHANGED <<owner, fence, captured, writes, pending, effect>>
 Freeze == /\ At("Validating") /\ ~failed /\ pending = "none"
           /\ effect = "resolved" /\ Move("Integrating")
           /\ UNCHANGED <<owner, fence, captured, writes, failed, pending, effect>>
@@ -45,7 +44,11 @@ Control(kind) == /\ marking \subseteq {"Ready", "Working", "Validating", "Integr
                  /\ UNCHANGED <<marking, owner, fence, captured, writes, failed, effect>>
 Resolve == /\ effect = "unknown" /\ effect' = "resolved"
            /\ UNCHANGED <<marking, owner, fence, captured, writes, failed, pending>>
-ApplyControl == /\ pending \in {"Hold", "Deferred"} /\ effect = "resolved"
+QuiesceClaim == /\ owner # "none" /\ effect = "resolved"
+                /\ (pending # "none" \/ At("Ready") \/ At("Validating") \/ At("Integrating"))
+                /\ owner' = "none"
+                /\ UNCHANGED <<marking, fence, captured, writes, failed, pending, effect>>
+ApplyControl == /\ owner = "none" /\ pending \in {"Hold", "Deferred"} /\ effect = "resolved"
                 /\ Move(pending) /\ pending' = "none" /\ owner' = "none"
                 /\ UNCHANGED <<fence, captured, writes, failed, effect>>
 Release == /\ marking \subseteq {"Hold", "Deferred"} /\ Move("Ready")
@@ -57,7 +60,7 @@ Observe == /\ At("Integrating") /\ UNCHANGED vars
 Accept == /\ At("Integrating") /\ effect = "resolved" /\ pending = "none"
           /\ Move("Done") /\ owner' = "none"
           /\ UNCHANGED <<fence, captured, writes, failed, pending, effect>>
-Next == Expire \/ Pass \/ Fail \/ Freeze \/ Dispatch \/ Resolve \/ ApplyControl \/ Release \/ Accept \/ Exclude \/ Observe
+Next == ReconcileClaim \/ Pass \/ Fail \/ Freeze \/ Dispatch \/ Resolve \/ ApplyControl \/ QuiesceClaim \/ Release \/ Accept \/ Exclude \/ Observe
         \/ (\E w \in Workers : Claim(w) \/ Submit(w))
         \/ (\E kind \in {"Hold", "Deferred"} : Control(kind))
 Spec == Init /\ [][Next]_vars

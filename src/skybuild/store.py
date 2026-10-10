@@ -536,7 +536,8 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
                    ('source_head', 'target_base', 'definition_revision', 'input_generation', 'policy_version')}
         readiness = connection.execute('SELECT * FROM task_readiness WHERE project_id = %s AND task_id = %s',
                                        (task['project_id'], task['task_id'])).fetchone()
-        context['current_inputs'] = bool(task.get('acceptance_criteria') and readiness
+        context['definition_sufficient'] = bool(task.get('title') and task.get('description') and task.get('acceptance_criteria'))
+        context['current_inputs'] = bool(context['definition_sufficient'] and readiness
                                          and readiness['input_generation'] == token.input_generation
                                          and readiness['assessed_generation'] == token.input_generation)
         context['effects_resolved'] = not connection.execute(

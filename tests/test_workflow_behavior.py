@@ -20,7 +20,7 @@ def token(place=Place.VALIDATING):
 def context(current, **changes):
     facts = {name: getattr(current, name) for name in
              ("source_head", "target_base", "definition_revision", "input_generation", "policy_version")}
-    facts.update(current_inputs=True, effects_resolved=True, result_authorized=True,
+    facts.update(current_inputs=True, definition_sufficient=True, effects_resolved=True, result_authorized=True,
                  control_authorized=True, failure_confirmed=True, integration_observation_verified=True,
                  exclusion_verified=True, validation_verified=True, bundle_id=current.bundle_id,
                  publication_outcome="pending",

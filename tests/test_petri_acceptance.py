@@ -89,3 +89,13 @@ def test_exclusion_requires_resolved_unpublished_current_bundle(change):
     with pytest.raises(DomainError):
         TaskWorkflow().apply(current, event(current, "exclude_from_bundle", reason="Exclude"),
                              context(current, **{**{"publication_outcome": "unpublished"}, **change}))
+
+
+
+@pytest.mark.parametrize("definition", [False, None, 1, "true"])
+def test_incomplete_definition_cannot_release_diagnostic_hold(definition):
+    current = token(Place.HOLD)
+    facts = context(current, definition_sufficient=definition)
+    assert "release_hold" not in TaskWorkflow().enabled(current, facts)
+    with pytest.raises(DomainError):
+        TaskWorkflow().apply(current, event(current, "release_hold", reason="Release"), facts)

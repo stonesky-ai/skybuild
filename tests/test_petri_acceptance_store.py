@@ -19,6 +19,46 @@ def create(store, principal, project, task_id, **fields):
 from test_petri_store import author_receipt
 
 
+
+def completed_petri_fixture(store, people, project, task_id, **fields):
+    """Establish current Petri acceptance through guarded production interfaces."""
+    from skybuild.completion import current_completion, generation
+    from skybuild.integration_workflow import IntegrationWorkflow
+    from skybuild.workflow import ResultState, ValidationResult, ValidationStage
+    owner, worker = people["owner"], people["worker"]
+    task = create(store, owner, project, task_id, acceptance_criteria=["Verify result"], **fields)
+    claim = store.claim_task(worker, project, task_id, task["revision"], task_id + "-claim")
+    task = store.get_task(owner, project, task_id)
+    token = Store.workflow_token(task)
+    view = store.workflow_transition(worker, project, task_id, "submit", author_receipt(token), token.revision, task_id + "-submit")
+    for stage in ValidationStage:
+        token = Store.workflow_token(view["task"])
+        principal = owner if stage == ValidationStage.CODE_REVIEW else worker
+        evidence = ValidationResult(project, task_id, stage, ResultState.PASSED,
+            source_head=token.source_head, target_base=token.target_base, attempt_id=token.attempt_id,
+            claim_fence=token.claim_fence, input_generation=token.input_generation,
+            definition_revision=token.definition_revision, policy_version=token.policy_version,
+            producer=principal.principal_id, check_id=stage.value, tool_version="acceptance-v1")
+        view = store.workflow_transition(principal, project, task_id, "validation_result", {"result": evidence.to_dict()},
+                                         token.revision, task_id + "-" + stage.value)
+    store.release_claim(worker, project, task_id, claim["fence"], view["task"]["revision"], task_id + "-release", reason="Checks complete")
+    token = Store.workflow_token(view["task"])
+    policy = {"version": token.policy_version, "publication_required": False, "reason": "Isolated test acceptance",
+        "requirements": [stage.value for stage in token.requirements], "review_required": True}
+    common = {"publication_required": False, "policy_reason": policy["reason"],
+        "publication_policy_version": token.policy_version, "acceptance_policy": policy}
+    adapter = IntegrationWorkflow(store, lambda *args: {**common, "integration_fixed": True})
+    frozen = adapter.transition(owner, project, task_id, "freeze", evidence={"policy_ref": token.policy_version},
+                                expected_revision=token.revision, idempotency_key=task_id + "-freeze")
+    completion = {"kind": "without_publication", "reason": "Verified test acceptance", "generation": generation(frozen["task"]),
+        "author": worker.principal_id, "policy_ref": token.policy_version,
+        "acceptance": [{"criterion": item, "evidence_ref": "acceptance/" + task_id} for item in frozen["task"]["acceptance_criteria"]]}
+    adapter = IntegrationWorkflow(store, lambda *args: {**common, "acceptance_verified": True, "completion_evidence": completion})
+    accepted = adapter.transition(owner, project, task_id, "accept", evidence={"acceptance_ref": "acceptance/" + task_id},
+                                  expected_revision=frozen["task"]["revision"], idempotency_key=task_id + "-accept")
+    assert current_completion(accepted["task"])
+    return accepted["task"]
+
 def test_new_task_in_any_project_can_claim_and_submit_without_profile_patch(store, actors):
     project, people = actors
     second = "example-" + uuid4().hex
@@ -155,6 +195,7 @@ def test_api_default_creation_reaches_verified_acceptance_with_all_five_stages(s
             view = response.json()
         token = Store.workflow_token(view["task"])
         assert len(token.evidence) == 5
+        store.release_claim(people["worker"], project, task["task_id"], token.claim_fence, token.revision, "default-release", reason="Checks complete")
         policy = {"version": token.policy_version, "publication_required": False,
             "reason": "Disposable acceptance fixture requires no publication", "requirements": [stage.value for stage in token.requirements],
             "review_required": True}
@@ -178,6 +219,17 @@ def test_incomplete_default_create_requires_definition_and_explicit_release(stor
     project, people = actors
     task = create(store, people["owner"], project, "incomplete-default")
     assert Store.workflow_token(task).place == Place.HOLD
+    from fastapi.testclient import TestClient
+    from skybuild.api import create_app
+    path = f"/api/v1/projects/{project}/tasks/{task['task_id']}/workflow"
+    with TestClient(create_app(store)) as client:
+        client.headers["Authorization"] = "Bearer " + people["owner_token"]
+        view = client.get(path).json()
+        assert "release_hold" not in view["available_actions"]
+        response = client.post(path, json={"event": "release_hold", "reason": "Incomplete release"},
+            headers={"If-Match": str(task["revision"]), "Idempotency-Key": "incomplete-release"})
+        assert response.status_code == 409
+    assert store.get_task(people["owner"], project, task["task_id"]) == task
     changed = store.update_task(people["owner"], project, task["task_id"], {"acceptance_criteria": ["Check definition"]},
                                 task["revision"], "define-default")
     assert Store.workflow_token(changed).place == Place.HOLD
