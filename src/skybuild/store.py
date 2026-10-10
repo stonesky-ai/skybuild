@@ -667,6 +667,8 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
                                    (Jsonb(metadata), project_id, task_id))
                 after = self._task(connection, project_id, task_id)
                 self._journal(connection, principal, after, task, operation='workflow_initialized', reason='Initialize Petri workflow')
+                if current_completion(task) and not current_completion(after):
+                    self._invalidate_dependents(connection, principal, project_id, task_id)
                 return self._workflow_view(connection, principal, after)
             return self._idempotent(connection, principal, project_id, 'workflow.initialize', idempotency_key,
                                     {'task_id': task_id, 'revision': expected_revision}, mutation)

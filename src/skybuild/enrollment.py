@@ -29,7 +29,7 @@ def enrollment_token(task, *, input_generation, revision, new=False):
         place = Place.READY if defined else Place.HOLD
         reason = None if defined else "Add acceptance criteria and review the task definition"
     elif current_completion(task):
-        place, reason = Place.DONE, None
+        reason = "Legacy acceptance is retained in history; verify current Petri inputs and required stages"
     elif task["status"] == "ready" and defined:
         place, reason = Place.READY, None
     elif task["status"] == "deferred" and valid_trigger:

@@ -38,6 +38,11 @@ This plan does not implement or deploy the software.
 Existing components keep their task identity and ownership.
 Petri changes their interfaces where necessary instead of repeating their scope.
 
+
+Petri migration acceptance: rehearse legacy completion without Petri input and stage evidence as Hold.
+Preserve its completion record and immutable journal. Do not introduce a second acceptance path for legacy records.
+Current Petri acceptance can retain Done under the existing current-evidence checker.
+
 ## MVP delivery target
 
 Task: SKYBUILD-SELF-BUILD-MVP. Architecture: sections 3 and 16. The owner's MVP is a running product that rebuilds itself and adds features with parallel workers. The launch-free API is an intermediate deliverable, not the endpoint of MVP.

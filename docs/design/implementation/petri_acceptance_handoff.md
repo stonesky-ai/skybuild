@@ -8,7 +8,23 @@ This handoff records implementation evidence. It does not authorize deployment, 
 
 The final branch must contain `docs/design/petri_workflow.md` and its related architecture, task workflow, implementation plan and ADR changes.
 The approved design head is `c143b9be212cd4856f371406768ab117bccb4f16`.
-The prepared checks use task 05 head `8c792ebe9e4df5536063c7abbcf61c3e37968821`.
+The Task 12 branch contains the following pinned implementation parents:
+
+| Parent | Head |
+| --- | --- |
+| Shared API contract, Task 05 | `8c792ebe9e4df5536063c7abbcf61c3e37968821` |
+| Worker adapters, Task 06 | `c29fcf7ebc2d1db7c73bf3dd2ad1517f24a1a6f8` |
+| Validation adapter, Task 07 | `71b1345d3502e85dbea04b6cbe23070e30c34c7c` |
+| Integration adapter, Task 08 | `c1d3eb85f08a787adb92f7c74b28d0250c84a03b` |
+| Recovery, Task 09 | `bbce72377e7070b7ef5fcda69bfa3de304e93798` |
+| Claim capability, Task 04 correction | `cdb66d2e60de4a44c45205ec7570c5e799e738a0` |
+| Workbench controls, Task 11 | `2b9d731a4e2b6545eaf5a9a16fd3b5027667e64a` |
+
+The default requirement profile is `petri-checks-v1`. It requires all five validation stages.
+A stage omission needs a current not-applicable result with an explicit policy reason.
+New tasks use the profile automatically. A sufficient definition starts in Ready.
+Incomplete definitions start in Hold. A definition edit retains Hold until explicit release.
+Creation and claim do not grant spending or external launch permission.
 The Petri storage schema is version 1 in migration `013_petri_workflow.sql`.
 Record the final source tree, all parent heads, project requirement profile and acceptance policy versions before integration.
 
@@ -37,8 +53,16 @@ Reuse the existing Reassessment and Publication models for their unchanged requi
 
 ## Current evidence and remaining controls
 
-The prepared pure acceptance checks pass: 11 tests at the task 05 source snapshot.
-The exact combined source, independent review, PostgreSQL acceptance and full gate are pending.
+The final targeted source checks pass: 234 tests, with 18 PostgreSQL cases skipped because no disposable DSN was selected.
+These checks include enrollment, cross-project identity, integration observations, exclusions, the transition catalogue and claim capability.
+The disposable PostgreSQL acceptance includes a real API creation, atomic claim, submission, five validation stages and explicit no-publication acceptance.
+It also checks incomplete definition release, legacy snapshot enrollment, old accepted completion and journal receipts.
+The existing compatibility fixtures construct pre-Petri tasks by replacing only a pure enrollment helper.
+They do not edit journal snapshots, disable triggers or add a production bypass.
+Legacy completion without matching Petri inputs and stage evidence enters diagnostic Hold; its completion record remains unchanged.
+Independent exact-head review, PostgreSQL acceptance and the full combined gate are pending.
+The exact branch head and tree belong in the independent review and combined gate receipts.
+Targeted test results and bounded model results do not substitute for those receipts.
 No live task snapshot has been migrated. No accepted service has been replaced.
 A passing bounded model is not proof of SQL or remote publication correctness.
 

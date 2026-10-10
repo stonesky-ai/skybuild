@@ -216,6 +216,12 @@ Re-evaluate/reset invalidates an assessment; it does not erase history/source, r
 
 Bootstrap provides journaled task mutations and manual phase/blocker/next-action fields. The early task workbench follows API cutover; automatic invalidation/reconciliation and basic stuck-task visibility precede automatic execution/integration adoption. The online task journal is core history, not the separately scoped low-priority periodic Git export/disaster-recovery journal. Multi-person approval chains are explicitly deferred until much later under SKYBUILD-TEAM-APPROVAL-CHAIN; initial task controls do not require a team approval engine.
 
+
+Petri migration clarification (2026-10-09): retain Done only for current Petri acceptance.
+A legacy completion without matching Petri inputs and required stage evidence enters Hold.
+Keep its completion record and journal unchanged. Require explicit reassessment before new work.
+A legacy phase or completion label cannot establish current Petri acceptance.
+
 ## 6. Minimal Cord communications
 
 Start with a durable PostgreSQL mailbox and polling clients. A server-accepted message remains available across restart. There is no WebSocket, Git message bus, queue broker, email bridge or model-driven routing requirement in the bootstrap.

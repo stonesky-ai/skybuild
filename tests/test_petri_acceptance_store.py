@@ -187,3 +187,19 @@ def test_incomplete_default_create_requires_definition_and_explicit_release(stor
     claim = store.claim_task(people["worker"], project, task["task_id"], released["task"]["revision"], "claim-defined-default")
     assert claim["held"]
     assert Store.workflow_token(store.get_task(people["owner"], project, task["task_id"])).place == Place.WORKING
+
+
+
+def test_actual_legacy_acceptance_migrates_to_diagnostic_hold_without_new_authority(store, actors):
+    from test_dependency_readiness import completed_fixture
+    from skybuild.completion import current_completion
+    project, people = actors
+    accepted = completed_fixture(store, people["owner"], project, "accepted-legacy")
+    assert current_completion(accepted)
+    history = store.task_history(people["owner"], project, accepted["task_id"])
+    view = store.initialize_workflow(people["owner"], project, accepted["task_id"], accepted["revision"], "accepted-legacy-migration")
+    assert view["token"]["place"] == "hold"
+    assert "Legacy acceptance" in view["token"]["hold_reason"]
+    assert not current_completion(view["task"])
+    assert view["task"]["metadata"]["_skybuild_completion"] == accepted["metadata"]["_skybuild_completion"]
+    assert store.task_history(people["owner"], project, accepted["task_id"])[:-1] == history

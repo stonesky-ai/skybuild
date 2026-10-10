@@ -63,3 +63,12 @@ def test_enrollment_preserves_snapshot_and_unrelated_metadata():
     assert metadata["link"] == task["metadata"]["link"]
     assert metadata["_skybuild_workflow"]["old_event"] == "retained"
     assert metadata["_skybuild_workflow"]["petri"]["schema_version"] == 1
+
+
+
+def test_accepted_legacy_completion_requires_current_petri_evidence(monkeypatch):
+    monkeypatch.setattr("skybuild.enrollment.current_completion", lambda task: True)
+    current = enrollment_token(legacy("done", "done"), input_generation=2, revision=4)
+    assert current.place == Place.HOLD
+    assert "Legacy acceptance is retained in history" in current.hold_reason
+    assert current.evidence == () and current.source_head is None

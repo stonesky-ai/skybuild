@@ -479,7 +479,8 @@ Keep all old journal events unchanged.
 
 | Existing task condition | New place |
 | --- | --- |
-| Accepted completion | Done |
+| Current Petri acceptance | Done |
+| Legacy completion without matching Petri inputs and required stages | Hold, with accepted history and a named reassessment action |
 | Explicit deferral | Deferred |
 | Ready work | Ready |
 | Active author work | Working |
