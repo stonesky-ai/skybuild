@@ -1,14 +1,18 @@
 """Policy and real Git behavior for the bounded automatic CPU patch route."""
 
 import hashlib
+import json
 import os
 from pathlib import Path
+import socket
 import subprocess
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from skybuild import auto_patch_controller as controller
 from skybuild import auto_patch_worker as worker
+from skybuild import auto_patch_permit as permit
 
 
 def task(task_id, assignment_id, digest, *, priority=1, approved=True):
@@ -94,19 +98,22 @@ def test_worker_applies_patch_and_checks_real_committed_bytes(tmp_path, monkeypa
     destination.parent.mkdir()
     original = worker._git
 
-    def local_git(repo, *args, timeout=30):
+    def local_git(repo, *args, timeout=30, askpass=None, git_token_file=None):
         if args[:3] == ("remote", "get-url", "origin") or args[:4] == (
                 "remote", "get-url", "--push", "origin"):
             return b"https://github.com/stonesky-ai/skybuild.git\n"
         if args[:2] == ("clone", "--no-checkout"):
             args = ("clone", "--no-checkout", str(bare), args[-1])
-        return original(repo, *args, timeout=timeout)
+        return original(repo, *args, timeout=timeout, askpass=askpass,
+                        git_token_file=git_token_file)
 
     monkeypatch.setattr(worker, "_git", local_git)
     head, paths = worker._clone_and_apply(source, destination,
                                           {"base_sha": base, "branch": "task/approved-cpu-note",
                                            "task_id": "SKYBUILD-CPU-NOTE",
-                                           "owned_paths": ["README.md"]}, patch)
+                                           "owned_paths": ["README.md"]}, patch,
+                                          askpass=tmp_path / "unused-askpass",
+                                          git_token_file=tmp_path / "unused-token")
     assert paths == ["README.md"]
     assert git(destination, "show", "HEAD:README.md") == b"Original\nUseful new note.\n"
     assert git(destination, "rev-list", "--parents", "-n", "1", head).decode().split() == [head, base]
@@ -137,3 +144,49 @@ def test_private_git_askpass_uses_token_file_without_embedding_secret(tmp_path):
                               check=True, capture_output=True).stdout
     assert username == b"x-access-token\n"
     assert password == b"example-secret\n"
+
+
+def test_exact_one_shot_permit_requires_valid_usage_and_resource_headroom(tmp_path):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+    subprocess.run(["git", "-C", str(checkout), "-c", "user.name=Test", "-c",
+                    "user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "base"], check=True)
+    head = subprocess.run(["git", "-C", str(checkout), "rev-parse", "HEAD"],
+                          check=True, capture_output=True, text=True).stdout.strip()
+    now = datetime.now(timezone.utc)
+    future = (now + timedelta(minutes=10)).isoformat()
+    weekly = tmp_path / "weekly.json"
+    weekly.write_text(json.dumps({"production_must_drain": False,
+        "stop_production_percent": 50, "weekly_used_percent": 42,
+        "confirmed_at": now.isoformat(), "valid_until": future}))
+    host = tmp_path / "host.json"
+    host.write_text(json.dumps({"sampled_at": now.isoformat(), "status": "ok",
+        "reserve_bytes": 8 * 1024**3, "available_bytes": 12 * 1024**3,
+        "capacity": {"status": "ok", "max_new_jobs": 2}}))
+    selected = [{"task_id": "TASK-1", "worker": "worker_a", "assignment_id": "A-1",
+                 "brief_path": "docs/design/assignments/a.json", "branch": "task/a",
+                 "patch_sha256": "a" * 64},
+                {"task_id": "TASK-2", "worker": "worker_b", "assignment_id": "A-2",
+                 "brief_path": "docs/design/assignments/b.json", "branch": "task/b",
+                 "patch_sha256": "b" * 64}]
+    approved = {"schema": "skybuild.auto-cpu-patch-permit.v1",
+        "profile": "bounded-trusted-cpu-patch-v1", "project_id": "skybuild",
+        "host_id": socket.gethostname(), "source_head": head, "base_ref": "refs/heads/dev-006",
+        "slots": 2, "approved_until": future,
+        "weekly_usage_sha256": hashlib.sha256(weekly.read_bytes()).hexdigest(),
+        "hostwatch_reserve_bytes": 8 * 1024**3,
+        "memory_high_bytes": 1024**3, "memory_max_bytes": 2 * 1024**3,
+        "runtime_seconds": 600, "workers": selected}
+    approved_file = tmp_path / "permit.json"
+    approved_file.write_text(json.dumps(approved))
+    digest = hashlib.sha256(approved_file.read_bytes()).hexdigest()
+    assert permit.load(approved_file, digest, checkout=checkout, selected=selected,
+                       project="skybuild", base_ref="refs/heads/dev-006",
+                       hostwatch=host, usage=weekly) == approved
+    approved["workers"][1]["patch_sha256"] = "c" * 64
+    approved_file.write_text(json.dumps(approved))
+    with pytest.raises(permit.PermitError, match="bytes changed"):
+        permit.load(approved_file, digest, checkout=checkout, selected=selected,
+                    project="skybuild", base_ref="refs/heads/dev-006",
+                    hostwatch=host, usage=weekly)

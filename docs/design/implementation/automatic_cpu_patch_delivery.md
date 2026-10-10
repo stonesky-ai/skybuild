@@ -45,9 +45,21 @@ Supply a private JSON manifest outside the repository:
 }
 ```
 
-Run from a checkout of the current published development base, after checking
-the private API, two exact scoped worker principals, and the owner approval
-deadline. Use a new private run directory outside every checkout:
+Run from a checkout containing the reviewed controller source and committed
+briefs, with `origin/dev-006` at the current published development base. An
+owner approves an exact private permit file by SHA-256. Its fields are
+`schema=skybuild.auto-cpu-patch-permit.v1`,
+`profile=bounded-trusted-cpu-patch-v1`, `project_id`, `host_id` (the execution
+host's hostname), `source_head`, `base_ref`, `slots=2`, `approved_until`,
+`weekly_usage_sha256`, `hostwatch_reserve_bytes`, `memory_high_bytes`,
+`memory_max_bytes`, `runtime_seconds`, and `workers`. The ordered `workers`
+array holds each selected `task_id`, `worker`, `assignment_id`, `brief_path`,
+`branch`, and `patch_sha256`. The exact weekly observation must be under the
+50% stop threshold and still valid throughout the approved window. The
+hostwatch sample must be fresh, status `ok`, retain at least 8 GiB after both
+unit ceilings, and report capacity for both jobs when present. Refresh this
+sample before dispatch and each claim and launch. Use a new private run
+directory outside every checkout:
 
 ```sh
 scripts/project_python -m skybuild.auto_patch_controller \
@@ -58,17 +70,24 @@ scripts/project_python -m skybuild.auto_patch_controller \
   --dispatcher-token /absolute/private/dispatcher-token \
   --ca-file /absolute/private/ca.crt \
   --base-ref refs/heads/dev-006 \
-  --approved-until '<current approved offset-aware cutoff>' \
+  --owner-token /absolute/private/owner-token \
+  --permit /absolute/private/approved-permit.json \
+  --permit-sha256 '<owner-approved 64 hex digest>' \
+  --weekly-usage /absolute/private/weekly-observation.json \
+  --hostwatch /absolute/private/fresh-hostwatch.json \
   --state-dir /absolute/private/new-run-directory
 ```
 
 The controller selects the two highest-priority eligible tasks from committed
 brief candidates. It records selection, dispatches through the existing
-durable Cord sender, then starts two separate one-shot worker processes. Each
-worker checks its exact task approval, receives and fences a claim, renews its
+durable Cord sender, then claims each task with its own worker principal and
+starts two separate bounded systemd user units through `JobUnitManager`. Each
+worker checks its exact task approval and preclaimed fence, renews its
 lease, applies its patch in an independent clone, checks source bytes and Git
 lineage, pushes its own branch, submits the fenced REST result, and sends its
-Cord result. A failed or uncertain write leaves private evidence. Do not
+Cord result. The controller checks owner CPU controls before work, but this
+one-shot permit is a bounded demonstration and does not redeem the current
+CPU reservation API. A failed or uncertain write leaves private evidence. Do not
 restart a used run directory or silently replay a write.
 
 Workers receive their scoped REST worker token and a separate Git token file

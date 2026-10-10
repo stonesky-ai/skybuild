@@ -20,8 +20,8 @@ import sys
 from .client import Client, ClientError, ca_file_sha256
 from .fleet_preflight import _resolved_addresses, _token_from_file, probe_private_api
 from .manual_assignment import _path, verify_assignment
-from .manual_cord import receive_assignment, renew_assignment, send_result, _workflow_path
-from .manual_dispatch import _private_endpoint, _state_directory
+from .manual_cord import _current_assignment, renew_assignment, send_result, _workflow_path
+from .manual_dispatch import _private_endpoint, _read_state, _state_directory
 
 
 class PatchWorkerError(ValueError):
@@ -50,11 +50,12 @@ def _git(repo: Path | None, *args: str, timeout: int = 30,
     return result.stdout
 
 
-def _approved_task(task: dict, assignment: dict, patch_sha256: str) -> None:
+def _approved_task(task: dict, assignment: dict, patch_sha256: str, *, preclaim: bool = True) -> None:
     if (not isinstance(task, dict) or task.get("task_id") != assignment["task_id"]
-            or task.get("status") != "ready" or type(task.get("revision")) is not int
-            or task.get("revision") != assignment["task_revision"]):
-        raise PatchWorkerError("Task is not the pinned Ready task")
+            or type(task.get("revision")) is not int
+            or (preclaim and (task.get("status") != "ready"
+                              or task.get("revision") != assignment["task_revision"]))) :
+        raise PatchWorkerError("Task is not the pinned assignment")
     metadata = task.get("metadata")
     approval = metadata.get("_skybuild_cpu_patch") if isinstance(metadata, dict) else None
     if approval != {"schema": "skybuild.cpu-patch.v1", "sha256": patch_sha256,
@@ -68,9 +69,9 @@ def _approved_task(task: dict, assignment: dict, patch_sha256: str) -> None:
     workflow = metadata.get("_skybuild_workflow")
     petri = workflow.get("petri") if isinstance(workflow, dict) else None
     token = petri.get("token") if isinstance(petri, dict) else None
-    if (not isinstance(token, dict) or token.get("place") != "ready"
+    if (not isinstance(token, dict) or token.get("place") != ("ready" if preclaim else "working")
             or token.get("pending_action") is not None or token.get("superseded")):
-        raise PatchWorkerError("Petri task is not Ready")
+        raise PatchWorkerError("Petri task place is not eligible")
 
 
 def _patch_bytes(path: Path, expected_sha256: str) -> bytes:
@@ -167,14 +168,16 @@ def _patch_paths(repo: Path, base: str, patch_file: Path, owned_paths: list[str]
     return sorted(paths)
 
 
-def _clone_and_apply(repo: Path, destination: Path, assignment: dict, patch: bytes) -> tuple[str, list[str]]:
+def _clone_and_apply(repo: Path, destination: Path, assignment: dict, patch: bytes,
+                     *, askpass: Path, git_token_file: Path) -> tuple[str, list[str]]:
     if destination.exists() or destination.is_symlink() or not destination.parent.is_dir():
         raise PatchWorkerError("Worker checkout exists; reconcile before another attempt")
     origin = _git(repo, "remote", "get-url", "origin").decode().strip()
     push_origin = _git(repo, "remote", "get-url", "--push", "origin").decode().strip()
     if origin != "https://github.com/stonesky-ai/skybuild.git" or push_origin != origin:
         raise PatchWorkerError("Worker source origin differs")
-    _git(None, "clone", "--no-checkout", origin, str(destination), timeout=120)
+    _git(None, "clone", "--no-checkout", origin, str(destination), timeout=120,
+         askpass=askpass, git_token_file=git_token_file)
     if (_git(destination, "remote", "get-url", "origin").decode().strip() != origin
             or _git(destination, "remote", "get-url", "--push", "origin").decode().strip() != origin):
         raise PatchWorkerError("Worker clone origin differs")
@@ -242,49 +245,54 @@ def run(client: Client, *, project: str, worker: str, dispatcher: str, checkout:
 
     require_time()
     state_dir = _state_directory(state_dir, checkout)
-    if any(state_dir.iterdir()):
-        raise PatchWorkerError("Attempt directory is not new; reconcile prior effects")
+    expected = {"assignment.json", "assignment.json.workflow.json.intent",
+                "assignment.json.workflow.json", "preclaim.json"}
+    if {item.name for item in state_dir.iterdir()} != expected:
+        raise PatchWorkerError("Attempt does not have exactly one trusted preclaim")
     patch = _patch_bytes(patch_path, patch_sha256)
-    inbox = client.inbox(project, limit=100)
-    selected = [item for item in inbox if isinstance(item, dict) and item.get("message_id") == message_id]
-    if len(selected) != 1:
-        raise PatchWorkerError("Expected one pinned worker assignment")
-    try:
-        assignment = json.loads(selected[0]["body"])
-    except (KeyError, TypeError, ValueError):
-        raise PatchWorkerError("Assignment body is invalid") from None
+    assignment_path = state_dir / "assignment.json"
+    assignment = _read_state(assignment_path)
+    received = _read_state(state_dir / "preclaim.json")
+    if (not isinstance(assignment, dict) or not isinstance(received, dict)
+            or received.get("message_id") != message_id
+            or received.get("assignment_id") != assignment.get("assignment_id")
+            or received.get("place") != "working"):
+        raise PatchWorkerError("Trusted preclaim identity differs")
     verify_assignment(assignment, checkout, worker=worker)
     if assignment["dispatcher"] != dispatcher:
         raise PatchWorkerError("Assignment dispatcher differs")
     task = client.get_task(project, assignment["task_id"])
-    _approved_task(task, assignment, patch_sha256)
+    _approved_task(task, assignment, patch_sha256, preclaim=False)
+    binding = _read_state(_workflow_path(assignment_path))
+    if (not isinstance(binding, dict) or not isinstance(binding.get("token"), dict)
+            or binding["token"].get("attempt_id") != received.get("attempt_id")
+            or binding["token"].get("claim_fence") != received.get("claim_fence")):
+        raise PatchWorkerError("Saved fenced claim differs from launch identity")
+    _current_assignment(client, project, assignment, binding["token"])
     _record(state_dir, "intent.json", {"schema": "skybuild.auto-patch-attempt.v1", "project_id": project,
              "task_id": assignment["task_id"], "assignment_id": assignment["assignment_id"],
              "message_id": message_id, "worker": worker, "patch_sha256": patch_sha256,
              "base_sha": assignment["base_sha"]})
-    assignment_path = state_dir / "assignment.json"
-    require_time()
-    received = receive_assignment(client, project, checkout, worker=worker, dispatcher=dispatcher,
-                                  message_id=message_id, destination=assignment_path)
-    if received.get("place") != "working":
-        raise PatchWorkerError("Worker claim was not confirmed")
     require_time()
     renew_assignment(client, project, assignment, worker, _workflow_path(assignment_path))
     destination = state_dir / "source"
+    askpass = _askpass(state_dir, git_token_file)
     require_time()
-    head, paths = _clone_and_apply(checkout, destination, assignment, patch)
+    head, paths = _clone_and_apply(checkout, destination, assignment, patch,
+                                   askpass=askpass, git_token_file=git_token_file)
     require_time()
     renew_assignment(client, project, assignment, worker, _workflow_path(assignment_path))
     remote_ref = "refs/heads/" + assignment["branch"]
-    if _git(destination, "ls-remote", "origin", remote_ref).strip():
+    if _git(destination, "ls-remote", "origin", remote_ref,
+            askpass=askpass, git_token_file=git_token_file).strip():
         raise PatchWorkerError("Task branch already exists on origin")
-    askpass = _askpass(state_dir, git_token_file)
     _record(state_dir, "push-intent.json", {"head_sha": head, "remote_ref": remote_ref})
     require_time()
     _git(destination, "push", "--atomic", "--force-with-lease=" + remote_ref + ":",
          "origin", "HEAD:" + remote_ref, timeout=120,
          askpass=askpass, git_token_file=git_token_file)
-    if _git(destination, "ls-remote", "origin", remote_ref).decode().strip() != f"{head}\t{remote_ref}":
+    if (_git(destination, "ls-remote", "origin", remote_ref, askpass=askpass,
+             git_token_file=git_token_file).decode().strip() != f"{head}\t{remote_ref}"):
         raise PatchWorkerError("Pushed branch head is unconfirmed")
     result = {"schema": "manual-work-v1", "assignment_id": assignment["assignment_id"],
               "phase": "ready-for-review", "branch": assignment["branch"], "head_sha": head,
