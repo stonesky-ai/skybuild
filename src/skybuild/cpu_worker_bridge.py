@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import socket
 import stat
 import subprocess
@@ -40,8 +41,8 @@ WORKER_SOURCE = {
     # Auto-worker client from 3bb plus this branch's CPU dispatch endpoints.
     'src/skybuild/client.py': '0a82e21643184e1cf8bd6587ab87affbe9807e28c475df2ef6f8de98cf960ff3',
     'src/skybuild/fleet_preflight.py': 'f2ec5d39b6b1bc0c0a71354a7be89837bd153b5812a9be55f8a951a15fc9424c',
-    'src/skybuild/auto_patch_worker.py': 'bf16d653051d9a4da12585b5291449144c402930c62477146f20999096e5318f',
-    'src/skybuild/auto_patch_permit.py': 'de6cf3cbc6ca88f90c68bb397959cbf1c040feba1d355dd199bb142959f45eea',
+    'src/skybuild/auto_patch_worker.py': '156d6d43ead7fd93bc60cf9d630dbd2b9b6a32dce3d052e5f006e2b861f8fa94',
+    'src/skybuild/auto_patch_permit.py': 'd18ba6aa4d2993d69e9cd31c890c63eb4f0e64ae0d8fb8eb5667e60962cbdf51',
     'src/skybuild/manual_assignment.py': '349dc9f367ba63e0bf6c2f3e2d63b7d45c6e5dadcb715f6b67295ad86b65daf7',
     'src/skybuild/manual_cord.py': '3cf3b393a18c39aa5c13dd19975211caba88171fd7be19025c24d47d9d59ca90',
     'src/skybuild/manual_dispatch.py': '7baad50262ad315c4d1d48cf6edb27c592b5369b23c3fb81004994a966a667cc',
@@ -85,7 +86,10 @@ class CPUWorkerPlan:
     patch_file: Path
     patch_digest: str
     worker_token_file: Path
-    git_token_file: Path
+    worker_image_id: str
+    worker_input_dir: Path
+    worker_output_dir: Path
+    worker_source_dir: Path
     ca_file: Path
     permit_file: Path
     permit_digest: str
@@ -116,7 +120,8 @@ class PreparedCPUWorker:
     ca_digest: str
     owner_token_digest: str
     worker_token_digest: str
-    git_token_digest: str
+    container_name: str
+    container_run_id: str
     assignment_digest: str
     argv_digest: str
     unit_name: str
@@ -152,6 +157,21 @@ def _digest(data: bytes) -> str:
 
 def _attempt_log_path(state_dir: Path, attempt_id: str) -> Path:
     return state_dir / ('worker-' + _digest(attempt_id.encode()) + '.log')
+
+
+def _docker_executable() -> str:
+    found = shutil.which('docker')
+    if not found:
+        raise CPUWorkerBridgeError('Pinned CPU worker container runtime is unavailable')
+    try:
+        executable = Path(found).resolve(strict=True)
+        info = executable.stat()
+    except OSError:
+        raise CPUWorkerBridgeError('Pinned CPU worker container runtime is unavailable') from None
+    if (not executable.is_file() or not os.access(executable, os.X_OK)
+            or info.st_mode & 0o022):
+        raise CPUWorkerBridgeError('Pinned CPU worker container runtime is unsafe')
+    return str(executable)
 
 
 def _unit_manager(state_dir: Path) -> JobUnitManager:
@@ -365,16 +385,20 @@ def _result_intent(prepared: PreparedCPUWorker, assignment: dict, preclaim: dict
 def _verify_pushed_result(prepared: PreparedCPUWorker, intent: dict) -> None:
     worktree = prepared.plan.assignment_dir / 'source'
     result = intent['result']
-    askpass = prepared.plan.assignment_dir / 'git-askpass.sh'
-    expected_askpass = (b'#!/bin/sh\ncase "$1" in\n'
-                        b'  *Username*) printf \'%s\\n\' \'x-access-token\' ;;\n'
-                        b'  *Password*) exec /bin/cat -- "$SKYBUILD_GIT_TOKEN_FILE" ;;\n'
-                        b'  *) exit 1 ;;\nesac\n')
-    if _file_bytes(askpass, limit=2048, private=True) != expected_askpass:
-        raise CPUWorkerBridgeError('Trusted Git credential helper differs; preserve exposure')
-    git_token = _file_bytes(prepared.plan.git_token_file, limit=1024, private=True)
-    if _digest(git_token) != prepared.git_token_digest:
-        raise CPUWorkerBridgeError('Git credential differs from prepared private reference')
+    try:
+        push_intent = json.loads(_file_bytes(prepared.plan.assignment_dir / 'push-intent.json',
+                                             limit=8192, private=True))
+        push_confirmation = json.loads(_file_bytes(prepared.plan.assignment_dir / 'push-confirmed.json',
+                                                   limit=8192, private=True))
+    except (CPUWorkerBridgeError, ValueError, UnicodeError):
+        raise CPUWorkerBridgeError('Controller push evidence is malformed; preserve exposure') from None
+    if (not isinstance(push_intent, dict) or not isinstance(push_confirmation, dict)
+            or push_intent.get('schema') != 'skybuild.controller-git-push.v1'
+            or push_intent.get('operation_id') != prepared.operation_id
+            or push_intent.get('assignment_id') != prepared.assignment_id
+            or push_intent.get('head_sha') != result['head_sha']
+            or push_confirmation != {**push_intent, 'remote_head': result['head_sha']}):
+        raise CPUWorkerBridgeError('Controller push confirmation differs from result intent')
     origin = subprocess.run(['git', 'remote', 'get-url', 'origin'], cwd=worktree,
                             capture_output=True, text=True, timeout=5, check=False)
     branch = subprocess.run(['git', 'symbolic-ref', '--short', 'HEAD'], cwd=worktree,
@@ -388,16 +412,17 @@ def _verify_pushed_result(prepared: PreparedCPUWorker, intent: dict) -> None:
             or head.returncode or head.stdout.strip() != result['head_sha']
             or status.returncode or status.stdout):
         raise CPUWorkerBridgeError('Local pushed result snapshot differs; preserve exposure')
-    environment = {key: os.environ[key] for key in _SAFE_ENV if key in os.environ}
+    environment = {key: os.environ[key] for key in ('HOME', 'PATH', 'LANG', 'LC_ALL') if key in os.environ}
     environment.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null',
-                       GIT_TERMINAL_PROMPT='0', GIT_ASKPASS=str(askpass),
-                       SKYBUILD_GIT_TOKEN_FILE=str(prepared.plan.git_token_file))
-    remote = subprocess.run(['git', 'ls-remote', '--refs', 'origin', intent['source_branch']],
-                            cwd=worktree, env=environment, capture_output=True, text=True,
-                            timeout=30, check=False)
+                       GIT_TERMINAL_PROMPT='0', GIT_LFS_SKIP_SMUDGE='1')
+    remote = subprocess.run(['git', '-c', 'credential.helper=',
+                             '-c', 'credential.helper=!gh auth git-credential',
+                             'ls-remote', '--refs',
+                             'https://github.com/stonesky-ai/skybuild.git',
+                             intent['source_branch']], cwd=worktree, env=environment,
+                            capture_output=True, text=True, timeout=30, check=False)
     if remote.returncode or remote.stdout.strip() != result['head_sha'] + '\t' + intent['source_branch']:
         raise CPUWorkerBridgeError('Authenticated remote head does not match result intent; preserve exposure')
-
 
 def _write_exclusive(path: Path, data: bytes, mode: int = 0o600) -> None:
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
@@ -514,7 +539,7 @@ def _read_assignment(plan: CPUWorkerPlan, *, allow_runtime: bool = False) -> tup
         raise CPUWorkerBridgeError('Worker state directory must be outside the source checkout')
     names = {item.name for item in plan.assignment_dir.iterdir()}
     allowed_runtime = {'intent.json', 'push-intent.json', 'result-intent.json', 'source',
-                       'git-askpass.sh', 'observation-intent.json', 'submitted.json',
+                       'push-confirmed.json', 'observation-intent.json', 'submitted.json',
                        'assignment.json.workflow.json.submit', 'claim-renewal-pre-settle.json',
                        'claim-renewal-pre-submit.json'}
     allowed_runtime.update(name for name in names if re.fullmatch(r'observation-[0-9a-f-]{36}\.json', name))
@@ -567,6 +592,8 @@ def _validate_permit(plan: CPUWorkerPlan, assignment: dict, assignment_digest: s
             or approved_until.tzinfo is None
             or (not allow_expired and approved_until <= datetime.now(timezone.utc))):
         raise CPUWorkerBridgeError('Worker permit scope or source pin is not current')
+    if not re.fullmatch(r'sha256:[0-9a-f]{64}', str(permit.get('worker_image_id', ''))):
+        raise CPUWorkerBridgeError('Worker permit has no immutable container image identity')
     selected = permit.get('workers')
     if not isinstance(selected, list) or not any(
             item.get('task_id') == assignment.get('task_id')
@@ -611,6 +638,96 @@ def _worker_interpreter(checkout: Path) -> tuple[Path, str]:
     return interpreter, digest
 
 
+def _worker_docker_argv(plan: CPUWorkerPlan, assignment: dict, preclaim: dict,
+                        permit: dict, launch_nonce: str) -> tuple[tuple[str, ...], str, str]:
+    image_id = plan.worker_image_id
+    if not re.fullmatch(r'sha256:[0-9a-f]{64}', image_id):
+        raise CPUWorkerBridgeError('Pinned CPU worker image ID is invalid')
+    docker = _docker_executable()
+    try:
+        image = subprocess.run([docker, 'image', 'inspect', '--format', '{{.Id}}', image_id],
+                               capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        raise CPUWorkerBridgeError('Pinned CPU worker image could not be inspected') from None
+    if image.returncode or image.stdout.strip() != image_id:
+        raise CPUWorkerBridgeError('Pinned CPU worker image is unavailable locally')
+    identity = json.dumps([assignment['task_id'], assignment['assignment_id'],
+                           preclaim['attempt_id'], launch_nonce], separators=(',', ':'))
+    run_id = _digest(identity.encode())
+    name = 'skybuild-cpu-' + run_id[:24]
+    cidfile = plan.external_state_dir / ('container-' + preclaim['attempt_id'] + '.id')
+    mounts = ((plan.worker_source_dir, '/source', True),
+              (plan.worker_input_dir, '/input', True),
+              (plan.worker_output_dir, '/work', False))
+    if any(not path.is_absolute() or ',' in str(path) for path, _, _ in mounts):
+        raise CPUWorkerBridgeError('Worker container mount paths are invalid')
+    arguments = [docker, 'run', '--pull=never', '--name', name, '--cidfile', str(cidfile),
+                 '--network', 'none', '--user', f'{os.getuid()}:{os.getgid()}',
+                 '--read-only', '--tmpfs', '/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777',
+                 '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
+                 '--pids-limit', '32', '--memory', str(permit['memory_max_bytes']),
+                 '--memory-swap', str(permit['memory_max_bytes']), '--cpus', '1.0',
+                 '--env', 'HOME=/tmp', '--env', 'PYTHONDONTWRITEBYTECODE=1',
+                 '--env', 'PYTHONPATH=/source/src:/source/scripts:/source',
+                 '--workdir', '/source']
+    labels = {'role': 'cpu-patch-worker', 'task': assignment['task_id'],
+              'assignment': assignment['assignment_id'], 'attempt': preclaim['attempt_id'],
+              'run': run_id, 'launch': launch_nonce, 'image': image_id}
+    for key, value in labels.items():
+        arguments.extend(('--label', f'skybuild.{key}={value}'))
+    for source, destination, readonly in mounts:
+        mount = f'type=bind,src={source},dst={destination}'
+        arguments.extend(('--mount', mount + (',readonly' if readonly else '')))
+    arguments.extend((image_id, '-m', 'skybuild.auto_patch_worker', '--worker', plan.worker_id,
+                      '--checkout', '/source', '--assignment', '/input/assignment.json',
+                      '--preclaim', '/input/preclaim.json', '--patch', '/input/approved.patch',
+                      '--patch-sha256', plan.patch_digest, '--state-dir', '/work'))
+    return tuple(arguments), name, run_id
+
+
+def _docker_container_state(prepared: PreparedCPUWorker) -> dict:
+    cid_path = prepared.plan.external_state_dir / ('container-' + prepared.attempt_id + '.id')
+    try:
+        descriptor = os.open(cid_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            info = os.fstat(descriptor)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                    or info.st_size > 128):
+                raise CPUWorkerBridgeError('Worker container ID file is unsafe')
+            container_id = os.read(descriptor, 129).decode('ascii').strip()
+        finally:
+            os.close(descriptor)
+        result = subprocess.run([_docker_executable(), 'container', 'inspect', prepared.container_name],
+                                capture_output=True, text=True, timeout=10, check=False)
+    except CPUWorkerBridgeError:
+        raise
+    except (OSError, UnicodeError, subprocess.TimeoutExpired):
+        raise CPUWorkerBridgeError('Worker container state is unknown') from None
+    if result.returncode:
+        raise CPUWorkerBridgeError('Worker container state is unavailable')
+    try:
+        rows = json.loads(result.stdout)
+        container = rows[0]
+        state, config = container['State'], container['Config']
+        labels = config['Labels']
+    except (IndexError, KeyError, TypeError, ValueError):
+        raise CPUWorkerBridgeError('Worker container identity is malformed') from None
+    expected_labels = {'skybuild.role': 'cpu-patch-worker',
+                       'skybuild.task': prepared.task_id,
+                       'skybuild.assignment': prepared.assignment_id,
+                       'skybuild.attempt': prepared.attempt_id,
+                       'skybuild.run': prepared.container_run_id,
+                       'skybuild.launch': prepared.launch_nonce,
+                       'skybuild.image': prepared.plan.worker_image_id}
+    if (container.get('Id') != container_id
+            or container.get('Image') != prepared.plan.worker_image_id
+            or container.get('Name') != '/' + prepared.container_name
+            or any(labels.get(key) != value for key, value in expected_labels.items())):
+        raise CPUWorkerBridgeError('Worker container differs from durable launch intent')
+    return {'id': container_id, 'status': state.get('Status'),
+            'exit_code': state.get('ExitCode'), 'running': state.get('Running') is True}
+
+
 def prepare_worker(plan: CPUWorkerPlan, *, action_id: str, operation_id: str) -> PreparedCPUWorker:
     """Validate immutable inputs, prepare API intent, then return one fixed JobSpec."""
     for name, value in [('project_id', plan.project_id), ('worker_id', plan.worker_id),
@@ -630,15 +747,10 @@ def prepare_worker(plan: CPUWorkerPlan, *, action_id: str, operation_id: str) ->
     patch = _file_bytes(plan.patch_file, limit=65536, private=True)
     if _digest(patch) != plan.patch_digest:
         raise CPUWorkerBridgeError('Approved patch bytes differ from pinned digest')
-    for path in (plan.worker_token_file, plan.git_token_file):
-        _file_bytes(path, limit=1024, private=True)
-    owner_token_bytes = _file_bytes(plan.owner_token_file, limit=4096, private=True)
     worker_token_bytes = _file_bytes(plan.worker_token_file, limit=1024, private=True)
-    git_token_bytes = _file_bytes(plan.git_token_file, limit=1024, private=True)
-    secret_paths = {path.resolve(strict=True) for path in
-                    (plan.owner_token_file, plan.worker_token_file, plan.git_token_file)}
-    if len(secret_paths) != 3 or len({owner_token_bytes, worker_token_bytes, git_token_bytes}) != 3:
-        raise CPUWorkerBridgeError('Owner, worker and Git credentials must be distinct private files')
+    owner_token_bytes = _file_bytes(plan.owner_token_file, limit=4096, private=True)
+    if plan.owner_token_file.resolve(strict=True) == plan.worker_token_file.resolve(strict=True):
+        raise CPUWorkerBridgeError('Owner and worker API credentials must be distinct private files')
     owner_token_path = plan.owner_token_file.resolve(strict=True)
     if (owner_token_path.is_relative_to(checkout)
             or owner_token_path.is_relative_to(plan.external_state_dir.resolve(strict=True))):
@@ -647,6 +759,8 @@ def prepare_worker(plan: CPUWorkerPlan, *, action_id: str, operation_id: str) ->
     ca_bytes = _file_bytes(plan.ca_file, limit=1_048_576, private=False, owner=False)
     ca_digest = _digest(ca_bytes)
     permit, approved_until = _validate_permit(plan, assignment, assignment_digest)
+    if permit.get('worker_image_id') != plan.worker_image_id:
+        raise CPUWorkerBridgeError('Pinned worker image differs from exact permit')
     interpreter, interpreter_digest = _worker_interpreter(checkout)
     controller_head, controller_source_digest, controller_profile_digest = _controller_pin(
         plan, interpreter_digest)
@@ -671,14 +785,14 @@ def prepare_worker(plan: CPUWorkerPlan, *, action_id: str, operation_id: str) ->
     worker_id = plan.worker_id
     if not isinstance(preclaim.get('message_id'), str) or not preclaim['message_id']:
         raise CPUWorkerBridgeError('Fenced preclaim has no message identity')
-    args = (str(interpreter), '-I', '-m', 'skybuild.auto_patch_worker', '--url', plan.url,
-            '--project', plan.project_id, '--worker', worker_id, '--dispatcher', plan.dispatcher_id,
-            '--message-id', preclaim.get('message_id'), '--checkout', str(checkout),
-            '--token-file', str(plan.worker_token_file), '--git-token-file', str(plan.git_token_file),
-            '--ca-file', str(plan.ca_file), '--patch', str(plan.patch_file),
-            '--patch-sha256', plan.patch_digest, '--state-dir', str(worker_state),
-            '--approved-until', permit['approved_until'], '--permit', str(plan.permit_file),
-            '--permit-sha256', plan.permit_digest)
+    for directory in (plan.worker_input_dir, plan.worker_output_dir, plan.worker_source_dir):
+        _private_dir(directory)
+    expected_input = {'assignment.json', 'preclaim.json', 'approved.patch'}
+    if {path.name for path in plan.worker_input_dir.iterdir()} != expected_input:
+        raise CPUWorkerBridgeError('Worker input directory differs from exact allowlist')
+    launch_nonce = os.urandom(16).hex()
+    args, container_name, container_run_id = _worker_docker_argv(
+        plan, assignment, preclaim, permit, launch_nonce)
     argv_digest = _digest(json.dumps({'argv': args, 'interpreter_sha256': interpreter_digest,
                                       'ca_sha256': ca_digest, 'source_head': source_head},
                                      sort_keys=True, separators=(',', ':')).encode())
@@ -693,7 +807,6 @@ def prepare_worker(plan: CPUWorkerPlan, *, action_id: str, operation_id: str) ->
                    environment={key: os.environ[key] for key in _SAFE_ENV if key in os.environ})
     spec.validate()
     unit_name = spec.unit()
-    launch_nonce = os.urandom(16).hex()
     request = {'action_id': action_id, 'operation_id': operation_id, 'profile_id': PROFILE,
                'host_id': socket.gethostname(), 'worker_id': worker_id, 'unit_name': unit_name,
                'launch_nonce': launch_nonce, 'source_digest': SOURCE_DIGEST,
@@ -721,7 +834,7 @@ def prepare_worker(plan: CPUWorkerPlan, *, action_id: str, operation_id: str) ->
                              interpreter_digest, controller_head, controller_source_digest,
                              controller_profile_digest, ca_digest,
                              owner_token_digest, _digest(worker_token_bytes),
-                             _digest(git_token_bytes),
+                             container_name, container_run_id,
                              assignment_digest, argv_digest, unit_name, launch_nonce)
 
 
@@ -735,8 +848,8 @@ def recover_worker(plan: CPUWorkerPlan, journal: dict) -> PreparedCPUWorker:
                 'action_id', 'operation_id', 'unit', 'launch_nonce', 'approved_until',
                 'source_head', 'source_digest', 'interpreter_digest', 'controller_head',
                 'controller_source_digest', 'controller_profile_digest', 'ca_digest',
-                'owner_token_digest', 'worker_token_digest', 'git_token_digest',
-                'assignment_digest', 'argv_digest', 'phase', 'assignment_dir'}
+                'owner_token_digest', 'worker_token_digest', 'container_name', 'container_run_id',
+                'assignment_digest', 'argv_digest', 'phase', 'assignment_dir', 'log'}
     if not isinstance(journal, dict) or set(journal) != required or journal.get('schema') != 'skybuild.cpu-worker-launch.v1':
         raise CPUWorkerBridgeError('Durable launch journal is missing or has unknown fields')
     if (journal['task_id'] == '' or journal['worker'] != plan.worker_id
@@ -761,14 +874,16 @@ def recover_worker(plan: CPUWorkerPlan, journal: dict) -> PreparedCPUWorker:
     ca_digest = _digest(_file_bytes(plan.ca_file, limit=1_048_576, private=False, owner=False))
     owner_token_digest = _digest(_file_bytes(plan.owner_token_file, limit=4096, private=True))
     worker_token_digest = _digest(_file_bytes(plan.worker_token_file, limit=1024, private=True))
-    git_token_digest = _digest(_file_bytes(plan.git_token_file, limit=1024, private=True))
+    _, container_name, container_run_id = _worker_docker_argv(
+        plan, assignment, preclaim, permit,
+        journal.get('launch_nonce', ''))
     local_pins = {
         'source_head': source_head, 'source_digest': SOURCE_DIGEST,
         'interpreter_digest': interpreter_digest, 'controller_head': controller_head,
         'controller_source_digest': controller_source_digest,
         'controller_profile_digest': controller_profile_digest, 'ca_digest': ca_digest,
         'owner_token_digest': owner_token_digest, 'worker_token_digest': worker_token_digest,
-        'git_token_digest': git_token_digest, 'assignment_digest': assignment_digest,
+        'assignment_digest': assignment_digest,
     }
     if any(journal.get(name) != value for name, value in local_pins.items()):
         raise CPUWorkerBridgeError('Local recovery pins differ from the durable launch journal')
@@ -796,13 +911,19 @@ def recover_worker(plan: CPUWorkerPlan, journal: dict) -> PreparedCPUWorker:
             or remote.get('state') not in {'prepared', 'launch-intent', 'running', 'unknown', 'terminal', 'settled'}
             or any(remote.get(name) != value for name, value in api_fields.items())):
         raise CPUWorkerBridgeError('API dispatch identity differs from durable launch journal')
+    if (journal['container_name'] != container_name
+            or journal['container_run_id'] != container_run_id
+            or permit.get('worker_image_id') != plan.worker_image_id
+            or journal['log'] != str(_attempt_log_path(plan.external_state_dir,
+                                                       journal['attempt_id']))):
+        raise CPUWorkerBridgeError('Container identity differs from durable launch journal')
     return PreparedCPUWorker(
         plan, None, journal['action_id'], journal['operation_id'], journal['assignment_id'],
         journal['task_id'], journal['attempt_id'], journal['claim_fence'], approved_until,
         source_head, SOURCE_DIGEST, interpreter_digest, controller_head,
         controller_source_digest, controller_profile_digest, ca_digest, owner_token_digest,
-        worker_token_digest, git_token_digest, assignment_digest, journal['argv_digest'],
-        journal['unit'], journal['launch_nonce'])
+        worker_token_digest, container_name, container_run_id, assignment_digest,
+        journal['argv_digest'], journal['unit'], journal['launch_nonce'])
 
 
 def _submit_after_settlement(owner: Client, worker_client: Client,
@@ -906,9 +1027,8 @@ def _launch_worker(client: Client, prepared: PreparedCPUWorker) -> dict:
             raise CPUWorkerBridgeError('Worker import checkout differs from the controller source root')
         if _source_head(prepared.plan.checkout) != prepared.source_head:
             raise CPUWorkerBridgeError('Trusted source checkout changed after preparation')
-        interpreter = Path(prepared.spec.argv[0]).resolve(strict=True)
-        if _digest(_file_bytes(interpreter, limit=256 * 1024 * 1024,
-                               private=False, owner=False)) != prepared.interpreter_digest:
+        _, actual_interpreter_digest = _worker_interpreter(prepared.plan.checkout)
+        if actual_interpreter_digest != prepared.interpreter_digest:
             raise CPUWorkerBridgeError('Trusted interpreter changed after preparation')
         if _controller_pin(prepared.plan, prepared.interpreter_digest) != (
                 prepared.controller_head, prepared.controller_source_digest,
@@ -997,6 +1117,15 @@ def _reconcile_worker(client: Client, prepared: PreparedCPUWorker) -> dict:
         observed = client.observe_cpu_worker_dispatch(prepared.plan.project_id,
                                                        prepared.operation_id, record)
         return {'observed': True, 'settled': False, 'state': observed.get('state')}
+
+    try:
+        container = _docker_container_state(prepared)
+    except CPUWorkerBridgeError:
+        return {'observed': False, 'settled': False,
+                'reason': 'exact worker container state is unknown; preserve CPU exposure'}
+    if container.get('status') != 'exited' or container.get('exit_code') != 0:
+        return {'observed': False, 'settled': False,
+                'reason': 'worker container did not report natural successful exit'}
 
     assignment, preclaim, workflow, digest = _read_assignment(prepared.plan, allow_runtime=True)
     if digest != prepared.assignment_digest:

@@ -1,6 +1,7 @@
 """The bounded controller owns both claims and both launch outcomes."""
 
 import json
+import hashlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,14 +17,18 @@ def _items(tmp_path):
     for index in (1, 2):
         task_id = f"SKYBUILD-CPU-{index}"
         worker = f"worker_{index}"
+        patch_path = tmp_path / f"patch-{index}"
+        patch_path.write_bytes(b"approved patch " + str(index).encode())
+        patch_path.chmod(0o600)
         envelope = {"schema": "manual-work-v2", "task_id": task_id,
                     "assignment_id": f"ASSIGN-{index}", "worker": worker,
                     "base_sha": "a" * 40, "brief_sha256": "b" * 64,
                     "task_status": "ready", "task_revision": 2}
         result.append({"task_id": task_id, "worker": worker, "assignment_id": f"ASSIGN-{index}",
                        "branch": f"task/cpu-{index}", "brief_path": f"docs/design/assignments/{index}.json",
-                       "patch": str(tmp_path / f"patch-{index}"), "patch_sha256": "c" * 64,
-                       "token_file": str(tmp_path / worker), "git_token_file": str(tmp_path / f"git-{index}"),
+                       "patch": str(patch_path),
+                       "patch_sha256": hashlib.sha256(patch_path.read_bytes()).hexdigest(),
+                       "token_file": str(tmp_path / worker),
                        "priority": index, "revision": 2, "base_sha": "a" * 40,
                        "brief_sha256": "b" * 64, "envelope": envelope})
     return result
@@ -36,7 +41,8 @@ def _setup(tmp_path, monkeypatch, *, fail_at=None):
     (tmp_path / "manifest").write_text(json.dumps(selected))
     expiry = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
     permit = {"approved_until": expiry, "memory_high_bytes": 1024**3,
-              "memory_max_bytes": 2 * 1024**3, "runtime_seconds": 600}
+              "memory_max_bytes": 2 * 1024**3, "runtime_seconds": 600,
+              "worker_image_id": "sha256:" + "a" * 64}
     events = []
     monkeypatch.setattr(controller, "_private_endpoint", lambda *_args: "private")
     monkeypatch.setattr(controller, "_read_manifest", lambda _path: selected)
@@ -44,6 +50,10 @@ def _setup(tmp_path, monkeypatch, *, fail_at=None):
     monkeypatch.setattr(controller, "_token_from_file", lambda path: Path(path).name)
     monkeypatch.setattr(controller, "select", lambda *_args, **_kwargs: selected)
     monkeypatch.setattr(controller, "load_permit", lambda *_args, **_kwargs: permit)
+    def source_mount(_repo, destination, _base):
+        destination.mkdir(mode=0o700)
+        return destination
+    monkeypatch.setattr(controller, "_prepare_worker_source", source_mount)
     monkeypatch.setattr(controller, "check_source", lambda *_args: events.append("source"))
     monkeypatch.setattr(controller, "check_weekly_usage", lambda *_args: events.append("usage"))
     monkeypatch.setattr(controller, "resource_admission", lambda *_args, **_kwargs: events.append("host"))
@@ -61,6 +71,7 @@ def _setup(tmp_path, monkeypatch, *, fail_at=None):
         def whoami(self):
             return {"is_admin": self.token == "owner"}
         def cpu_control_status(self, _project):
+            assert self.token == "owner"
             events.append("owner_controls")
             return {"pool": {"enabled": True, "local_enabled": True, "capacity": 2,
                              "generation": 3, "local_generation": 4},
@@ -69,6 +80,7 @@ def _setup(tmp_path, monkeypatch, *, fail_at=None):
             return {"task_id": task_id, "status": "in-progress", "revision": 3,
                     "metadata": {"_skybuild_workflow": {"readiness": {"input_generation": 5}}}}
         def reserve_cpu(self, _project, request):
+            assert self.token == "worker_" + request["task_id"].rsplit("-", 1)[1]
             events.append("reserve:" + request["task_id"])
             return {"action_id": request["action_id"], "attempt_id": request["attempt_id"],
                     "state": "reserved"}
@@ -88,6 +100,7 @@ def _setup(tmp_path, monkeypatch, *, fail_at=None):
         if fail_at == "claim-2" and worker == "worker_2":
             raise controller.ManualCordError("claim failed")
         destination.write_text(json.dumps(expected_envelope))
+        destination.chmod(0o600)
         return {"place": "working", "attempt_id": "attempt-" + worker,
                 "claim_fence": 1, "assignment_id": expected_envelope["assignment_id"],
                 "message_id": "message-" + worker}
@@ -99,12 +112,16 @@ def _setup(tmp_path, monkeypatch, *, fail_at=None):
         prepared_by_id.setdefault(operation_id, SimpleNamespace(plan=plan, action_id=action_id,
             operation_id=operation_id, unit_name="skybuild-job-" + plan.worker_id[-1] * 24 + ".service",
             task_id=plan.worker_id, launch_nonce="nonce-" + plan.worker_id,
+            assignment_id="ASSIGN-" + plan.worker_id[-1],
+            attempt_id="attempt-" + plan.worker_id, claim_fence=1,
+            container_name="container-" + plan.worker_id,
+            container_run_id="run-" + plan.worker_id,
+            spec=SimpleNamespace(log_path=plan.external_state_dir / "worker.log"),
             approved_until=datetime.fromisoformat(expiry), source_head="a" * 40,
             controller_head="a" * 40,
             **{name: "d" * 64 for name in ("source_digest", "interpreter_digest",
                 "controller_source_digest", "controller_profile_digest", "ca_digest",
-                "owner_token_digest", "worker_token_digest", "git_token_digest",
-                "assignment_digest", "argv_digest")})))
+                "owner_token_digest", "worker_token_digest", "assignment_digest", "argv_digest")})))
     launched = set()
     def launch(prepared):
         events.append("launch:" + prepared.task_id)
@@ -113,6 +130,8 @@ def _setup(tmp_path, monkeypatch, *, fail_at=None):
         launched.add(prepared.unit_name)
         return {"started": True, "unit_name": prepared.unit_name}
     monkeypatch.setattr(controller, "launch_worker", launch)
+    monkeypatch.setattr(controller, "_docker_container_state", lambda _prepared:
+                        {"status": "exited", "exit_code": 2})
 
     def reconcile(prepared):
         events.append("reconcile:" + prepared.task_id)

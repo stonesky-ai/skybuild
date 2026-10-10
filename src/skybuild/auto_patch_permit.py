@@ -136,7 +136,7 @@ def load(path: Path, expected_sha256: str, *, checkout: Path, selected: list[dic
     permit = json.loads(raw)
     fields = {"schema", "project_id", "profile", "source_head", "base_ref", "host_id", "slots",
               "approved_until", "hostwatch_reserve_bytes",
-              "memory_high_bytes", "memory_max_bytes", "runtime_seconds", "workers"}
+              "memory_high_bytes", "memory_max_bytes", "runtime_seconds", "worker_image_id", "workers"}
     if (not isinstance(permit, dict)
             or set(permit) not in (fields | {"usage"}, fields | {"weekly_usage_sha256"})):
         raise PermitError("Approved permit contract is invalid")
@@ -146,6 +146,9 @@ def load(path: Path, expected_sha256: str, *, checkout: Path, selected: list[dic
             or permit["host_id"] != socket.gethostname()
             or permit["slots"] != 2):
         raise PermitError("Permit scope differs from this two-worker route")
+    if not isinstance(permit["worker_image_id"], str) or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", permit["worker_image_id"]):
+        raise PermitError("Permit needs one immutable CPU worker image ID")
     check_source(checkout, permit)
     expected_workers = [{**{key: item[key] for key in ("task_id", "worker", "assignment_id",
                                                          "brief_path", "brief_sha256", "branch",

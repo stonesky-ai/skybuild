@@ -56,6 +56,39 @@ def test_worker_log_paths_are_attempt_scoped(tmp_path):
     assert _attempt_log_path(tmp_path, 'attempt-1') != _attempt_log_path(tmp_path, 'attempt-2')
 
 
+def test_container_argv_has_no_network_or_credentials_and_pins_all_mounts(tmp_path, monkeypatch):
+    source, inputs, output, state = (tmp_path / name for name in ('source', 'input', 'output', 'state'))
+    for directory in (source, inputs, output, state):
+        directory.mkdir(mode=0o700)
+    plan = SimpleNamespace(worker_image_id='sha256:' + 'a' * 64, worker_source_dir=source,
+                           worker_input_dir=inputs, worker_output_dir=output,
+                           external_state_dir=state, worker_id='worker_a',
+                           patch_digest='b' * 64)
+    assignment = {'task_id': 'SKYBUILD-TASK-TEST', 'assignment_id': 'assignment-1'}
+    preclaim = {'attempt_id': 'attempt-1'}
+    permit = {'memory_max_bytes': 2 * 1024**3}
+    monkeypatch.setattr(bridge, '_docker_executable', lambda: '/usr/bin/docker')
+    def inspect(argv, **_kwargs):
+        assert argv[:3] == ['/usr/bin/docker', 'image', 'inspect']
+        return subprocess.CompletedProcess(argv, 0, stdout=plan.worker_image_id + '\n')
+    monkeypatch.setattr(bridge.subprocess, 'run', inspect)
+    argv, name, run_id = bridge._worker_docker_argv(
+        plan, assignment, preclaim, permit, 'c' * 32)
+    assert argv[0] == '/usr/bin/docker'
+    assert '--network' in argv and argv[argv.index('--network') + 1] == 'none'
+    assert '--read-only' in argv and '--cap-drop' in argv and 'ALL' in argv
+    assert '--memory-swap' in argv and argv[argv.index('--memory-swap') + 1] == str(permit['memory_max_bytes'])
+    assert argv[argv.index('--user') + 1] == f'{bridge.os.getuid()}:{bridge.os.getgid()}'
+    assert not any('token' in item.lower() or 'credential' in item.lower() for item in argv)
+    assert not any(item.startswith('GIT_') for item in argv)
+    assert all(str(path) in ' '.join(argv) for path in (source, inputs, output))
+    assert f'type=bind,src={source},dst=/source,readonly' in argv
+    assert f'type=bind,src={inputs},dst=/input,readonly' in argv
+    assert f'type=bind,src={output},dst=/work' in argv
+    assert '/input/source' not in ' '.join(argv)
+    assert len(run_id) == 64 and name == 'skybuild-cpu-' + run_id[:24]
+
+
 def test_result_intent_binds_original_claim_and_exact_cord_body(tmp_path):
     assignment = {'assignment_id': 'assignment-1', 'task_id': 'SKYBUILD-TASK-TEST',
                   'worker': 'worker-1', 'dispatcher': 'owner-1', 'branch': 'task/test',
@@ -232,6 +265,8 @@ def test_terminal_observation_retries_settlement_without_new_observation(tmp_pat
                                                 prepared.controller_source_digest,
                                                 prepared.controller_profile_digest))
     monkeypatch.setattr(bridge, '_unit_manager', lambda _path: Manager())
+    monkeypatch.setattr(bridge, '_docker_container_state', lambda _prepared:
+                        {'status': 'exited', 'exit_code': 0})
     monkeypatch.setattr(bridge, '_trusted_client', lambda *_args: Client())
     monkeypatch.setattr(bridge, '_trusted_worker_client', lambda _prepared: WorkerClient())
     prepared.assignment_digest = '0' * 64
