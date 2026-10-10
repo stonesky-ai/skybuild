@@ -30,16 +30,14 @@ Supply a private JSON manifest outside the repository:
       "brief_path": "docs/design/assignments/worker-a.json",
       "patch": "/absolute/private/worker-a.patch",
       "patch_sha256": "<64 hex>",
-      "token_file": "/absolute/private/worker-a-token",
-      "git_token_file": "/absolute/private/worker-a-git-token"
+      "token_file": "/absolute/private/worker-a-token"
     },
     {
       "worker": "worker_b",
       "brief_path": "docs/design/assignments/worker-b.json",
       "patch": "/absolute/private/worker-b.patch",
       "patch_sha256": "<64 hex>",
-      "token_file": "/absolute/private/worker-b-token",
-      "git_token_file": "/absolute/private/worker-b-git-token"
+      "token_file": "/absolute/private/worker-b-token"
     }
   ]
 }
@@ -55,7 +53,8 @@ owner approves an exact private permit file by SHA-256. Its fields are
 `profile=bounded-trusted-cpu-patch-v1`, `project_id`, `host_id` (the execution
 host's hostname), `source_head`, `base_ref`, `slots=2`, `approved_until`,
 `usage`, `hostwatch_reserve_bytes`, `memory_high_bytes`,
-`memory_max_bytes`, `runtime_seconds`, and `workers`. The ordered `workers`
+`memory_max_bytes`, `runtime_seconds`, `worker_image_id`, and `workers`. The
+image pin is the local Docker image ID in `sha256:<64 lowercase hex>` form. The ordered `workers`
 array holds each selected `task_id`, `worker`, `assignment_id`, `brief_path`,
 `brief_sha256`, `branch`, `base_sha`, `revision`, `patch_sha256`, and canonical
 `envelope_sha256`. The executing checkout must be clean at the exact approved
@@ -97,36 +96,44 @@ scripts/project_python -m skybuild.auto_patch_controller \
   --state-dir /absolute/private/new-run-directory
 ```
 
-The controller selects the two highest-priority eligible tasks from committed
-brief candidates. It records selection, dispatches through the existing
-durable Cord sender, then claims each task with its own worker principal. It
-reserves one CPU unit against that exact live claim and prepares a durable
-dispatch effect before starting two separate bounded systemd user units through
-`JobUnitManager`. Each worker rereads the exact approved permit and checks its
-own clean loaded source, approved task envelope and patch before its first
-write. It checks its task approval and preclaimed fence, renews its lease,
-applies its patch in an independent clone, checks source bytes and Git lineage,
-pushes its own branch, then writes a durable exact result intent and exits
-without submitting. The trusted owner controller verifies the remote branch
-head and exact natural terminal invocation, settles that invocation's existing
-effect and reservation, and relays the same fenced result through the existing
-workflow and Cord idempotency keys. A failed or uncertain write leaves private
-evidence and held exposure. This one-shot run currently requires explicit owner
-reconciliation after process restart; do not start a replacement unit or reuse
-a consumed run directory.
+The controller selects two highest-priority eligible tasks from committed
+brief candidates. It records selection, dispatches through existing durable
+Cord sender, then claims each task with its own scoped worker principal. It
+reserves one CPU unit against that exact live claim and prepares durable
+dispatch effect before starting separate bounded systemd user units through
+`JobUnitManager`. Each unit runs Docker with network disabled, read-only root,
+read-only source and input mounts, one private output mount, dropped
+capabilities, no-new-privileges, and permit-pinned memory, CPU, PID, and runtime
+limits. The exact image must already exist locally.
+
+Worker container receives no REST or Git credentials. It applies only the
+hash-pinned patch to an independent local clone, checks file scope, bytes,
+syntax, and parent commit, then writes terminal evidence and exits. The trusted
+host controller validates exact terminal output and independently rebuilds the
+expected tree from the approved patch. It writes a durable create-only push
+intent, uses host Git authentication to push the exact task branch, and verifies
+the remote head. On uncertain push outcome, it performs read-only reconciliation
+and never retries the write. Host credentials never enter the container.
+
+After confirmed push, the CPU bridge validates exact natural systemd
+invocation and container exit, records terminal CPU observation, renews claim,
+and settles existing effect and reservation before submitting the same fenced
+result through existing workflow and Cord idempotency keys. A failed or
+uncertain write leaves private evidence and held exposure. This one-shot run
+requires explicit owner reconciliation after process restart; do not start a
+replacement unit or reuse a consumed run directory.
 
 The begin endpoint also rechecks unresolved task-lineage usage while holding the
 project graph lock. Until the shared usage-history source from schema migration
 016 is installed, begin fails closed with `usage_guard_unavailable`. Production
 qualification requires the combined 014/015/016 schema and source bundle.
 
-Workers receive their scoped REST worker token and a separate Git token file
-for the task-branch push. The controller does not pass a publisher credential
-to them. This deterministic route never executes
-candidate Python, project tests, Git hooks, or candidate configuration. The
-worker Git identity must be qualified for its task-branch push. Keep gate and
-publisher credentials in the separate trusted delivery context. A same-user
-test process is not a security boundary for arbitrary candidate code.
+The controller uses scoped worker REST credentials only for task claim and
+fenced workflow operations. Host Git authentication stays in trusted controller
+process; container receives no host mounts, Docker socket, publisher credentials,
+or network access. This deterministic route never runs candidate Python,
+project tests, Git hooks, or candidate configuration. Keep gate and publisher
+credentials in separate trusted delivery context.
 
 After both exact heads reach `Validating`, collect results through the existing
 current-task result verifier. Record all required validation stages and obtain

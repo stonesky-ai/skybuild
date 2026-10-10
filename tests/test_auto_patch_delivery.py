@@ -2,11 +2,11 @@
 
 import hashlib
 import json
-import os
 from pathlib import Path
 import socket
 import subprocess
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -99,25 +99,134 @@ def test_worker_applies_patch_and_checks_real_committed_bytes(tmp_path, monkeypa
     destination.parent.mkdir()
     original = worker._git
 
-    def local_git(repo, *args, timeout=30, askpass=None, git_token_file=None):
+    def local_git(repo, *args, timeout=30):
         if args[:3] == ("remote", "get-url", "origin") or args[:4] == (
                 "remote", "get-url", "--push", "origin"):
             return b"https://github.com/stonesky-ai/skybuild.git\n"
-        if args[:2] == ("clone", "--no-checkout"):
-            args = ("clone", "--no-checkout", str(bare), args[-1])
-        return original(repo, *args, timeout=timeout, askpass=askpass,
-                        git_token_file=git_token_file)
+        return original(repo, *args, timeout=timeout)
 
     monkeypatch.setattr(worker, "_git", local_git)
     head, paths = worker._clone_and_apply(source, destination,
                                           {"base_sha": base, "branch": "task/approved-cpu-note",
                                            "task_id": "SKYBUILD-CPU-NOTE",
-                                           "owned_paths": ["README.md"]}, patch,
-                                          askpass=tmp_path / "unused-askpass",
-                                          git_token_file=tmp_path / "unused-token")
+                                           "owned_paths": ["README.md"]}, patch)
     assert paths == ["README.md"]
     assert git(destination, "show", "HEAD:README.md") == b"Original\nUseful new note.\n"
     assert git(destination, "rev-list", "--parents", "-n", "1", head).decode().split() == [head, base]
+
+
+def test_controller_source_mount_excludes_ignored_local_files(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"], check=True)
+    (repo / ".gitignore").write_text("local-secret.txt\n")
+    (repo / "tracked.md").write_text("public source\n")
+    (repo / "local-secret.txt").write_text("host-only secret\n")
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin",
+                    "https://github.com/stonesky-ai/skybuild.git"], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", ".gitignore", "tracked.md"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base"], check=True)
+    base = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                          check=True, capture_output=True, text=True).stdout.strip()
+
+    mount = controller._prepare_worker_source(repo, tmp_path / "worker-source", base)
+    assert (mount / "tracked.md").read_text() == "public source\n"
+    assert not (mount / "local-secret.txt").exists()
+    assert subprocess.run(["git", "-C", str(mount), "status", "--porcelain"],
+                          check=True, capture_output=True).stdout == b""
+
+
+def test_controller_push_reconciles_uncertain_create_only_push_without_retry(tmp_path, monkeypatch):
+    def git(repo, *args):
+        return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True).stdout
+
+    source = tmp_path / "checkout"
+    source.mkdir()
+    git(source, "init", "-q")
+    git(source, "config", "user.name", "Test Author")
+    git(source, "config", "user.email", "test@example.invalid")
+    (source / "docs/design/assignments").mkdir(parents=True)
+    (source / "docs/design/architecture.md").write_text("architecture\n")
+    (source / "README.md").write_text("base\n")
+    assignment = {"schema": "manual-work-v2", "assignment_id": "ASSIGN-CPU-TEST",
+        "task_id": "SKYBUILD-CPU-TEST", "worker": "worker_a", "dispatcher": "pilot_dispatcher",
+        "base_sha": "0" * 40, "brief_path": "docs/design/assignments/relay.json",
+        "brief_sha256": "0" * 64, "branch": "task/cpu-relay-test", "owned_paths": ["README.md"],
+        "checks": ["Patch accepted"], "model_limit": "No candidate execution",
+        "task_status": "in-progress", "task_revision": 3}
+    brief = {key: value for key, value in assignment.items()
+             if key not in {"base_sha", "brief_path", "brief_sha256", "task_status", "task_revision"}}
+    brief.update(schema="manual-work-brief-v1", next_action="Independent review")
+    brief_bytes = json.dumps(brief, sort_keys=True, separators=(",", ":")).encode()
+    (source / assignment["brief_path"]).write_bytes(brief_bytes)
+    git(source, "add", "docs", "README.md")
+    git(source, "commit", "-qm", "base")
+    base = git(source, "rev-parse", "HEAD").decode().strip()
+    assignment["base_sha"] = base
+    assignment["brief_sha256"] = hashlib.sha256(brief_bytes).hexdigest()
+    origin = "https://github.com/stonesky-ai/skybuild.git"
+    git(source, "remote", "add", "origin", origin)
+    git(source, "remote", "set-url", "--push", "origin", origin)
+    (source / "README.md").write_text("base\nreviewed change\n")
+    patch_bytes = git(source, "diff", "--", "README.md")
+    (source / "README.md").write_text("base\n")
+
+    state = tmp_path / "state"
+    assignment_dir, output = state / "assignment", state / "output"
+    assignment_dir.mkdir(parents=True, mode=0o700)
+    output.mkdir(mode=0o700)
+    input_dir = state / "input"
+    input_dir.mkdir(mode=0o700)
+    patch_file = input_dir / "approved.patch"
+    patch_file.write_bytes(patch_bytes)
+    patch_file.chmod(0o400)
+    digest = hashlib.sha256(patch_bytes).hexdigest()
+    assignment_file = assignment_dir / "assignment.json"
+    assignment_file.write_text(json.dumps(assignment))
+    assignment_file.chmod(0o600)
+    preclaim = {"assignment_id": assignment["assignment_id"], "place": "working",
+                "attempt_id": "attempt-relay-test", "claim_fence": 9}
+    preclaim_file = assignment_dir / "preclaim.json"
+    preclaim_file.write_text(json.dumps(preclaim))
+    preclaim_file.chmod(0o600)
+    workflow = {"token": {"attempt_id": preclaim["attempt_id"], "claim_fence": 9,
+                           "input_generation": 2, "definition_revision": 3,
+                           "policy_version": "policy-test"}}
+    workflow_file = assignment_dir / "assignment.json.workflow.json"
+    workflow_file.write_text(json.dumps(workflow))
+    workflow_file.chmod(0o600)
+    terminal = worker.run(worker="worker_a", checkout=source, assignment_path=assignment_file,
+                          preclaim_path=preclaim_file, patch_path=patch_file,
+                          patch_sha256=digest, state_dir=output)
+    log = state / "worker.log"
+    log.write_text(json.dumps(terminal, sort_keys=True) + "\n")
+    log.chmod(0o600)
+    remote = tmp_path / "remote.git"
+    git(None, "init", "--bare", "-q", str(remote))
+    plan = SimpleNamespace(assignment_dir=assignment_dir, worker_output_dir=output,
+        patch_file=patch_file, patch_digest=digest, external_state_dir=state,
+        checkout=source, project_id="skybuild", worker_id="worker_a")
+    prepared = SimpleNamespace(plan=plan, task_id=assignment["task_id"],
+        assignment_id=assignment["assignment_id"], attempt_id=preclaim["attempt_id"],
+        claim_fence=9, operation_id="operation-relay-test")
+    pushes = []
+    def controller_git(repo, *args, **kwargs):
+        rewritten = tuple(str(remote) if arg == origin else arg for arg in args)
+        result = subprocess.run(["git", *rewritten], cwd=repo, check=True,
+                                capture_output=True, timeout=10)
+        if rewritten and rewritten[0] == "push":
+            pushes.append(rewritten)
+            raise controller.AutoControllerError("simulate lost push acknowledgement")
+        return result.stdout
+    monkeypatch.setattr(controller, "_controller_git", controller_git)
+    intent = controller._publish_worker_output(prepared, {"log": str(log)})
+    assert len(pushes) == 1
+    assert intent["source_head"] == terminal["head_sha"]
+    assert intent["source_branch"] == "refs/heads/" + assignment["branch"]
+    assert json.loads((assignment_dir / "push-confirmed.json").read_text())["remote_head"] == terminal["head_sha"]
+    assert (assignment_dir / "result-intent.json").is_file()
 
 
 def test_worker_refuses_changed_patch_and_unapproved_task(tmp_path):
@@ -185,19 +294,11 @@ def test_worker_rechecks_exact_permit_and_assignment_before_work(tmp_path, monke
                                    approved_until=expiry)
 
 
-def test_private_git_askpass_uses_token_file_without_embedding_secret(tmp_path):
-    token = tmp_path / "token"
-    token.write_text("example-secret\n")
-    token.chmod(0o600)
-    helper = worker._askpass(tmp_path, token)
-    assert "example-secret" not in helper.read_text()
-    environment = {"SKYBUILD_GIT_TOKEN_FILE": str(token), "PATH": os.environ["PATH"]}
-    username = subprocess.run([str(helper), "Username for HTTPS"], env=environment,
-                              check=True, capture_output=True).stdout
-    password = subprocess.run([str(helper), "Password for HTTPS"], env=environment,
-                              check=True, capture_output=True).stdout
-    assert username == b"x-access-token\n"
-    assert password == b"example-secret\n"
+def test_worker_has_no_git_or_api_credential_inputs():
+    source = Path(worker.__file__).read_text()
+    assert "git_token_file" not in source
+    assert "send_result" not in source
+    assert "renew_assignment" not in source
 
 
 @pytest.mark.parametrize("revised", [False, True])
@@ -235,7 +336,7 @@ def test_exact_one_shot_permit_requires_valid_usage_and_resource_headroom(tmp_pa
         "weekly_usage_sha256": hashlib.sha256(weekly.read_bytes()).hexdigest(),
         "hostwatch_reserve_bytes": 8 * 1024**3,
         "memory_high_bytes": 1024**3, "memory_max_bytes": 2 * 1024**3,
-        "runtime_seconds": 600, "workers": [
+        "runtime_seconds": 600, "worker_image_id": "sha256:" + "e" * 64, "workers": [
             {**{key: item[key] for key in ("task_id", "worker", "assignment_id", "brief_path",
                                             "brief_sha256", "branch", "base_sha", "revision", "patch_sha256")},
              "envelope_sha256": permit.envelope_sha256(item["envelope"])} for item in selected]}

@@ -1,13 +1,12 @@
-"""One bounded CPU worker for an administrator-approved, hash-pinned patch.
+"""Apply one administrator-approved hash-pinned patch in an offline container.
 
-The worker has only its project-scoped worker credential. It cannot approve its
-own review, gate, publication or task acceptance. A failed or uncertain write
-leaves its private attempt directory for explicit reconciliation.
+The worker receives only immutable assignment inputs, a read-only source mount,
+the approved patch, and a private output directory. The trusted host controller
+handles REST operations and branch publication.
 """
 
 import argparse
 import ast
-from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -17,28 +16,46 @@ import stat
 import subprocess
 import sys
 
-from .client import Client, ClientError, ca_file_sha256
-from .auto_patch_permit import PermitError, check_worker_permit
-from .fleet_preflight import _resolved_addresses, _token_from_file, probe_private_api
 from .manual_assignment import _path, verify_assignment
-from .manual_cord import _current_assignment, renew_assignment, result_message, _workflow_path
-from .manual_dispatch import _private_endpoint, _read_state, _state_directory
 
 
 class PatchWorkerError(ValueError):
     pass
 
 
+def _read_state(path: Path) -> dict:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        info = os.fstat(descriptor)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_mode & 0o077 or info.st_size > 131072):
+            raise PatchWorkerError("Worker input file is unsafe")
+        data = os.read(descriptor, 131073)
+    finally:
+        os.close(descriptor)
+    value = json.loads(data)
+    if not isinstance(value, dict):
+        raise PatchWorkerError("Worker input is invalid")
+    return value
+
+
+def _state_directory(path: Path, checkout: Path) -> Path:
+    if (not path.is_absolute() or path.is_symlink() or not path.is_dir()
+            or path == checkout or checkout in path.parents):
+        raise PatchWorkerError("Worker output directory is unsafe")
+    info = path.stat()
+    if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        raise PatchWorkerError("Worker output directory must be private and owned")
+    return path
+
+
 def _git(repo: Path | None, *args: str, timeout: int = 30,
-         askpass: Path | None = None, git_token_file: Path | None = None) -> bytes:
+         ) -> bytes:
     if any(name.startswith("GIT_") and name != "GIT_PAGER" for name in os.environ):
         raise PatchWorkerError("Inherited Git environment requires reconciliation")
     environment = {name: os.environ[name] for name in ("HOME", "PATH", "LANG", "LC_ALL") if name in os.environ}
     environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null",
                        GIT_TERMINAL_PROMPT="0", GIT_LFS_SKIP_SMUDGE="1")
-    if askpass is not None and git_token_file is not None:
-        environment["GIT_ASKPASS"] = str(askpass)
-        environment["SKYBUILD_GIT_TOKEN_FILE"] = str(git_token_file)
     command = ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.attributesFile=/dev/null",
                "-c", "core.autocrlf=false", "-c", "commit.gpgsign=false", *args]
     try:
@@ -108,33 +125,6 @@ def _record(directory: Path, name: str, payload: dict) -> None:
         os.close(descriptor)
 
 
-def _askpass(directory: Path, git_token_file: Path) -> Path:
-    """Use an operator-owned credential file without exposing token bytes in argv."""
-    if not git_token_file.is_absolute() or "\n" in str(git_token_file):
-        raise PatchWorkerError("Git token path must be absolute")
-    descriptor = os.open(git_token_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    try:
-        info = os.fstat(descriptor)
-        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
-                or info.st_mode & 0o077 or not 0 < info.st_size <= 1024):
-            raise PatchWorkerError("Git token file must be private and owned")
-    finally:
-        os.close(descriptor)
-    path = directory / "git-askpass.sh"
-    script = ("#!/bin/sh\n"
-              "case \"$1\" in\n"
-              "  *Username*) printf '%s\\n' 'x-access-token' ;;\n"
-              "  *Password*) exec /bin/cat -- \"$SKYBUILD_GIT_TOKEN_FILE\" ;;\n"
-              "  *) exit 1 ;;\n"
-              "esac\n")
-    descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o700)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-        stream.write(script)
-        stream.flush()
-        os.fsync(stream.fileno())
-    return path
-
-
 def _changed_paths(repo: Path, base: str) -> list[str]:
     paths = _git(repo, "diff", "--no-renames", "--name-only", "-z", base, "HEAD")
     return sorted(os.fsdecode(value) for value in paths.split(b"\0") if value)
@@ -171,15 +161,18 @@ def _patch_paths(repo: Path, base: str, patch_file: Path, owned_paths: list[str]
 
 
 def _clone_and_apply(repo: Path, destination: Path, assignment: dict, patch: bytes,
-                     *, askpass: Path, git_token_file: Path) -> tuple[str, list[str]]:
+                     ) -> tuple[str, list[str]]:
     if destination.exists() or destination.is_symlink() or not destination.parent.is_dir():
         raise PatchWorkerError("Worker checkout exists; reconcile before another attempt")
     origin = _git(repo, "remote", "get-url", "origin").decode().strip()
     push_origin = _git(repo, "remote", "get-url", "--push", "origin").decode().strip()
     if origin != "https://github.com/stonesky-ai/skybuild.git" or push_origin != origin:
         raise PatchWorkerError("Worker source origin differs")
-    _git(None, "clone", "--no-checkout", origin, str(destination), timeout=120,
-         askpass=askpass, git_token_file=git_token_file)
+    # Use the controller's read-only source mount as the object source. This
+    # keeps the worker offline; only the trusted controller can contact hosts.
+    _git(None, "clone", "--no-local", "--no-checkout", repo.resolve().as_uri(),
+         str(destination), timeout=120)
+    _git(destination, "remote", "set-url", "origin", origin)
     if (_git(destination, "remote", "get-url", "origin").decode().strip() != origin
             or _git(destination, "remote", "get-url", "--push", "origin").decode().strip() != origin):
         raise PatchWorkerError("Worker clone origin differs")
@@ -236,139 +229,61 @@ def _clone_and_apply(repo: Path, destination: Path, assignment: dict, patch: byt
     return head, paths
 
 
-def run(client: Client, *, project: str, worker: str, dispatcher: str, checkout: Path,
-        message_id: str, patch_path: Path, patch_sha256: str, state_dir: Path,
-        approved_until: datetime, git_token_file: Path, permit_path: Path,
-        permit_sha256: str) -> dict:
-    """Receive, claim, apply, push and submit one pinned assignment exactly once."""
+def run(*, worker: str, checkout: Path, assignment_path: Path, preclaim_path: Path,
+        patch_path: Path, patch_sha256: str, state_dir: Path) -> dict:
+    """Apply one prevalidated patch offline; trusted controller publishes it."""
     checkout = checkout.resolve()
-    def require_time() -> None:
-        if datetime.now(timezone.utc) >= approved_until:
-            raise PatchWorkerError("Approval expired; preserve attempt")
-
-    require_time()
     state_dir = _state_directory(state_dir, checkout)
-    expected = {"assignment.json", "assignment.json.workflow.json.intent",
-                "assignment.json.workflow.json", "preclaim.json"}
-    if {item.name for item in state_dir.iterdir()} != expected:
-        raise PatchWorkerError("Attempt does not have exactly one trusted preclaim")
+    if any(state_dir.iterdir()):
+        raise PatchWorkerError("Worker output directory is not empty")
     patch = _patch_bytes(patch_path, patch_sha256)
-    assignment_path = state_dir / "assignment.json"
     assignment = _read_state(assignment_path)
-    received = _read_state(state_dir / "preclaim.json")
+    received = _read_state(preclaim_path)
     if (not isinstance(assignment, dict) or not isinstance(received, dict)
-            or received.get("message_id") != message_id
             or received.get("assignment_id") != assignment.get("assignment_id")
-            or received.get("place") != "working"):
+            or received.get("place") != "working"
+            or not isinstance(received.get("attempt_id"), str)
+            or type(received.get("claim_fence")) is not int):
         raise PatchWorkerError("Trusted preclaim identity differs")
-    check_worker_permit(permit_path, permit_sha256, checkout=checkout, assignment=assignment,
-                        project=project, worker=worker, patch_sha256=patch_sha256,
-                        approved_until=approved_until)
     verify_assignment(assignment, checkout, worker=worker)
-    if assignment["dispatcher"] != dispatcher:
-        raise PatchWorkerError("Assignment dispatcher differs")
-    task = client.get_task(project, assignment["task_id"])
-    _approved_task(task, assignment, patch_sha256, preclaim=False)
-    binding = _read_state(_workflow_path(assignment_path))
-    if (not isinstance(binding, dict) or not isinstance(binding.get("token"), dict)
-            or binding["token"].get("attempt_id") != received.get("attempt_id")
-            or binding["token"].get("claim_fence") != received.get("claim_fence")):
-        raise PatchWorkerError("Saved fenced claim differs from launch identity")
-    _current_assignment(client, project, assignment, binding["token"])
-    _record(state_dir, "intent.json", {"schema": "skybuild.auto-patch-attempt.v1", "project_id": project,
+    _record(state_dir, "intent.json", {"schema": "skybuild.auto-patch-attempt.v1",
              "task_id": assignment["task_id"], "assignment_id": assignment["assignment_id"],
-             "message_id": message_id, "worker": worker, "patch_sha256": patch_sha256,
+             "worker": worker, "attempt_id": received["attempt_id"],
+             "claim_fence": received["claim_fence"], "patch_sha256": patch_sha256,
              "base_sha": assignment["base_sha"]})
-    require_time()
-    renew_assignment(client, project, assignment, worker, _workflow_path(assignment_path))
     destination = state_dir / "source"
-    askpass = _askpass(state_dir, git_token_file)
-    require_time()
-    head, paths = _clone_and_apply(checkout, destination, assignment, patch,
-                                   askpass=askpass, git_token_file=git_token_file)
-    require_time()
-    renew_assignment(client, project, assignment, worker, _workflow_path(assignment_path))
-    remote_ref = "refs/heads/" + assignment["branch"]
-    if _git(destination, "ls-remote", "origin", remote_ref,
-            askpass=askpass, git_token_file=git_token_file).strip():
-        raise PatchWorkerError("Task branch already exists on origin")
-    _record(state_dir, "push-intent.json", {"head_sha": head, "remote_ref": remote_ref})
-    require_time()
-    _git(destination, "push", "--atomic", "--force-with-lease=" + remote_ref + ":",
-         "origin", "HEAD:" + remote_ref, timeout=120,
-         askpass=askpass, git_token_file=git_token_file)
-    if (_git(destination, "ls-remote", "origin", remote_ref, askpass=askpass,
-             git_token_file=git_token_file).decode().strip() != f"{head}\t{remote_ref}"):
-        raise PatchWorkerError("Pushed branch head is unconfirmed")
+    head, paths = _clone_and_apply(checkout, destination, assignment, patch)
     result = {"schema": "manual-work-v1", "assignment_id": assignment["assignment_id"],
               "phase": "ready-for-review", "branch": assignment["branch"], "head_sha": head,
               "checks": ["Approved patch SHA-256 matched task metadata", "Python syntax parsed where applicable",
                          "git diff --cached --check passed", "Committed bytes, paths and parent matched"],
               "changed_paths": paths, "risks": [],
               "next_action": "Independent exact-head review, validation and trusted bundle gate"}
-    binding = _read_state(_workflow_path(assignment_path))
-    token = binding.get("token") if isinstance(binding, dict) else None
-    if (not isinstance(token, dict) or token.get("attempt_id") != received.get("attempt_id")
-            or token.get("claim_fence") != received.get("claim_fence")):
-        raise PatchWorkerError("Saved fenced claim differs from result intent")
-    # Pin the envelope that the trusted owner relay will actually send.
-    message, message_key = result_message(assignment, result, relay_worker=worker)
-    intent = {
-        "schema": "skybuild.cpu-result-intent.v1",
-        "project_id": project,
-        "task_id": assignment["task_id"],
-        "assignment_id": assignment["assignment_id"],
-        "worker": worker,
-        "attempt_id": token["attempt_id"],
-        "claim_fence": token["claim_fence"],
-        "input_generation": token["input_generation"],
-        "definition_revision": token["definition_revision"],
-        "policy_version": token["policy_version"],
-        "assignment_sha256": hashlib.sha256(
-            json.dumps(assignment, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
-        "brief_sha256": assignment["brief_sha256"],
-        "patch_sha256": patch_sha256,
-        "source_head": head,
-        "source_branch": remote_ref,
-        "target_base": assignment["base_sha"],
-        "result": result,
-        "message": message,
-        "message_idempotency_key": message_key,
-    }
-    _record(state_dir, "result-intent.json", intent)
-    return {"task_id": assignment["task_id"], "worker": worker, "head_sha": head,
-            "branch": assignment["branch"], "result_prepared": True,
-            "attempt_id": received["attempt_id"], "claim_fence": received["claim_fence"],
-            "state_dir": str(state_dir)}
+    _record(state_dir, "result-intent.json", result)
+    output = {"schema": "skybuild.auto-patch-worker-result.v1", "task_id": assignment["task_id"],
+              "assignment_id": assignment["assignment_id"], "worker": worker,
+              "attempt_id": received["attempt_id"], "claim_fence": received["claim_fence"],
+              "patch_sha256": patch_sha256, "base_sha": assignment["base_sha"],
+              "branch": assignment["branch"], "head_sha": head, "changed_paths": paths,
+              "result": result}
+    _record(state_dir, "terminal-result.json", output)
+    return output
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("url", "project", "worker", "dispatcher", "message-id", "patch-sha256", "permit-sha256"):
-        parser.add_argument("--" + name, required=True)
-    parser.add_argument("--approved-until", required=True)
-    for name in ("checkout", "token-file", "git-token-file", "ca-file", "patch", "state-dir", "permit"):
+    parser.add_argument("--worker", required=True)
+    parser.add_argument("--patch-sha256", required=True)
+    for name in ("checkout", "assignment", "preclaim", "patch", "state-dir"):
         parser.add_argument("--" + name, type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        expiry = datetime.fromisoformat(args.approved_until.replace("Z", "+00:00"))
-        if expiry.tzinfo is None or expiry <= datetime.now(timezone.utc):
-            raise PatchWorkerError("Approval cutoff is unavailable")
-        _private_endpoint(args.url, _resolved_addresses)
-        probe_private_api(args.url, args.project, args.token_file, args.worker,
-                          ca_file=args.ca_file, workflow=True)
-        digest = ca_file_sha256(args.ca_file)
-        with Client(args.url, _token_from_file(args.token_file), retries=0, timeout=10,
-                    trust_env=False, ca_file=args.ca_file, expected_ca_sha256=digest) as client:
-            output = run(client, project=args.project, worker=args.worker, dispatcher=args.dispatcher,
-                         checkout=args.checkout, message_id=args.message_id,
-                         patch_path=args.patch, patch_sha256=args.patch_sha256,
-                         state_dir=args.state_dir, approved_until=expiry,
-                         git_token_file=args.git_token_file, permit_path=args.permit,
-                         permit_sha256=args.permit_sha256)
+        output = run(worker=args.worker, checkout=args.checkout, assignment_path=args.assignment,
+                     preclaim_path=args.preclaim, patch_path=args.patch,
+                     patch_sha256=args.patch_sha256, state_dir=args.state_dir)
         print(json.dumps(output, sort_keys=True))
         return 0
-    except (PatchWorkerError, PermitError, ClientError, OSError, ValueError, TypeError,
+    except (PatchWorkerError, OSError, ValueError, TypeError,
             subprocess.SubprocessError):
         print(json.dumps({"submitted": False, "reason": "Worker stopped; preserve private attempt evidence"}), file=sys.stderr)
         return 2

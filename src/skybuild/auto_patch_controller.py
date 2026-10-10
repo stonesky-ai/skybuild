@@ -12,8 +12,11 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 from uuid import uuid4
 
@@ -21,19 +24,245 @@ from scripts.skybuild_job_unit import JobUnitError, JobUnitManager
 
 from .auto_patch_permit import (PermitError, check_source, check_weekly_usage,
                                 load as load_permit, resource_admission)
-from .auto_patch_worker import _approved_task, _patch_bytes
+from .auto_patch_worker import (_approved_task, _changed_paths, _git, _patch_bytes,
+                               _patch_paths, PatchWorkerError)
 from .client import Client, ClientError, ca_file_sha256
 from .fleet_preflight import PreflightError, _token_from_file, _resolved_addresses, probe_private_api
-from .manual_cord import ManualCordError, receive_assignment
+from .manual_cord import ManualCordError, receive_assignment, result_message
 from .cpu_worker_bridge import (CPUWorkerBridgeError, CPUWorkerPlan, launch_worker,
                                 prepare_worker, reconcile_worker, recover_worker,
-                                _file_bytes)
+                                _docker_container_state, _file_bytes, _write_exclusive)
 from .manual_dispatch import (DispatchError, _private_endpoint, _state_directory,
                               build_envelope, dispatch)
 
 
 class AutoControllerError(ValueError):
     pass
+
+
+def _read_json(path: Path, *, maximum: int = 32768) -> dict:
+    data = _file_bytes(path, limit=maximum, private=True)
+    try:
+        value = json.loads(data)
+    except (UnicodeError, ValueError):
+        raise AutoControllerError("Worker evidence is malformed") from None
+    if not isinstance(value, dict):
+        raise AutoControllerError("Worker evidence is malformed")
+    return value
+
+
+def _controller_git(repo: Path, *args: str, timeout: int = 30,
+                    authenticated: bool = False) -> bytes:
+    if any(name.startswith("GIT_") and name != "GIT_PAGER" for name in os.environ):
+        raise AutoControllerError("Inherited Git environment requires reconciliation")
+    environment = {name: os.environ[name] for name in ("HOME", "PATH", "LANG", "LC_ALL")
+                   if name in os.environ}
+    environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null",
+                       GIT_TERMINAL_PROMPT="0", GIT_LFS_SKIP_SMUDGE="1")
+    command = ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.attributesFile=/dev/null",
+               "-c", "core.autocrlf=false"]
+    if authenticated:
+        if shutil.which("gh", path=environment.get("PATH")) is None:
+            raise AutoControllerError("Controller Git credential helper is unavailable")
+        command.extend(("-c", "credential.helper=", "-c",
+                        "credential.helper=!gh auth git-credential"))
+    try:
+        result = subprocess.run([*command, *args], cwd=repo, env=environment,
+                                capture_output=True, timeout=timeout, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        raise AutoControllerError("Controller Git outcome is unknown; preserve run evidence") from None
+    if result.returncode:
+        raise AutoControllerError("Controller Git operation failed; preserve run evidence")
+    return result.stdout
+
+
+def _prepare_worker_source(repo: Path, destination: Path, base_sha: str) -> Path:
+    """Create a clean, credential-free source mount at the task's pinned base."""
+    if destination.exists() or destination.is_symlink():
+        raise AutoControllerError("Worker source mount exists; reconcile before reuse")
+    _git(None, "clone", "--no-local", "--no-checkout", str(repo), str(destination), timeout=120)
+    _git(destination, "switch", "--detach", base_sha)
+    origin = "https://github.com/stonesky-ai/skybuild.git"
+    _git(destination, "remote", "set-url", "origin", origin)
+    _git(destination, "remote", "set-url", "--push", "origin", origin)
+    if (_git(destination, "rev-parse", "HEAD").decode().strip() != base_sha
+            or _git(destination, "status", "--porcelain", "--untracked-files=all")
+            or _git(destination, "remote", "get-url", "origin").decode().strip() != origin
+            or _git(destination, "remote", "get-url", "--push", "origin").decode().strip() != origin):
+        raise AutoControllerError("Worker source mount differs from the pinned clean source")
+    destination.chmod(0o700)
+    return destination
+
+
+def _publish_worker_output(prepared, record: dict) -> dict:
+    """Verify exact patch output, create-only push it, and stage the bridge result."""
+    plan = prepared.plan
+    assignment = _read_json(plan.assignment_dir / "assignment.json")
+    preclaim = _read_json(plan.assignment_dir / "preclaim.json")
+    output = plan.worker_output_dir
+    terminal = _read_json(output / "terminal-result.json")
+    result = _read_json(output / "result-intent.json")
+    try:
+        log_bytes = Path(record["log"]).read_bytes()
+        if len(log_bytes) > 32768 or len(log_bytes.splitlines()) != 1:
+            raise ValueError
+        logged = json.loads(log_bytes.decode("utf-8"))
+    except (KeyError, OSError, UnicodeError, ValueError):
+        raise AutoControllerError("Worker terminal output is unavailable or malformed") from None
+    if (logged != terminal or terminal.get("schema") != "skybuild.auto-patch-worker-result.v1"
+            or terminal.get("task_id") != prepared.task_id
+            or terminal.get("assignment_id") != prepared.assignment_id
+            or terminal.get("worker") != plan.worker_id
+            or terminal.get("attempt_id") != prepared.attempt_id
+            or terminal.get("claim_fence") != prepared.claim_fence
+            or terminal.get("patch_sha256") != plan.patch_digest
+            or terminal.get("base_sha") != assignment.get("base_sha")
+            or terminal.get("branch") != assignment.get("branch")
+            or terminal.get("result") != result
+            or result.get("assignment_id") != prepared.assignment_id
+            or result.get("head_sha") != terminal.get("head_sha")
+            or result.get("phase") != "ready-for-review"):
+        raise AutoControllerError("Worker terminal identity differs from its fenced assignment")
+    source = output / "source"
+    head = terminal["head_sha"]
+    if (not re.fullmatch(r"[0-9a-f]{40}", str(head))
+            or _git(source, "remote", "get-url", "origin").decode().strip()
+            != "https://github.com/stonesky-ai/skybuild.git"
+            or _git(source, "symbolic-ref", "--short", "HEAD").decode().strip() != assignment["branch"]
+            or _git(source, "rev-parse", "HEAD").decode().strip() != head
+            or _git(source, "rev-list", "--parents", "-n", "1", "HEAD").decode().split()
+            != [head, assignment["base_sha"]]
+            or _git(source, "status", "--porcelain", "--untracked-files=all")):
+        raise AutoControllerError("Worker commit differs from its clean pinned branch")
+    changed = _changed_paths(source, assignment["base_sha"])
+    owned = sorted(assignment.get("owned_paths", []))
+    if changed != owned or changed != sorted(terminal.get("changed_paths", [])):
+        raise AutoControllerError("Worker commit changed files outside the approved scope")
+    patch = _patch_bytes(plan.patch_file, plan.patch_digest)
+    with tempfile.TemporaryDirectory(prefix="skybuild-cpu-verify-", dir=plan.external_state_dir) as name:
+        expected = Path(name) / "expected"
+        _git(None, "clone", "--no-local", "--no-checkout", str(plan.checkout), str(expected), timeout=120)
+        _git(expected, "switch", "--detach", assignment["base_sha"])
+        patch_file = Path(name) / "approved.patch"
+        patch_file.write_bytes(patch)
+        patch_file.chmod(0o400)
+        paths = _patch_paths(expected, assignment["base_sha"], patch_file, owned)
+        if paths != changed:
+            raise AutoControllerError("Approved patch paths differ from worker output")
+        _git(expected, "apply", "--check", str(patch_file))
+        _git(expected, "apply", str(patch_file))
+        _git(expected, "add", "--", *paths)
+        if _git(source, "rev-parse", "HEAD^{tree}").decode().strip() != _git(
+                expected, "write-tree").decode().strip():
+            raise AutoControllerError("Worker tree differs from the exact approved patch")
+
+    remote_ref = "refs/heads/" + assignment["branch"]
+    if (not remote_ref.startswith("refs/heads/task/")
+            or _controller_git(None, "check-ref-format", remote_ref).strip()):
+        raise AutoControllerError("Approved task branch ref is invalid")
+    push_repo = plan.external_state_dir / "controller-push.git"
+    if push_repo.is_symlink():
+        raise AutoControllerError("Controller publication workspace is unsafe")
+    if not push_repo.exists():
+        _git(None, "init", "--bare", "--quiet", str(push_repo))
+    elif _git(push_repo, "rev-parse", "--is-bare-repository").decode().strip() != "true":
+        raise AutoControllerError("Saved controller publication workspace is not bare")
+    imported = True
+    try:
+        _git(push_repo, "cat-file", "-e", head + "^{commit}")
+    except PatchWorkerError:
+        imported = False
+    if not imported:
+        _git(push_repo, "fetch", "--no-tags", "--no-recurse-submodules", str(source),
+             "refs/heads/" + assignment["branch"])
+    try:
+        _git(push_repo, "cat-file", "-e", head + "^{commit}")
+    except PatchWorkerError:
+        raise AutoControllerError("Controller import does not contain the verified commit") from None
+    if (_git(push_repo, "rev-parse", "FETCH_HEAD").decode().strip() != head
+            or _git(push_repo, "rev-list", "--parents", "-n", "1", head).decode().split()
+            != [head, assignment["base_sha"]]):
+        raise AutoControllerError("Controller import differs from the verified worker commit")
+
+    remote = "https://github.com/stonesky-ai/skybuild.git"
+    existing = _controller_git(push_repo, "ls-remote", remote, remote_ref,
+                               authenticated=True).decode().strip()
+    push_intent_path = plan.assignment_dir / "push-intent.json"
+    intent = {"schema": "skybuild.controller-git-push.v1",
+              "operation_id": prepared.operation_id, "task_id": prepared.task_id,
+              "assignment_id": prepared.assignment_id, "worker": plan.worker_id,
+              "attempt_id": prepared.attempt_id, "claim_fence": prepared.claim_fence,
+              "remote_ref": remote_ref, "head_sha": head, "base_sha": assignment["base_sha"],
+              "patch_sha256": plan.patch_digest}
+    if push_intent_path.exists() or push_intent_path.is_symlink():
+        if _read_json(push_intent_path, maximum=8192) != intent:
+            raise AutoControllerError("Saved push intent differs; preserve dispatch evidence")
+        # Existing intent means a write may have happened. Reconcile only.
+        if existing != head + "\t" + remote_ref:
+            raise AutoControllerError("Prior push outcome remains unknown; never retry the push")
+    else:
+        if existing:
+            raise AutoControllerError("Task branch already exists; preserve dispatch evidence")
+        _save_new(push_intent_path, intent)
+        try:
+            _controller_git(push_repo, "push", "--atomic",
+                            "--force-with-lease=" + remote_ref + ":", remote,
+                            head + ":" + remote_ref, timeout=120, authenticated=True)
+        except AutoControllerError:
+            confirmed_after_uncertain = _controller_git(
+                push_repo, "ls-remote", remote, remote_ref, authenticated=True).decode().strip()
+            if confirmed_after_uncertain != head + "\t" + remote_ref:
+                raise AutoControllerError("Task branch push outcome is unknown; preserve run evidence") from None
+            existing = confirmed_after_uncertain
+    confirmed = _controller_git(push_repo, "ls-remote", remote, remote_ref,
+                                authenticated=True).decode().strip()
+    if confirmed != head + "\t" + remote_ref:
+        raise AutoControllerError("Task branch push is unconfirmed; preserve run evidence")
+    confirmation = {**intent, "remote_head": head}
+    confirmation_path = plan.assignment_dir / "push-confirmed.json"
+    if confirmation_path.exists() or confirmation_path.is_symlink():
+        if _read_json(confirmation_path, maximum=8192) != confirmation:
+            raise AutoControllerError("Saved push confirmation differs; preserve evidence")
+    else:
+        _save_new(confirmation_path, confirmation)
+
+    review_tree = plan.assignment_dir / "source"
+    if not review_tree.exists():
+        _git(None, "clone", "--no-checkout", str(push_repo), str(review_tree), timeout=120)
+        _git(review_tree, "switch", "-c", assignment["branch"], head)
+        _git(review_tree, "remote", "set-url", "origin", remote)
+    elif review_tree.is_symlink() or not review_tree.is_dir():
+        raise AutoControllerError("Saved controller review source is unsafe")
+    elif (_git(review_tree, "rev-parse", "HEAD").decode().strip() != head
+          or _git(review_tree, "symbolic-ref", "--short", "HEAD").decode().strip()
+          != assignment["branch"]
+          or _git(review_tree, "remote", "get-url", "origin").decode().strip() != remote):
+        raise AutoControllerError("Saved controller review source differs from confirmed push")
+    if _git(review_tree, "status", "--porcelain", "--untracked-files=all"):
+        raise AutoControllerError("Controller review source is not clean")
+    workflow = _read_json(plan.assignment_dir / "assignment.json.workflow.json")
+    token = workflow.get("token")
+    message, key = result_message(assignment, result, relay_worker=plan.worker_id)
+    bridge_intent = {"schema": "skybuild.cpu-result-intent.v1",
+                     "project_id": plan.project_id, "task_id": prepared.task_id,
+                     "assignment_id": prepared.assignment_id, "worker": plan.worker_id,
+                     "attempt_id": token["attempt_id"], "claim_fence": token["claim_fence"],
+                     "input_generation": token["input_generation"],
+                     "definition_revision": token["definition_revision"],
+                     "policy_version": token["policy_version"],
+                     "assignment_sha256": hashlib.sha256(json.dumps(
+                         assignment, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+                     "brief_sha256": assignment["brief_sha256"], "patch_sha256": plan.patch_digest,
+                     "source_head": head, "source_branch": remote_ref,
+                     "target_base": assignment["base_sha"], "result": result,
+                     "message": message, "message_idempotency_key": key}
+    result_path = plan.assignment_dir / "result-intent.json"
+    if result_path.exists() or result_path.is_symlink():
+        if _read_json(result_path, maximum=65536) != bridge_intent:
+            raise AutoControllerError("Saved result intent differs from exact worker output")
+    else:
+        _save_new(result_path, bridge_intent)
+    return bridge_intent
 
 
 def _read_manifest(path: Path) -> list[dict]:
@@ -46,14 +275,14 @@ def _read_manifest(path: Path) -> list[dict]:
         raise AutoControllerError("Candidate manifest needs 2..20 bounded entries")
     for item in data["candidates"]:
         if (not isinstance(item, dict) or set(item) != {"worker", "brief_path", "patch",
-                                                    "patch_sha256", "token_file", "git_token_file"}
+                                                    "patch_sha256", "token_file"}
                 or not isinstance(item["worker"], str)
                 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", item["worker"])
                 or any(not isinstance(item[name], str) for name in item)):
             raise AutoControllerError("Candidate entry is invalid")
         if any(not Path(item[name]).is_absolute() or "\n" in item[name]
-               for name in ("patch", "token_file", "git_token_file")):
-            raise AutoControllerError("Candidate credential and patch paths must be absolute")
+               for name in ("patch", "token_file")):
+            raise AutoControllerError("Candidate token and patch paths must be absolute")
     return data["candidates"]
 
 
@@ -187,6 +416,9 @@ def _resume_run(*, repo: Path, manifest: Path, project: str, dispatcher: str, ur
     if len(message_by_worker) != 2:
         raise AutoControllerError("Delivered message journal is ambiguous")
     results = []
+    permit = _private_json(permit_path, limit=16384)
+    if hashlib.sha256(_file_bytes(permit_path, limit=16384, private=True)).hexdigest() != permit_sha256:
+        raise AutoControllerError("Recovery permit differs from original approved bytes")
     ca_digest = ca_file_sha256(ca_file)
     for saved in selected:
         worker = saved.get("worker") if isinstance(saved, dict) else None
@@ -238,12 +470,21 @@ def _resume_run(*, repo: Path, manifest: Path, project: str, dispatcher: str, ur
             project_id=project, worker_id=worker, dispatcher_id=dispatcher, url=url,
             checkout=repo, assignment_dir=assignment_dir, patch_file=Path(item["patch"]),
             patch_digest=item["patch_sha256"], worker_token_file=Path(item["token_file"]),
-            git_token_file=Path(item["git_token_file"]), ca_file=ca_file,
+            worker_image_id=permit["worker_image_id"],
+            worker_input_dir=worker_root / "input", worker_output_dir=worker_root / "output",
+            worker_source_dir=worker_root / "source-mount", ca_file=ca_file,
             permit_file=permit_path, permit_digest=permit_sha256, owner_token_file=owner_token,
             weekly_usage_file=weekly_usage, hostwatch_file=hostwatch,
             external_state_dir=runtime_state, controller_profile_file=controller_profile)
         try:
             prepared = recover_worker(plan, journal)
+            manager = JobUnitManager(runtime_state)
+            unit_state = manager.observe(prepared.unit_name)
+            if (unit_state.phase == "completed" and unit_state.result == "success"
+                    and unit_state.exit_status == 0):
+                container = _docker_container_state(prepared)
+                if container.get("status") == "exited" and container.get("exit_code") == 0:
+                    _publish_worker_output(prepared, journal)
             outcome = reconcile_worker(prepared)
             results.append({"worker": worker, "task_id": saved["task_id"],
                             "operation_id": prepared.operation_id,
@@ -382,11 +623,26 @@ def run(*, repo: Path, manifest: Path, project: str, dispatcher: str, url: str,
                 if (reservation.get("action_id") != action_id or reservation.get("state") != "reserved"
                         or reservation.get("attempt_id") != received["attempt_id"]):
                     raise AutoControllerError("CPU reservation does not bind exact worker attempt")
+            worker_input_dir = worker_root / "input"
+            worker_output_dir = worker_root / "output"
+            worker_source_dir = _prepare_worker_source(
+                repo, worker_root / "source-mount", item["base_sha"])
+            worker_input_dir.mkdir(mode=0o700)
+            worker_output_dir.mkdir(mode=0o700)
+            for name, source in (("assignment.json", assignment_dir / "assignment.json"),
+                                 ("preclaim.json", assignment_dir / "preclaim.json")):
+                _save_new(worker_input_dir / name, _read_json(source))
+            patch_input = worker_input_dir / "approved.patch"
+            _write_exclusive(patch_input, _file_bytes(Path(item["patch"]), limit=65536, private=True),
+                             mode=0o400)
+            worker_input_dir.chmod(0o500)
             plan = CPUWorkerPlan(
                 project_id=project, worker_id=item["worker"], dispatcher_id=dispatcher,
                 url=url, checkout=repo, assignment_dir=assignment_dir,
                 patch_file=Path(item["patch"]), patch_digest=item["patch_sha256"],
-                worker_token_file=Path(item["token_file"]), git_token_file=Path(item["git_token_file"]),
+                worker_token_file=Path(item["token_file"]), worker_image_id=permit["worker_image_id"],
+                worker_input_dir=worker_input_dir, worker_output_dir=worker_output_dir,
+                worker_source_dir=worker_source_dir,
                 ca_file=ca_file, permit_file=permit_path, permit_digest=permit_sha256,
                 owner_token_file=owner_token, weekly_usage_file=weekly_usage,
                 hostwatch_file=hostwatch, external_state_dir=runtime_state,
@@ -415,7 +671,9 @@ def run(*, repo: Path, manifest: Path, project: str, dispatcher: str, url: str,
                       "ca_digest": prepared.ca_digest,
                       "owner_token_digest": prepared.owner_token_digest,
                       "worker_token_digest": prepared.worker_token_digest,
-                      "git_token_digest": prepared.git_token_digest,
+                      "container_name": prepared.container_name,
+                      "container_run_id": prepared.container_run_id,
+                      "log": str(prepared.spec.log_path),
                       "assignment_digest": prepared.assignment_digest,
                       "argv_digest": prepared.argv_digest,
                       "phase": "launch_intent", "assignment_dir": str(assignment_dir)}
@@ -451,6 +709,11 @@ def run(*, repo: Path, manifest: Path, project: str, dispatcher: str, url: str,
             prepared = prepared_runs.get(record["operation_id"])
             if prepared is None:
                 raise AutoControllerError("In-process worker handle is missing; use reconcile-only resume")
+            if (record.get("phase") == "completed" and record.get("result") == "success"
+                    and record.get("exit_status") == 0):
+                container = _docker_container_state(prepared)
+                if container.get("status") == "exited" and container.get("exit_code") == 0:
+                    _publish_worker_output(prepared, record)
             outcome = reconcile_worker(prepared)
             record.update(settled=outcome.get("settled") is True,
                           submitted=outcome.get("submitted") is True,
