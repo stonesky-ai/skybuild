@@ -87,6 +87,42 @@ def _body(value, fields):
         _invalid('Body exceeds 64 KiB')
 
 
+MANAGED_METADATA_KEYS = frozenset({'_skybuild_workflow', '_skybuild_completion'})
+USER_METADATA_LIMIT = 16 * 1024
+MANAGED_METADATA_LIMIT = 64 * 1024
+
+
+def _validate_metadata(value):
+    """Keep caller data bounded separately from internally managed evidence.
+
+    Public mutations reject reserved keys before reaching this shared validator.
+    Nested workflow records keep their own 16 KiB limits. The larger aggregate
+    budget lets valid user data coexist with bounded task and acceptance records.
+    """
+    if not isinstance(value, dict):
+        _invalid('metadata must be an object')
+    user = {key: item for key, item in value.items() if key not in MANAGED_METADATA_KEYS}
+    if len(_json(user).encode()) > USER_METADATA_LIMIT:
+        _invalid('User metadata must be an object of at most 16 KiB')
+    if len(_json(value).encode()) > MANAGED_METADATA_LIMIT:
+        _invalid('Managed task metadata exceeds 64 KiB')
+    for key in MANAGED_METADATA_KEYS & value.keys():
+        if not isinstance(value[key], dict):
+            _invalid('Reserved task metadata must contain objects')
+    workflow = value.get('_skybuild_workflow', {})
+    if 'generation' in workflow and (type(workflow['generation']) is not int or
+                                     not 0 <= workflow['generation'] < 2**63):
+        _invalid('Workflow generation must be a nonnegative bigint')
+    if 'petri' in workflow:
+        from .workflow import TaskToken
+        petri = workflow['petri']
+        if (not isinstance(petri, dict) or type(petri.get('schema_version')) is not int
+                or petri['schema_version'] != 1 or not isinstance(petri.get('token'), dict)):
+            _invalid('Petri metadata requires a versioned task token')
+        TaskToken.from_dict(petri['token'])
+    return value
+
+
 def _public(value):
     if isinstance(value, dict):
         return {key: _public(item) for key, item in value.items()}
@@ -282,8 +318,7 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
                     _text(item, field, 4096)
             if field == 'dependencies':
                 values[field] = sorted(set(items))
-        if not isinstance(values['metadata'], dict) or len(_json(values['metadata']).encode()) > 16384:
-            _invalid('metadata must be an object of at most 16 KiB')
+        _validate_metadata(values['metadata'])
         if values['status'] != 'done' and not (str(values['next_action'] or '').strip() or str(values['blocker'] or '').strip()):
             _invalid('Unfinished tasks need a next action or blocker')
         return values
@@ -312,7 +347,8 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
         self._dependencies(connection, project_id, task_id, values['dependencies'])
         after = self._task(connection, project_id, task_id)
         self._journal(connection, principal, after, before, operation=operation, reason=reason)
-        self._invalidate_dependents(connection, principal, project_id, task_id)
+        if not preserve_acceptance:
+            self._invalidate_dependents(connection, principal, project_id, task_id)
         return after
 
     @staticmethod
@@ -521,23 +557,56 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
                 'enabled_actions': [], 'evidence_freshness': 'current' if token.evidence and fresh else
                 'stale' if token.evidence else 'unavailable'}
 
+    def _workflow_control_context(self, connection, principal, task, context):
+        """Control requests wait for held ownership, including an expired claim.
+
+        Worker submission retains its separate fenced claim checks. This helper
+        changes only owner control facts and grants no execution permission.
+        """
+        checked = dict(context)
+        if connection.execute('SELECT 1 FROM task_claims WHERE project_id = %s AND task_id = %s AND held',
+                              (task['project_id'], task['task_id'])).fetchone():
+            checked['effects_resolved'] = False
+        if principal.is_admin:
+            marker = connection.execute('SELECT input_generation FROM task_readiness WHERE project_id = %s AND task_id = %s',
+                                        (task['project_id'], task['task_id'])).fetchone()
+            checked['current_inputs'] = bool(marker and marker['input_generation'] == self.workflow_token(task).input_generation)
+        return checked
+
+    def _claim_preview_context(self, connection, principal, task, context):
+        """Preview ownership only. Recompute all guards in the claim transaction.
+
+        The fixed attempt label and next fence are prospective display facts.
+        This read neither allocates an attempt nor grants execution admission.
+        """
+        from .workflow import Place
+        token = self.workflow_token(task)
+        checked = {**context, 'admission_permitted': False}
+        if (token.place != Place.READY or token.pending_action is not None or token.superseded
+                or not (principal.is_admin or 'tasks:claim' in principal.grants.get(task['project_id'], ()))):
+            return checked
+        try:
+            self._require_api_authority(connection, task['project_id'])
+            claim = connection.execute('SELECT * FROM task_claims WHERE project_id = %s AND task_id = %s',
+                                       (task['project_id'], task['task_id'])).fetchone()
+            next_fence = self._require_claim_eligible(connection, task['project_id'], task, claim)
+        except DomainError as error:
+            if error.code not in {'authority', 'claim_conflict', 'workflow_conflict', 'effect_conflict', 'capacity_conflict'}:
+                raise
+            return checked
+        return {**checked, 'admission_permitted': True, 'claim_live': True,
+                'attempt_id': 'claim-capability-preview', 'claim_fence': next_fence,
+                'responsible': principal.principal_id}
+
     def _workflow_view(self, connection, principal, task):
         from .workflow import TaskWorkflow, TRANSITIONS
         token = self.workflow_token(task)
         context = self._workflow_context(connection, principal, task)
-        enabled = TaskWorkflow().enabled(token, context)
-        if principal.is_admin and not context['current_inputs']:
-            marker = connection.execute('SELECT input_generation FROM task_readiness WHERE project_id = %s AND task_id = %s',
-                                        (task['project_id'], task['task_id'])).fetchone()
-            controls = dict(context, current_inputs=bool(marker and marker['input_generation'] == token.input_generation))
-            try:
-                self._require_no_effect_exposure(connection, task['project_id'], task['task_id'])
-            except DomainError as error:
-                if error.code not in {'claim_conflict', 'effect_conflict', 'capacity_conflict'}:
-                    raise
-                controls['effects_resolved'] = False
-            names = {'hold', 'defer', 'release_hold', 'resume_deferred', 'reopen', 'update_control'}
-            enabled += tuple(name for name in TaskWorkflow().enabled(token, controls) if name in names and name not in enabled)
+        names = {'hold', 'defer', 'release_hold', 'resume_deferred', 'reopen', 'update_control'}
+        preview = self._claim_preview_context(connection, principal, task, context)
+        enabled = tuple(name for name in TaskWorkflow().enabled(token, preview) if name not in names)
+        controls = self._workflow_control_context(connection, principal, task, context)
+        enabled += tuple(name for name in TaskWorkflow().enabled(token, controls) if name in names)
         return {'task': {**task, **self.workflow_projection(task), 'enabled_actions': list(enabled)},
                 'token': token.to_dict(), 'available_actions': list(enabled),
                 'transitions': [spec.to_dict() for spec in TRANSITIONS],
@@ -583,8 +652,7 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
                 metadata = json.loads(json.dumps(task['metadata']))
                 metadata.setdefault('_skybuild_workflow', {})['petri'] = {
                     'schema_version': 1, 'token': token.to_dict(), 'place_entered_at': datetime.now(timezone.utc).isoformat()}
-                if len(_json(metadata).encode()) > 16384:
-                    _invalid('metadata must be an object of at most 16 KiB')
+                _validate_metadata(metadata)
                 connection.execute('UPDATE tasks SET metadata = %s, revision = revision + 1 WHERE project_id = %s AND task_id = %s',
                                    (Jsonb(metadata), project_id, task_id))
                 after = self._task(connection, project_id, task_id)
@@ -628,8 +696,7 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
                 'task_revision': after_token.revision, 'input_generation': after_token.input_generation,
                 'attempt_id': after_token.attempt_id, 'claim_fence': after_token.claim_fence}
         # Validate the complete metadata budget, including retained legacy data.
-        if len(_json(metadata).encode()) > 16384:
-            _invalid('metadata must be an object of at most 16 KiB')
+        _validate_metadata(metadata)
         status = {Place.READY: 'ready', Place.WORKING: 'in-progress', Place.VALIDATING: 'in-progress',
                   Place.INTEGRATING: 'in-progress', Place.DONE: 'done', Place.DEFERRED: 'deferred', Place.HOLD: 'blocked'}[after_token.place]
         connection.execute('UPDATE tasks SET metadata = %s, status = %s, phase = %s, responsible = %s, '
@@ -726,9 +793,7 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
                         # Control release reassesses a stored generation without execution approval.
                         if event in {'release_hold', 'resume_deferred', 'reopen'}:
                             self._require_no_effect_exposure(connection, project_id, task_id)
-                        marker = connection.execute('SELECT input_generation FROM task_readiness WHERE project_id = %s AND task_id = %s',
-                                                    (project_id, task_id)).fetchone()
-                        context['current_inputs'] = bool(marker and marker['input_generation'] == self.workflow_token(before).input_generation)
+                        context = self._workflow_control_context(connection, principal, before, context)
                     if event == 'validation_result' and 'result' in body:
                         from .workflow import ValidationResult, ValidationStage
                         result = ValidationResult.from_dict(body['result'])

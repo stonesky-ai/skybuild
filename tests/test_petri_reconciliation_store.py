@@ -135,3 +135,69 @@ def test_reassess_current_done_does_not_destroy_acceptance(store, actors):
     assert Store.workflow_token(changed).place == Place.DONE
     assert Store.workflow_token(changed).input_generation == generation
     assert current_completion(changed)
+
+
+@pytest.mark.parametrize("event", ["hold", "defer"])
+def test_http_control_with_held_claim_stays_pending(store, actors, event):
+    from fastapi.testclient import TestClient
+    from skybuild.api import create_app
+    project, people = actors
+    task = enrolled(store, people, project)
+    store.claim_task(people["worker"], project, task["task_id"], task["revision"], "claim")
+    task = store.get_task(people["owner"], project, task["task_id"])
+    request = {"event": event, "reason": "Owner interruption"}
+    if event == "defer":
+        request["until"] = "2090-01-01T00:00:00+00:00"
+    path = f"/api/v1/projects/{project}/tasks/{task['task_id']}/workflow"
+    with TestClient(create_app(store)) as client:
+        response = client.post(path, json=request, headers={"Authorization": "Bearer " + people["owner_token"],
+                               "If-Match": str(task["revision"]), "Idempotency-Key": "owner-control"})
+        assert response.status_code == 200
+        token = response.json()["token"]
+        assert token["place"] == "working" and token["pending_action"] == event
+        assert client.get(path, headers={"Authorization": "Bearer " + people["owner_token"]}).json()["token"] == token
+    with store._connection() as connection:
+        assert connection.execute("SELECT held FROM task_claims WHERE project_id = %s AND task_id = %s",
+                                  (project, task["task_id"])).fetchone()["held"] is True
+
+
+def test_live_claim_submission_and_result_preserve_pending_hold(store, actors):
+    from skybuild.workflow import ResultState, ValidationResult, ValidationStage
+    from test_petri_store import author_receipt
+    project, people = actors
+    task = enrolled(store, people, project)
+    store.claim_task(people["worker"], project, task["task_id"], task["revision"], "claim")
+    task = store.get_task(people["owner"], project, task["task_id"])
+    token = Store.workflow_token(task)
+    submitted = store.workflow_transition(people["worker"], project, task["task_id"], "submit", author_receipt(token),
+                                          token.revision, "submit")
+    assert submitted["token"]["place"] == "validating"
+    held = store.workflow_transition(people["owner"], project, task["task_id"], "hold", {"reason": "Pause after check"},
+                                     submitted["task"]["revision"], "hold")
+    token = Store.workflow_token(held["task"])
+    assert token.place == Place.VALIDATING and token.pending_action == "hold"
+    result = ValidationResult(project, task["task_id"], ValidationStage.UNIT_TESTS, ResultState.PASSED,
+        attempt_id=token.attempt_id, source_head=token.source_head, target_base=token.target_base,
+        input_generation=token.input_generation, definition_revision=token.definition_revision,
+        policy_version=token.policy_version, claim_fence=token.claim_fence, producer=people["worker"].principal_id, check_id="unit")
+    recorded = store.workflow_transition(people["worker"], project, task["task_id"], "validation_result", {"result": result.to_dict()},
+                                         token.revision, "result")
+    assert recorded["token"]["pending_action"] == "hold"
+    assert recorded["token"]["place"] == "validating"
+    assert recorded["token"]["evidence"][0]["state"] == "passed"
+
+
+def test_current_done_reassessment_does_not_invalidate_or_block_dependents(store, actors):
+    project, people = actors
+    owner = people["owner"]
+    prerequisite = completed_fixture(store, owner, project, "accepted-a")
+    completed_fixture(store, owner, project, "accepted-b", dependencies=["accepted-a"])
+    dependent = create(store, owner, project, "ready-c", dependencies=["accepted-a"], acceptance_criteria=["Check"])
+    dependent = store.task_action(owner, project, "ready-c", "ready", {"reason": "Ready"}, dependent["revision"], "ready")
+    dependent = store.initialize_workflow(owner, project, "ready-c", dependent["revision"], "initialize-c")["task"]
+    store.claim_task(people["worker"], project, "ready-c", dependent["revision"], "claim-c")
+    prerequisite = store.initialize_workflow(owner, project, "accepted-a", prerequisite["revision"], "initialize-a")["task"]
+    before = {task_id: store.get_task(owner, project, task_id) for task_id in ("accepted-b", "ready-c")}
+    store.task_action(owner, project, "accepted-a", "reassess", {"reason": "Acceptance unchanged"},
+                      prerequisite["revision"], "reassess-a")
+    assert {task_id: store.get_task(owner, project, task_id) for task_id in before} == before
