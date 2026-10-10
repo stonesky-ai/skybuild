@@ -593,9 +593,12 @@ def _apply_control(token, event, context, spec):
             # Keep the full findings in the result and journal. Repeated display
             # summaries must also fit the bounded token's total JSON size.
             fault = ("; ".join(result.findings) or f"{result.stage.value}: {result.check_id} failed")[:512]
-            changes.update(place=Place.READY, faults=token.faults + (fault,), blocker=fault,
+            changes.update(place=Place.READY, faults=(token.faults + (fault,))[-100:], blocker=fault,
                            next_action="Correct the validation fault and submit the task again",
-                           evidence=tuple(replace(item, state=ResultState.STALE) if item != result else item for item in results))
+                           findings=(fault,),
+                           evidence=tuple(replace(item, state=ResultState.STALE) if item != result else item
+                                          for item in results[-100:]))
+            return _failure_projection(token, changes, result, event)
         return replace(token, **changes)
     reason = event.get("reason")
     if not isinstance(reason, str) or not reason.strip():
@@ -634,6 +637,28 @@ def _apply_control(token, event, context, spec):
                 _record_error("Only Deferred accepts a deferral trigger")
             changes.update(_defer_trigger(token, event, context))
     return replace(token, **changes)
+
+
+def _failure_projection(token, changes, result, event):
+    """Keep failure recovery possible when full results exceed the projection.
+
+    The journal stores the full event result. The current token keeps old
+    evidence only while it fits, then refers to that immutable journal event.
+    """
+    candidates = [changes]
+    summary = replace(result, findings=(changes["blocker"],), artifacts=(f"workflow-event:{event['operation_id']}",),
+                      parameters=())
+    candidates.append({**changes, "evidence": (summary,)})
+    for candidate in candidates:
+        try:
+            return replace(token, **candidate)
+        except DomainError as error:
+            if error.message != "Workflow record exceeds 16 KiB":
+                raise
+    # Even a nearly full token must keep the confirmed fault. Its complete
+    # prior results and faults remain in the append-only journal.
+    return replace(token, **{**changes, "evidence": (), "findings": (),
+                             "faults": (changes["blocker"],)})
 
 
 ACTION_FIELDS = frozenset({"reason", "next_action", "responsible", "until", "milestone_task_id"})
