@@ -225,12 +225,30 @@ def test_accepted_pending_deferral_can_finish_after_trigger_but_cannot_change_to
         apply(after, "update_control", context(after, now=later["now"]), reason="Changed", until="2026-10-10T03:00:00+00:00")
 
 
-def test_large_valid_findings_cannot_prevent_failure_recovery():
+@pytest.mark.parametrize("length,prior_evidence", [(2500, False), (4000, False), (4000, True)])
+def test_large_valid_findings_cannot_prevent_failure_recovery(length, prior_evidence):
     current = token()
-    findings = ("a" * 2500, "b" * 2500)
+    if prior_evidence:
+        current = replace(current, evidence=(result(current, ValidationStage.SCANS, findings=("old" * 1300,)),))
+    findings = ("a" * length, "b" * length)
     failed = result(current, state=ResultState.FAILED, findings=findings)
     request = event(current, "validation_result", result=failed.to_dict())
     after = TaskWorkflow().apply(current, request, context(current))
     assert after.place == Place.READY and len(after.blocker) == 512
-    assert after.findings == findings and after.evidence == (failed,)
+    assert after.findings == (after.blocker,)
+    assert failed in after.evidence
     assert TaskWorkflow.journal_facts(current, after, request)["result"]["findings"] == list(findings)
+
+
+def test_failure_projection_bounds_findings_count_and_links_exact_journal_operation():
+    current = token()
+    current = replace(current, evidence=(result(current, ValidationStage.SCANS, findings=("old" * 1300,)),))
+    findings = tuple(str(number) + "x" * 110 for number in range(100))
+    failed = result(current, state=ResultState.FAILED, findings=findings)
+    request = event(current, "validation_result", result=failed.to_dict())
+    after = TaskWorkflow().apply(current, request, context(current))
+    assert after.place == Place.READY
+    assert len(after.evidence) == 1 and len(after.evidence[0].findings) == 1
+    assert after.evidence[0].artifacts == ("workflow-event:operation-1",)
+    assert after.findings == (after.blocker,)
+    assert TaskWorkflow.journal_facts(current, after, request)["result"] == failed.to_dict()

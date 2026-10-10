@@ -432,6 +432,187 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
                                                   (project_id, limit)).fetchall())
             return _public(connection.execute(TASK_SELECT + 'WHERE project_id = %s ORDER BY priority, task_id LIMIT %s OFFSET %s', (project_id, limit, offset)).fetchall())
 
+    @staticmethod
+    def _petri(task):
+        value = task.get('metadata', {}).get('_skybuild_workflow', {}).get('petri')
+        return isinstance(value, dict) and value.get('schema_version') == 1
+
+    @staticmethod
+    def workflow_token(task):
+        """Project current task fields over persisted workflow attributes."""
+        from .workflow import TaskToken
+        workflow = task.get('metadata', {}).get('_skybuild_workflow', {})
+        petri = workflow.get('petri', {})
+        if petri.get('schema_version') != 1:
+            raise DomainError('workflow_conflict', 'Task has no Petri workflow', 409)
+        body = dict(petri['token'])
+        body.update(project_id=task['project_id'], task_id=task['task_id'], title=task['title'],
+                    priority=task['priority'], dependencies=list(task['dependencies']),
+                    responsible=task['responsible'], next_action=task['next_action'] or '',
+                    blocker=task['blocker'], revision=task['revision'],
+                    superseded=task['status'] == 'superseded')
+        return TaskToken.from_dict(body)
+
+    def _workflow_context(self, connection, principal, task):
+        """Read trusted transaction facts. Missing producer evidence fails closed."""
+        token = self.workflow_token(task)
+        context = {name: getattr(token, name) for name in
+                   ('source_head', 'target_base', 'definition_revision', 'input_generation', 'policy_version')}
+        readiness = connection.execute('SELECT * FROM task_readiness WHERE project_id = %s AND task_id = %s',
+                                       (task['project_id'], task['task_id'])).fetchone()
+        context['current_inputs'] = bool(readiness and readiness['input_generation'] == token.input_generation
+                                         and readiness['assessed_generation'] == token.input_generation)
+        context['effects_resolved'] = not connection.execute(
+            "SELECT 1 FROM task_effects WHERE project_id = %s AND task_id = %s AND exposure_held "
+            "UNION ALL SELECT 1 FROM cpu_reservations WHERE project_id = %s AND task_id = %s AND state = 'reserved' LIMIT 1",
+            (task['project_id'], task['task_id'], task['project_id'], task['task_id'])).fetchone()
+        claim = connection.execute('SELECT *, lease_until > clock_timestamp() AS live FROM task_claims '
+                                   'WHERE project_id = %s AND task_id = %s FOR UPDATE',
+                                   (task['project_id'], task['task_id'])).fetchone()
+        context['claim_live'] = bool(claim and claim['held'] and claim['live']
+                                     and claim['holder'] == principal.principal_id
+                                     and claim['fence'] == token.claim_fence)
+        context.update(attempt_id=token.attempt_id, claim_fence=token.claim_fence,
+                       responsible=principal.principal_id, control_authorized=principal.is_admin,
+                       now=datetime.now(timezone.utc))
+        context['dependencies_satisfied'] = True
+        try:
+            self._require_current_dependencies(connection, task['project_id'], task)
+        except DomainError as error:
+            if error.code != 'workflow_conflict':
+                raise
+            context['dependencies_satisfied'] = False
+        return context
+
+    @staticmethod
+    def workflow_projection(task):
+        """Pure additive fields. Action permission needs a trusted Store read."""
+        if not Store._petri(task):
+            return {'place': None, 'validation': [], 'enabled_actions': [], 'evidence_freshness': 'unavailable'}
+        token = Store.workflow_token(task)
+        fresh = all((result.source_head, result.target_base, result.definition_revision,
+                     result.input_generation, result.policy_version, result.attempt_id, result.claim_fence) ==
+                    (token.source_head, token.target_base, token.definition_revision,
+                     token.input_generation, token.policy_version, token.attempt_id, token.claim_fence)
+                    for result in token.evidence)
+        return {'place': token.place.value, 'validation': [result.to_dict() for result in token.evidence],
+                'enabled_actions': [], 'evidence_freshness': 'current' if token.evidence and fresh else
+                'stale' if token.evidence else 'unavailable'}
+
+    def _workflow_view(self, connection, principal, task):
+        from .workflow import TaskWorkflow, TRANSITIONS
+        token = self.workflow_token(task)
+        enabled = TaskWorkflow().enabled(token, self._workflow_context(connection, principal, task))
+        return {'task': {**task, **self.workflow_projection(task), 'enabled_actions': list(enabled)},
+                'token': token.to_dict(), 'available_actions': list(enabled),
+                'disabled_actions': {spec.event: 'Required state, permission or current evidence is unavailable'
+                                     for spec in TRANSITIONS if spec.event not in enabled}}
+
+    def task_workflow(self, principal, project_id, task_id):
+        with self._connection() as connection:
+            principal = self._authorize(connection, principal, project_id, 'tasks:read')
+            self._graph_lock(connection, project_id)
+            return self._workflow_view(connection, principal, self._task(connection, project_id, task_id, lock=True))
+
+    def initialize_workflow(self, principal, project_id, task_id, expected_revision, idempotency_key):
+        """Enroll a legacy task conservatively without changing historical events."""
+        from .completion import current_completion
+        from .workflow import TaskToken, Place
+        if type(expected_revision) is not int or not 1 <= expected_revision < 2**63:
+            _invalid('Initialization requires a positive expected revision')
+        with self._connection() as connection:
+            principal = self._authorize(connection, principal, project_id, 'tasks:write')
+            if not principal.is_admin:
+                raise DomainError('authorization', 'Only owner/admin may initialize workflow', 403)
+            def mutation():
+                self._graph_lock(connection, project_id)
+                task = self._task(connection, project_id, task_id, lock=True)
+                if task['revision'] != expected_revision:
+                    raise DomainError('stale_revision', 'Task revision has changed', 409)
+                if self._petri(task):
+                    raise DomainError('workflow_conflict', 'Task already has Petri workflow', 409)
+                self._require_no_effect_exposure(connection, project_id, task_id)
+                place = (Place.DONE if current_completion(task) else Place.DEFERRED if task['status'] == 'deferred'
+                         else Place.READY if task['status'] == 'ready' else Place.HOLD)
+                readiness = connection.execute('SELECT input_generation FROM task_readiness WHERE project_id = %s AND task_id = %s',
+                                               (project_id, task_id)).fetchone()
+                token = TaskToken(project_id, task_id, place, definition_revision=task['revision'],
+                                  input_generation=readiness['input_generation'], revision=task['revision'] + 1,
+                                  hold_reason='Review legacy task definition and evidence' if place == Place.HOLD else None)
+                metadata = json.loads(json.dumps(task['metadata']))
+                metadata.setdefault('_skybuild_workflow', {})['petri'] = {
+                    'schema_version': 1, 'token': token.to_dict(), 'place_entered_at': datetime.now(timezone.utc).isoformat()}
+                connection.execute('UPDATE tasks SET metadata = %s, revision = revision + 1 WHERE project_id = %s AND task_id = %s',
+                                   (Jsonb(metadata), project_id, task_id))
+                after = self._task(connection, project_id, task_id)
+                self._journal(connection, principal, after, task, operation='workflow_initialized', reason='Initialize Petri workflow')
+                return self._workflow_view(connection, principal, after)
+            return self._idempotent(connection, principal, project_id, 'workflow.initialize', idempotency_key,
+                                    {'task_id': task_id, 'revision': expected_revision}, mutation)
+
+    def _apply_workflow_event(self, connection, principal, before, event, verified_context):
+        """Internal producer boundary: context comes from trusted adapter validation."""
+        from .workflow import TaskWorkflow, Place
+        kernel = TaskWorkflow()
+        token = self.workflow_token(before)
+        after_token = kernel.apply(token, event, verified_context)
+        facts = kernel.journal_facts(token, after_token, event)
+        metadata = json.loads(json.dumps(before['metadata']))
+        metadata['_skybuild_workflow']['petri']['token'] = after_token.to_dict()
+        if after_token.place != token.place:
+            metadata['_skybuild_workflow']['petri']['place_entered_at'] = datetime.now(timezone.utc).isoformat()
+        if event['event'] == 'claim':
+            metadata['_skybuild_workflow']['petri']['attempt_binding'] = {
+                'task_revision': after_token.revision, 'input_generation': after_token.input_generation,
+                'attempt_id': after_token.attempt_id, 'claim_fence': after_token.claim_fence}
+        # Validate the complete metadata budget, including retained legacy data.
+        if len(_json(metadata).encode()) > 16384:
+            _invalid('metadata must be an object of at most 16 KiB')
+        status = {Place.READY: 'ready', Place.WORKING: 'in-progress', Place.VALIDATING: 'in-progress',
+                  Place.INTEGRATING: 'in-progress', Place.DONE: 'done', Place.DEFERRED: 'deferred', Place.HOLD: 'blocked'}[after_token.place]
+        connection.execute('UPDATE tasks SET metadata = %s, status = %s, phase = %s, responsible = %s, '
+                           'next_action = %s, blocker = %s, revision = revision + 1, updated_at = now() '
+                           'WHERE project_id = %s AND task_id = %s',
+                           (Jsonb(metadata), status, after_token.place.value, after_token.responsible,
+                            after_token.next_action or ('Resolve workflow task' if status != 'done' else None),
+                            after_token.blocker, before['project_id'], before['task_id']))
+        after = self._task(connection, before['project_id'], before['task_id'])
+        self._journal(connection, principal, after, before, operation='workflow.' + facts['event'],
+                      reason=event.get('reason') or 'Workflow ' + facts['event'])
+        return after
+
+    def workflow_transition(self, principal, project_id, task_id, event, body, expected_revision, idempotency_key):
+        from .workflow import WorkflowEvent, _workflow_event
+        _body(body, set(WorkflowEvent.__annotations__) - {'event', 'operation_id', 'expected_revision'})
+        request = _workflow_event({**body, 'event': event, 'operation_id': idempotency_key, 'expected_revision': expected_revision})
+        if event in {'claim', 'accept'}:
+            raise DomainError('workflow_conflict', 'Use the dedicated claim or completion evidence path', 409)
+        with self._connection() as connection:
+            principal = self._authorize(connection, principal, project_id, 'tasks:write')
+            def mutation():
+                self._graph_lock(connection, project_id)
+                before = self._task(connection, project_id, task_id, lock=True)
+                if before['revision'] != expected_revision:
+                    raise DomainError('stale_revision', 'Task revision has changed', 409)
+                context = self._workflow_context(connection, principal, before)
+                after = self._apply_workflow_event(connection, principal, before, request, context)
+                return self._workflow_view(connection, principal, after)
+            return self._idempotent(connection, principal, project_id, 'workflow.' + event, idempotency_key,
+                                    {'task_id': task_id, 'event': request}, mutation)
+
+    def _cpu_task_binding(self, task, claim, readiness_generation, attempt_id):
+        """Separate immutable attempt inputs from the current task CAS revision."""
+        if not self._petri(task):
+            return task['status'] == 'ready' and claim['task_revision'] == task['revision']
+        from .workflow import Place
+        token = self.workflow_token(task)
+        binding = task['metadata']['_skybuild_workflow']['petri'].get('attempt_binding', {})
+        return (token.place == Place.WORKING and token.pending_action is None
+                and token.attempt_id == attempt_id and token.claim_fence == claim['fence']
+                and token.input_generation == readiness_generation
+                and binding == {'task_revision': claim['task_revision'], 'input_generation': token.input_generation,
+                                'attempt_id': token.attempt_id, 'claim_fence': claim['fence']})
+
     def get_task(self, principal, project_id, task_id) -> dict:
         with self._connection() as connection:
             self._authorize(connection, principal, project_id, 'tasks:read')
