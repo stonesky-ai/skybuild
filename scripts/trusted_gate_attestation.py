@@ -34,7 +34,8 @@ PINNED_PREDICATE_FIELDS = {
     "candidate_tree", "candidate_archive_sha256", "gate_argv", "gate_command_sha256",
     "gate_policy_sha256", "runner_identity", "runner_version", "runner_image_id",
     "postgres_image_id", "firewall_image_id", "firewall_policy_sha256",
-    "trusted_entrypoint_sha256", "network_probe_sha256", "execution_host",
+    "trusted_entrypoint_sha256", "network_probe_sha256", "attestation_signer_sha256",
+    "execution_host",
     "environment_allowlist", "resource_limits",
 }
 
@@ -76,15 +77,15 @@ def _validate_predicate(value: Any) -> dict:
         "candidate_tree", "candidate_archive_sha256", "gate_argv", "gate_command_sha256",
         "gate_policy_sha256", "runner_identity", "runner_version", "runner_image_id",
         "postgres_image_id", "firewall_image_id", "firewall_policy_sha256",
-        "trusted_entrypoint_sha256", "network_probe_sha256",
+        "trusted_entrypoint_sha256", "network_probe_sha256", "attestation_signer_sha256",
         "execution_host", "source_mount_readonly", "scratch_mount_writable",
         "docker_socket_mounted", "host_home_mounted", "host_credentials_mounted",
         "credential_access", "network_mode",
         "egress_allowed", "firewall_defaults_drop", "firewall_ipv4_default_drop",
         "firewall_ipv6_default_drop", "firewall_policy_applied", "candidate_blocked_until_probe",
-        "readonly_fixture_allowlist", "mounts",
+        "postgres_namespace_egress_blocked", "readonly_fixture_allowlist", "mounts",
         "environment_allowlist", "postgres_data_mount", "resource_limits", "resources",
-        "network_probe", "result", "cleanup",
+        "network_probe", "postgres_network_probe", "result", "cleanup",
     }
     predicate = _object(value, keys, "predicate")
     if not isinstance(predicate["bundle_id"], str) or not _BUNDLE_ID.fullmatch(predicate["bundle_id"]):
@@ -117,6 +118,7 @@ def _validate_predicate(value: Any) -> dict:
     _digest(predicate["trusted_entrypoint_sha256"], "trusted_entrypoint_sha256")
     _digest(predicate["firewall_policy_sha256"], "firewall_policy_sha256")
     _digest(predicate["network_probe_sha256"], "network_probe_sha256")
+    _digest(predicate["attestation_signer_sha256"], "attestation_signer_sha256")
     for key in ("source_mount_readonly", "scratch_mount_writable"):
         if type(predicate[key]) is not bool or predicate[key] is not True:
             raise AttestationError(f"Gate attestation {key} is not enabled")
@@ -130,7 +132,7 @@ def _validate_predicate(value: Any) -> dict:
         raise AttestationError("Candidate gate network is not isolated")
     for key in ("firewall_defaults_drop", "firewall_ipv4_default_drop",
                 "firewall_ipv6_default_drop", "firewall_policy_applied",
-                "candidate_blocked_until_probe"):
+                "candidate_blocked_until_probe", "postgres_namespace_egress_blocked"):
         if type(predicate[key]) is not bool or predicate[key] is not True:
             raise AttestationError(f"Gate {key} is not enabled")
     allowlist = predicate["readonly_fixture_allowlist"]
@@ -204,13 +206,27 @@ def _validate_predicate(value: Any) -> dict:
             or probe["host_listener_port"] == 5432):
         raise AttestationError("Network probe host listener port is invalid")
     _digest(probe["log_sha256"], "network_probe.log_sha256")
+    postgres_probe = _object(predicate["postgres_network_probe"],
+                             {"dns_blocked", "external_ipv4_blocked", "external_ipv6_blocked",
+                              "host_gateway_listener_blocked", "host_listener_port",
+                              "postgres_unix_socket_ready", "log_sha256"},
+                             "PostgreSQL namespace probe")
+    for key in ("dns_blocked", "external_ipv4_blocked", "external_ipv6_blocked",
+                "host_gateway_listener_blocked", "postgres_unix_socket_ready"):
+        if type(postgres_probe[key]) is not bool or postgres_probe[key] is not True:
+            raise AttestationError("PostgreSQL namespace isolation probe did not pass")
+    if (type(postgres_probe["host_listener_port"]) is not int
+            or postgres_probe["host_listener_port"] != probe["host_listener_port"]):
+        raise AttestationError("Namespace probes do not bind the same host listener")
+    _digest(postgres_probe["log_sha256"], "postgres_network_probe.log_sha256")
 
     resources = _object(predicate["resources"],
                         {"runner_container_id", "pg_container_id", "network_id", "test_image_id",
                          "postgres_image_id", "firewall_container_id", "probe_container_id",
-                         "firewall_image_id"}, "owned resources")
+                         "firewall_image_id", "postgres_firewall_container_id",
+                         "postgres_probe_container_id"}, "owned resources")
     for key in ("runner_container_id", "pg_container_id", "network_id", "firewall_container_id",
-                "probe_container_id"):
+                "probe_container_id", "postgres_firewall_container_id", "postgres_probe_container_id"):
         if not isinstance(resources[key], str) or not _CONTAINER_ID.fullmatch(resources[key]):
             raise AttestationError(f"Gate {key} must be a full immutable resource ID")
     if not isinstance(resources["test_image_id"], str) or not _IMAGE_ID.fullmatch(resources["test_image_id"]):
@@ -258,8 +274,9 @@ def _validate_predicate(value: Any) -> dict:
         raise AttestationError("Gate cleanup is not confirmed")
     expected_resources = {resources[key] for key in
                           ("runner_container_id", "pg_container_id", "network_id",
-                           "firewall_container_id", "probe_container_id")}
-    if len(expected_resources) != 5:
+                           "firewall_container_id", "probe_container_id",
+                           "postgres_firewall_container_id", "postgres_probe_container_id")}
+    if len(expected_resources) != 7:
         raise AttestationError("Gate resource IDs are not unique")
     observed_resources = set()
     for item in cleanup["owned_resources"]:

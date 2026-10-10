@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import bundle_publisher as publisher
 import trusted_gate_attestation as gate
 from skybuild.manual_integration import DEFAULT_GATE_COMMAND, DEFAULT_GATE_COMMAND_SHA256
+from skybuild.workflow import Place, ResultState, TaskToken, ValidationResult, ValidationStage
 
 
 def git(cwd, *args):
@@ -63,13 +64,48 @@ def world(tmp_path, monkeypatch):
 
 def frozen_bundle(world):
     manifest_sha = hashlib.sha256(b"local publisher test manifest").hexdigest()
+    review_sha = hashlib.sha256(b"review").hexdigest()
     return {"bundle_id": "bundle-" + manifest_sha[:24], "manifest_sha256": manifest_sha,
             "target_ref": world["target"], "base_commit": world["base"],
             "candidate_commit": world["candidate"], "candidate_tree": world["tree"],
             "policy_sha256": hashlib.sha256(b"policy").hexdigest(),
             "members": [{"task_id": "task-1", "source_head": world["candidate"],
                          "source_branch": "refs/heads/task-1", "reviewer": "reviewer-1",
-                         "review_sha256": hashlib.sha256(b"review").hexdigest()}]}
+                         "review_sha256": review_sha,
+                         "review_artifact": f"reviews/code-review.json#sha256={review_sha}",
+                         "workflow": {"project_id": "skybuild", "attempt_id": "attempt-1",
+                                      "claim_fence": 2, "input_generation": 3,
+                                      "definition_revision": 4, "policy_version": "policy-1",
+                                      "target_base": world["base"]}}]}
+
+
+def observe_task(world, project, task_id):
+    bundle_member = {"task_id": task_id, "source_head": world["candidate"],
+                     "source_branch": "refs/heads/task-1", "reviewer": "reviewer-1",
+                     "review_sha256": hashlib.sha256(b"review").hexdigest(),
+                     "review_artifact": "reviews/code-review.json#sha256=" + hashlib.sha256(b"review").hexdigest(),
+                     "workflow": {"project_id": project, "attempt_id": "attempt-1",
+                                  "claim_fence": 2, "input_generation": 3,
+                                  "definition_revision": 4, "policy_version": "policy-1",
+                                  "target_base": world["base"]}}
+    workflow = bundle_member["workflow"]
+    review = ValidationResult(
+        project_id=project, task_id=task_id, stage=ValidationStage.CODE_REVIEW,
+        state=ResultState.PASSED, attempt_id=workflow["attempt_id"],
+        source_head=bundle_member["source_head"], target_base=workflow["target_base"],
+        input_generation=workflow["input_generation"],
+        definition_revision=workflow["definition_revision"],
+        policy_version=workflow["policy_version"], claim_fence=workflow["claim_fence"],
+        producer="reviewer-1", check_id="independent-code-review",
+        artifacts=(bundle_member["review_artifact"],))
+    token = TaskToken(
+        project_id=project, task_id=task_id, place=Place.INTEGRATING, responsible="author-1",
+        source_branch=bundle_member["source_branch"], source_head=bundle_member["source_head"],
+        target_base=workflow["target_base"], definition_revision=workflow["definition_revision"],
+        input_generation=workflow["input_generation"], policy_version=workflow["policy_version"],
+        requirements=(ValidationStage.CODE_REVIEW,), evidence=(review,),
+        attempt_id=workflow["attempt_id"], claim_fence=workflow["claim_fence"])
+    return {"token": token.to_dict()}
 
 
 def qualification(world):
@@ -89,6 +125,7 @@ def qualification(world):
         "firewall_policy_sha256": "a" * 64,
         "trusted_entrypoint_sha256": "8" * 64,
         "network_probe_sha256": "b" * 64,
+        "attestation_signer_sha256": "c" * 64,
         "execution_host": "test-host", "source_mount_readonly": True,
         "scratch_mount_writable": True, "docker_socket_mounted": False,
         "host_home_mounted": False, "host_credentials_mounted": False,
@@ -96,6 +133,7 @@ def qualification(world):
         "egress_allowed": False, "firewall_defaults_drop": True,
         "firewall_ipv4_default_drop": True, "firewall_ipv6_default_drop": True,
         "firewall_policy_applied": True, "candidate_blocked_until_probe": True,
+        "postgres_namespace_egress_blocked": True,
         "readonly_fixture_allowlist": ["/runner/entrypoint.py", "/runner/network_probe.py"],
         "mounts": [
             {"target": "/workspace/source", "mode": "ro", "kind": "bind",
@@ -115,11 +153,18 @@ def qualification(world):
         "resources": {**resources, "test_image_id": "sha256:" + "1" * 64,
                        "postgres_image_id": "sha256:" + "7" * 64,
                        "firewall_container_id": "5" * 64, "probe_container_id": "6" * 64,
-                       "firewall_image_id": "sha256:" + "9" * 64},
+                       "firewall_image_id": "sha256:" + "9" * 64,
+                       "postgres_firewall_container_id": "a" * 64,
+                       "postgres_probe_container_id": "b" * 64},
         "network_probe": {"postgres_tcp_allowed": True, "dns_blocked": True,
                           "external_ipv4_blocked": True, "external_ipv6_blocked": True,
                           "host_gateway_listener_blocked": True, "host_listener_port": 54001,
                           "log_sha256": "c" * 64},
+        "postgres_network_probe": {"dns_blocked": True, "external_ipv4_blocked": True,
+                                   "external_ipv6_blocked": True,
+                                   "host_gateway_listener_blocked": True,
+                                   "host_listener_port": 54001,
+                                   "postgres_unix_socket_ready": True, "log_sha256": "d" * 64},
         "result": {"exit_code": 0, "log_sha256": "6" * 64,
                    "started_at": "2026-10-10T10:00:00Z", "finished_at": "2026-10-10T10:01:00Z",
                    "preflight": {"candidate_archive_readonly": True,
@@ -134,17 +179,20 @@ def qualification(world):
             {"kind": "network", "id": resources["network_id"], "state": "absent"},
             {"kind": "firewall_container", "id": "5" * 64, "state": "absent"},
             {"kind": "network_probe_container", "id": "6" * 64, "state": "absent"},
+            {"kind": "postgres_firewall_container", "id": "a" * 64, "state": "absent"},
+            {"kind": "postgres_network_probe_container", "id": "b" * 64, "state": "absent"},
         ]},
     }
     return gate.sign_attestation(predicate, key_path=world["key"], key_id="local-test")
 
 
 def pr_view(world, state="OPEN"):
-    return {"number": 7, "state": state, "isDraft": False,
+    return {"number": 7, "state": state, "isDraft": False, "headRefName": "bundle-head",
             "headRefOid": world["candidate"], "baseRefOid": world["base"],
             "baseRefName": "main",
             "headRepository": "stonesky-ai/skybuild",
-            "reviewDecision": "APPROVED", "checks": "PASS",
+            "baseRepository": "stonesky-ai/skybuild", "author": "bundle-author",
+            "checks": "PASS",
             "mergeCommitOid": world["candidate"] if state == "MERGED" else None}
 
 
@@ -158,7 +206,72 @@ def call(world, observe_pr):
         qualification=qualification(world), trusted_gate_keys={"local-test": world["key"]},
         expected_gate_key_id="local-test", trusted_source_root=world["trusted_source"],
         trusted_runner_pins=runner_pins, trusted_publisher_commit=world["trusted_commit"],
-        observe_pr=observe_pr)
+        observe_pr=observe_pr, observe_task=lambda project, task_id: observe_task(world, project, task_id))
+
+
+def test_publisher_augmentation_preserves_manual_receipt_shape(world, tmp_path):
+    frozen = frozen_bundle(world)
+    frozen["members"] = [{key: value for key, value in frozen["members"][0].items()
+                          if key not in {"workflow", "review_artifact"}}]
+    prepared = tmp_path / "prepared"
+    prepared.mkdir()
+    review = tmp_path / "source-review.md"
+    review.write_bytes(b"review")
+    workflow = {"project_id": "skybuild", "attempt_id": "attempt-1", "claim_fence": 2,
+                "input_generation": 3, "definition_revision": 4,
+                "policy_version": "policy-1", "target_base": world["base"]}
+    inputs = {"schema": "skybuild.bundle-input.v1", "checkout": str(world["repo"]),
+              "target": {"ref": world["target"], "sha": world["base"]},
+              "policy": {"path": str(tmp_path / "policy.md"), "sha256": frozen["policy_sha256"]},
+              "members": [{"ref": "refs/heads/task-1", "sha": world["candidate"],
+                           "task_id": "task-1", "reviewer": "reviewer-1",
+                           "review": {"path": str(review), "sha256": frozen["members"][0]["review_sha256"]},
+                           "workflow": workflow}]}
+    fingerprint = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+    frozen["manifest_sha256"] = fingerprint
+    frozen["bundle_id"] = "bundle-" + fingerprint[:24]
+    report = {"schema": "skybuild.bundle-preparation.v1", "fingerprint": fingerprint,
+              "inputs": inputs, "ok": True}
+    (prepared / "inputs.json").write_text(json.dumps({"fingerprint": fingerprint, "inputs": inputs}))
+    (prepared / "report.json").write_text(json.dumps(report))
+
+    augmented = publisher._augment_frozen_workflow(world["repo"], prepared, frozen)
+    assert augmented["members"][0]["workflow"] == workflow
+    assert augmented["members"][0]["review_artifact"] == (
+        str(review) + "#sha256=" + frozen["members"][0]["review_sha256"])
+    assert set(frozen["members"][0]) == {
+        "task_id", "source_head", "source_branch", "reviewer", "review_sha256"}
+
+
+def test_github_pr_observer_uses_rest_base_sha_and_current_commit_checks(monkeypatch):
+    commit = "a" * 40
+    base = "b" * 40
+    calls = []
+    pull = {"number": 12, "state": "open", "draft": False, "merged": False,
+            "head": {"sha": commit, "ref": "bundle-head",
+                     "repo": {"full_name": "stonesky-ai/skybuild"}},
+            "base": {"sha": base, "ref": "dev-006",
+                     "repo": {"full_name": "stonesky-ai/skybuild"}},
+            "user": {"login": "bundle-author"}, "merge_commit_sha": None}
+
+    def api(path):
+        calls.append(path)
+        if path.endswith("/pulls/12"):
+            return pull
+        if path.endswith("/check-runs?per_page=100"):
+            return {"total_count": 0, "check_runs": []}
+        if path.endswith("/status"):
+            return {"total_count": 0, "statuses": [], "state": "pending"}
+        pytest.fail(f"unexpected GitHub endpoint: {path}")
+
+    monkeypatch.setattr(publisher, "_gh_api", api)
+    view = publisher.observe_github_pr(12)
+    assert view["baseRefOid"] == base
+    assert view["headRefOid"] == commit
+    assert view["checks"] == "PASS"
+    assert calls == ["repos/stonesky-ai/skybuild/pulls/12",
+                     f"repos/stonesky-ai/skybuild/commits/{commit}/check-runs?per_page=100",
+                     f"repos/stonesky-ai/skybuild/commits/{commit}/status"]
 
 
 def intent(world):
@@ -204,13 +317,13 @@ def test_changed_base_rejects_before_intent_or_publication(world):
 @pytest.mark.parametrize("change", [
     {"baseRefOid": "9" * 40},
     {"checks": "FAIL"},
-    {"reviewDecision": "REVIEW_REQUIRED"},
+    {"headRepository": "untrusted/other"},
 ])
-def test_unreviewed_or_unpassing_bundle_pr_is_rejected(world, change):
+def test_mismatched_or_unpassing_bundle_pr_is_rejected(world, change):
     def observe(_pr):
         return pr_view(world) | change
 
-    with pytest.raises(publisher.PublisherError, match="exact approved candidate"):
+    with pytest.raises(publisher.PublisherError, match="exact frozen candidate"):
         call(world, observe)
 
 
