@@ -43,7 +43,11 @@ def _claim_attempt(store, people, project, task):
     owner, worker = people["owner"], people["worker"]
     petri = task.get("metadata", {}).get("_skybuild_workflow", {}).get("petri")
     ready = task
-    if task["status"] != "ready":
+    if petri and task["status"] == "ready":
+        ready = store.task_action(owner, project, task["task_id"], "reassess",
+                                  {"reason": "Assess replacement requirements and dependencies"},
+                                  task["revision"], "assess-" + task["task_id"])
+    elif task["status"] != "ready":
         ready = store.task_action(owner, project, task["task_id"], "ready",
                                   {"reason": "Reviewed usage test definition"},
                                   task["revision"], "ready-" + task["task_id"])
@@ -53,7 +57,7 @@ def _claim_attempt(store, people, project, task):
     else:
         task = ready
     claim = store.claim_task(worker, project, task["task_id"], task["revision"],
-                             "claim-" + task["task_id"])
+                             "claim-" + task["task_id"], lease_seconds=300)
     return store.get_task(owner, project, task["task_id"]), claim
 
 
@@ -77,7 +81,7 @@ def _resolution(origin, *, operation="provider-reconcile-1", quantity="0.5"):
 def _error(code, call):
     with pytest.raises(DomainError) as caught:
         call()
-    assert caught.value.code == code
+    assert caught.value.code == code, caught.value.message
     return caught.value
 
 
