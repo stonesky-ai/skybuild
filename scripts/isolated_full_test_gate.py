@@ -32,6 +32,12 @@ TASK_ID = "SKYBUILD-ISOLATED-CANDIDATE-FULL-TEST-GATE"
 DEFAULT_GATE_COMMAND = ["uv", "run", "--extra", "test", "python", "-m", "pytest", "-q"]
 DEFAULT_GATE_COMMAND_SHA256 = hashlib.sha256(json.dumps(DEFAULT_GATE_COMMAND).encode()).hexdigest()
 RUNNER_VERSION = "skybuild-isolated-full-test-gate-v1"
+MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
+MAX_HISTORY_PACK_BYTES = 64 * 1024 * 1024
+HISTORY_COMMITS = [
+    "6d96075f88493d0b54577a2a8c9526f19a78a5ed",
+    "d79d2e1947d2c8e9edb577ab5f5093edfa3c94e3",
+]
 RUN_ID_LABEL = "skybuild.full-test.run-id"
 KIND_LABEL = "skybuild.full-test.kind"
 RUNNER_LABELS = {
@@ -73,7 +79,7 @@ FIREWALL_POLICY = {
     "ipv4": {"input": "drop", "forward": "drop", "output": "drop",
              "allow_input": ["loopback", "established_related"],
              "allow_output": ["loopback", "candidate_to_exact_postgres_tcp_5432", "established_related"],
-             "deny_output": ["docker_dns_udp_53", "docker_dns_tcp_53"]},
+             "deny_output": ["docker_dns_address_all_ports"]},
     "ipv6": {"input": "drop", "forward": "drop", "output": "drop",
              "allow_input": ["loopback", "established_related"],
              "allow_output": ["loopback", "established_related"]},
@@ -163,7 +169,7 @@ def _read_predicate(path: Path) -> dict:
     predicate = _read_json(path)
     required = {
         "bundle_id", "pr_number", "target_ref", "target_base", "candidate_commit",
-        "candidate_tree", "candidate_archive_sha256", "gate_argv", "gate_command_sha256",
+        "candidate_tree", "candidate_archive_sha256", "candidate_history_sha256", "gate_argv", "gate_command_sha256",
         "gate_policy_sha256", "runner_identity", "runner_version", "runner_image_id",
         "postgres_image_id", "firewall_image_id", "firewall_policy_sha256",
         "network_probe_sha256", "trusted_entrypoint_sha256", "attestation_signer_sha256",
@@ -182,7 +188,7 @@ def _read_predicate(path: Path) -> dict:
     _require_sha(predicate["target_base"], 40)
     _require_sha(predicate["candidate_commit"], 40)
     _require_sha(predicate["candidate_tree"], 40)
-    for key in ("candidate_archive_sha256", "gate_command_sha256", "gate_policy_sha256",
+    for key in ("candidate_archive_sha256", "candidate_history_sha256", "gate_command_sha256", "gate_policy_sha256",
                 "firewall_policy_sha256", "network_probe_sha256", "trusted_entrypoint_sha256",
                 "attestation_signer_sha256"):
         _require_sha(predicate[key])
@@ -198,22 +204,81 @@ def _read_predicate(path: Path) -> dict:
     return predicate
 
 
-def _archive(checkout: Path, commit: str, destination: Path) -> tuple[str, int]:
+def _bounded_git_output(checkout: Path, args: list[str], destination: Path,
+                        max_bytes: int, *, input_bytes: bytes | None = None) -> tuple[str, int]:
+    """Cap producer writes in the kernel, including before the parent can observe them."""
+    def cap_output() -> None:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (max_bytes, max_bytes))
+
     with destination.open("xb") as output:
-        result = subprocess.run(["git", "-C", str(checkout), "archive", "--format=tar", commit],
-                                stdout=output, stderr=subprocess.PIPE, check=False, timeout=120)
+        process = subprocess.Popen(["git", "-C", str(checkout), *args], stdout=output,
+                                   stderr=subprocess.DEVNULL,
+                                   stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
+                                   preexec_fn=cap_output)
+        try:
+            process.communicate(input=input_bytes, timeout=120)
+        except subprocess.TimeoutExpired as error:
+            process.kill()
+            process.communicate(timeout=5)
+            raise GateError("Bounded Git producer exceeded its deadline") from error
         output.flush()
         os.fsync(output.fileno())
-    if result.returncode:
-        raise GateError("Candidate Git archive could not be created")
+    if process.returncode:
+        raise GateError("Bounded Git producer failed or exceeded its byte limit")
     size = destination.stat().st_size
-    if size < 1 or size > 512 * 1024 * 1024:
-        raise GateError("Candidate archive size is outside the reviewed limit")
+    if size < 1 or size >= max_bytes:
+        raise GateError("Git output size is outside the reviewed limit")
     digest = hashlib.sha256()
     with destination.open("rb") as archive:
         for chunk in iter(lambda: archive.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest(), size
+
+
+def _archive(checkout: Path, commit: str, destination: Path) -> tuple[str, int]:
+    return _bounded_git_output(checkout, ["archive", "--format=tar", commit],
+                               destination, MAX_ARCHIVE_BYTES)
+
+
+def _history_fixture(checkout: Path, destination: Path) -> tuple[str, int]:
+    """Construct only pinned source objects; never copy operational Git metadata."""
+    destination.mkdir(mode=0o755)
+    objects = destination / "objects"
+    packs = objects / "pack"
+    packs.mkdir(parents=True, mode=0o755)
+    listing = destination / "object-list"
+    _bounded_git_output(checkout, ["rev-list", "--objects", "--no-walk=unsorted", *HISTORY_COMMITS],
+                        listing, 4 * 1024 * 1024)
+    object_ids = []
+    for line in listing.read_bytes().splitlines():
+        object_id = line.split(b" ", 1)[0].decode("ascii")
+        _require_sha(object_id, 40)
+        object_ids.append(object_id)
+    if not object_ids or len(object_ids) > 100_000:
+        raise GateError("History fixture object count is outside its limit")
+    pack_path = packs / "pack-fixture.pack"
+    _, pack_size = _bounded_git_output(checkout, [
+        "pack-objects", "--stdout", "--no-reuse-delta", "--no-reuse-object",
+        "--threads=1", "--compression=9", "--window=0",
+    ], pack_path, MAX_HISTORY_PACK_BYTES, input_bytes=("\n".join(object_ids) + "\n").encode())
+    listing.unlink()
+    _git(checkout, "index-pack", str(pack_path), timeout=120)
+    refs = destination / "refs/heads"
+    refs.mkdir(parents=True, mode=0o755)
+    for index, commit in enumerate(HISTORY_COMMITS):
+        (refs / ("fixture-" + str(index))).write_text(commit + "\n", encoding="ascii")
+    (destination / "HEAD").write_text("ref: refs/heads/fixture-0\n", encoding="ascii")
+    (destination / "shallow").write_text("\n".join(HISTORY_COMMITS) + "\n", encoding="ascii")
+    (destination / "config").write_text("[core]\n\trepositoryformatversion = 0\n\tbare = false\n", encoding="ascii")
+    # Include both pack and index plus the entire synthetic metadata in this digest.
+    manifest = {}
+    for path in sorted(destination.rglob("*")):
+        if path.is_file():
+            path.chmod(0o444)
+            manifest[path.relative_to(destination).as_posix()] = _digest_bytes(path.read_bytes())
+        elif path.is_dir():
+            path.chmod(0o755)
+    return _digest_bytes(_canonical(manifest)), pack_size
 
 
 def _extract_archive(archive: Path, destination: Path) -> None:
@@ -228,6 +293,7 @@ def _extract_archive(archive: Path, destination: Path) -> None:
                 name = PurePosixPath(member.name)
                 normalized = name.as_posix()
                 if (name.is_absolute() or ".." in name.parts or not name.parts
+                        or name.parts[0] == ".git"
                         or normalized in seen
                         or not (member.isfile() or member.isdir())):
                     raise GateError("Candidate archive contains an unsafe member")
@@ -293,8 +359,11 @@ def prepare(checkout: Path, predicate_path: Path, runner_image_id: str | None = 
     with tempfile.TemporaryDirectory(prefix="skybuild-gate-archive-") as scratch:
         archive = Path(scratch) / "candidate.tar"
         archive_sha256, archive_size = _archive(Path(candidate["checkout"]), candidate["commit"], archive)
+        history_sha256, history_size = _history_fixture(Path(candidate["checkout"]), Path(scratch) / "history")
     if archive_sha256 != predicate["candidate_archive_sha256"]:
         raise GateError("Candidate archive SHA-256 differs from the frozen predicate")
+    if history_sha256 != predicate["candidate_history_sha256"]:
+        raise GateError("Sanitized history fixture SHA-256 differs from the frozen predicate")
     actual_entrypoint = _digest_bytes(Path(__file__).with_name("gate_container_entrypoint.py").read_bytes())
     actual_probe = _digest_bytes(Path(__file__).with_name("gate_network_probe.py").read_bytes())
     if actual_entrypoint != predicate["trusted_entrypoint_sha256"]:
@@ -308,7 +377,8 @@ def prepare(checkout: Path, predicate_path: Path, runner_image_id: str | None = 
         "task_id": TASK_ID,
         "execution_host": predicate["execution_host"],
         "runner_source": runner,
-        "candidate": {**candidate, "archive_sha256": archive_sha256, "archive_size": archive_size},
+        "candidate": {**candidate, "archive_sha256": archive_sha256, "archive_size": archive_size,
+                      "history_sha256": history_sha256, "history_pack_size": history_size},
         "gate": {"argv": DEFAULT_GATE_COMMAND, "command_sha256": DEFAULT_GATE_COMMAND_SHA256,
                  "policy_sha256": predicate["gate_policy_sha256"]},
         "images": {"runner_image_id": predicate["runner_image_id"],
@@ -318,6 +388,8 @@ def prepare(checkout: Path, predicate_path: Path, runner_image_id: str | None = 
                    "environment_allowlist": ENV_ALLOWLIST,
                    "readonly_fixture_allowlist": FIXTURE_ALLOWLIST,
                    "firewall_policy_sha256": predicate["firewall_policy_sha256"],
+                   "history_fixture": {"commits": HISTORY_COMMITS,
+                                       "max_pack_bytes": MAX_HISTORY_PACK_BYTES, "readonly": True},
                    "resource_limits": RESOURCE_LIMITS,
                    "mounts": [
                        {"target": "/candidate", "mode": "ro", "kind": "bind",
@@ -504,8 +576,7 @@ def _firewall_script(postgres_ip: str, candidate_ip: str, *, postgres_namespace:
     input_rules = ("iptables -w -A INPUT -s " + candidate_ip
                    + "/32 -p tcp --dport 5432 -j ACCEPT",) if postgres_namespace else ()
     output_rules = (
-        "iptables -w -A OUTPUT -d 127.0.0.11/32 -p udp --dport 53 -j DROP",
-        "iptables -w -A OUTPUT -d 127.0.0.11/32 -p tcp --dport 53 -j DROP",
+        "iptables -w -A OUTPUT -d 127.0.0.11/32 -j DROP",
     )
     if not postgres_namespace:
         output_rules += ("iptables -w -A OUTPUT -d " + postgres_ip + "/32 -p tcp --dport 5432 -j ACCEPT",)
@@ -569,8 +640,7 @@ def _expected_firewall_rules(postgres_ip: str, candidate_ip: str, *, ipv6: bool,
     rules.append(prefix + "INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT")
     if not ipv6:
         rules.extend((
-            prefix + "OUTPUT -d 127.0.0.11/32 -p udp -m udp --dport 53 -j DROP",
-            prefix + "OUTPUT -d 127.0.0.11/32 -p tcp -m tcp --dport 53 -j DROP",
+            prefix + "OUTPUT -d 127.0.0.11/32 -j DROP",
         ))
         if not postgres_namespace:
             rules.append(prefix + "OUTPUT -d " + postgres_ip + "/32 -p tcp -m tcp --dport 5432 -j ACCEPT")
@@ -583,8 +653,8 @@ def _expected_firewall_rules(postgres_ip: str, candidate_ip: str, *, ipv6: bool,
 
 def _verify_firewall_rules(container_id: str, postgres_ip: str, candidate_ip: str,
                            *, postgres_namespace: bool) -> dict[str, bool]:
-    v4 = _docker("exec", container_id, "iptables-save", timeout=10)
-    v6 = _docker("exec", container_id, "ip6tables-save", timeout=10)
+    v4 = _docker("exec", container_id, "iptables-save", "-t", "filter", timeout=10)
+    v6 = _docker("exec", container_id, "ip6tables-save", "-t", "filter", timeout=10)
     v4_expected = _expected_firewall_rules(postgres_ip, candidate_ip, ipv6=False,
                                            postgres_namespace=postgres_namespace)
     v6_expected = _expected_firewall_rules(postgres_ip, candidate_ip, ipv6=True,
@@ -858,6 +928,8 @@ def _check_candidate_inspect(row: dict, *, name: str, run_id: str, container_id:
             or set(host["Tmpfs"]) != {"/scratch"}
             or not {"size=2147483648", "uid=10001", "gid=10001", "mode=448"}
             <= set(host["Tmpfs"]["/scratch"].split(","))
+            or not {"rw", "exec", "nosuid", "nodev"} <= set(host["Tmpfs"]["/scratch"].split(","))
+            or "noexec" in host["Tmpfs"]["/scratch"].split(",")
             or host.get("ExtraHosts") != ["db:" + postgres_ip]):
         raise GateError("Candidate container lacks reviewed isolation/resource settings")
     networks = (row.get("NetworkSettings", {}).get("Networks") or {})
@@ -1029,7 +1101,6 @@ def _write_redacted_log(container_id: str, log_path: Path, password: str | None)
             if result_code != 0 or raw_path.stat().st_size >= 128 * 1024 * 1024:
                 raise GateError("Docker log collection failed or exceeded 128 MiB")
         secret = password.encode() if password else b""
-        overlap = max(0, len(secret) - 1)
         carry = b""
         with raw_path.open("rb") as source, log_path.open("xb") as output:
             while True:
@@ -1037,9 +1108,20 @@ def _write_redacted_log(container_id: str, log_path: Path, password: str | None)
                 if not chunk:
                     break
                 data = carry + chunk
-                keep = max(0, len(data) - (2 * overlap)) if secret else len(data)
-                head, carry = data[:keep], data[keep:]
-                output.write(head.replace(secret, b"[REDACTED]") if secret else head)
+                # Replace complete occurrences before retaining the longest suffix
+                # that can still become a secret when the next chunk arrives.
+                data = data.replace(secret, b"[REDACTED]") if secret else data
+                keep = 0
+                if secret:
+                    for length in range(1, min(len(secret), len(data) + 1)):
+                        if data.endswith(secret[:length]):
+                            keep = length
+                if keep:
+                    output.write(data[:-keep])
+                    carry = data[-keep:]
+                else:
+                    output.write(data)
+                    carry = b""
             output.write(carry.replace(secret, b"[REDACTED]") if secret else carry)
             output.flush()
             os.fsync(output.fileno())
@@ -1184,6 +1266,9 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path, key_path: Path,
         if archive_sha256 != predicate["candidate_archive_sha256"]:
             raise GateError("Candidate archive changed after GO")
         _extract_archive(archive_path, archive_root)
+        history_sha256, _ = _history_fixture(Path(candidate["checkout"]), archive_root / ".git")
+        if history_sha256 != predicate["candidate_history_sha256"]:
+            raise GateError("Sanitized history fixture changed after GO")
         archive_root.chmod(0o755)
         entry_info = entrypoint_source.lstat()
         if not stat.S_ISREG(entry_info.st_mode) or entry_info.st_uid != os.geteuid():
@@ -1205,7 +1290,7 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path, key_path: Path,
         if pg_image.get("Id") != predicate["postgres_image_id"]:
             raise GateError("Exact disposable PostgreSQL image is not present")
         _validate_firewall_image(firewall_image, predicate)
-        # Assert the source package imported by the test environment comes from this candidate.
+        # Bind the fixed process environment to this candidate before any source runs.
         env = _candidate_environment(postgres_password)
         env["SKYBUILD_GATE_HOST_GATEWAY"] = "pending"
         env["SKYBUILD_GATE_HOST_LISTENER_PORT"] = "pending"
@@ -1262,7 +1347,7 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path, key_path: Path,
             "--cap-drop=ALL", "--security-opt=no-new-privileges", "--user", "10001:10001",
             "--workdir", "/scratch", "--mount",
             f"type=bind,src={archive_root},dst=/candidate,readonly", "--tmpfs",
-            "/scratch:rw,noexec,nosuid,nodev,size=2g,uid=10001,gid=10001,mode=0700", "--mount",
+            "/scratch:rw,exec,nosuid,nodev,size=2g,uid=10001,gid=10001,mode=0700", "--mount",
             f"type=bind,src={fixture_path},dst=/runner/entrypoint.py,readonly",
             "--mount", f"type=bind,src={probe_path},dst=/runner/network_probe.py,readonly",
         ]
@@ -1425,7 +1510,8 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path, key_path: Path,
             "GATE_FIREWALL_RELEASE=verified",
             "GATE_CANDIDATE_ARCHIVE_READONLY=true",
             "GATE_CANDIDATE_COPY=complete",
-            "GATE_PREFLIGHT_IMPORT=/scratch/workspace/src/skybuild/__init__.py",
+            "GATE_PREFLIGHT_SOURCE_PATH=/scratch/workspace/src/skybuild/__init__.py",
+            "GATE_COMMAND_LAUNCH=trusted_exec",
             "GATE_HOST_GATEWAY_PROBE=blocked",
             "GATE_EXTERNAL_DIRECT_IP_PROBE=blocked",
             "GATE_EXTERNAL_DNS_PROBE=blocked",
@@ -1435,7 +1521,8 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path, key_path: Path,
         preflight_evidence = {
             "candidate_archive_readonly": True,
             "candidate_copied_to_scratch": True,
-            "imported_package_path": "/scratch/workspace/src/skybuild/__init__.py",
+            "source_package_path": "/scratch/workspace/src/skybuild/__init__.py",
+            "gate_launch": "trusted_exec",
             "host_gateway_probe": "blocked",
             "external_direct_ip_probe": "blocked",
             "external_dns_probe": "blocked",
@@ -1443,6 +1530,7 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path, key_path: Path,
         journal.event("candidate_gate_finished", container_id=ids["candidate"],
                       exit_code=exit_code, log_sha256=log_sha256)
     except Exception as error:
+        exit_code = 1
         failure = type(error).__name__
         journal.event("gate_execution_failed", error=failure)
         if ids["candidate"] and attempted["candidate"]:
@@ -1498,7 +1586,7 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path, key_path: Path,
     required_ids = (ids["candidate"], ids["postgres"], ids["network"],
                     ids["candidate_firewall"], ids["candidate_probe"],
                     ids["postgres_firewall"], ids["postgres_probe"])
-    if (exit_code != 0 or not cleanup_ok or any(not isinstance(value, str) for value in required_ids)
+    if (failure is not None or exit_code != 0 or not cleanup_ok or any(not isinstance(value, str) for value in required_ids)
             or not log_sha256 or not mount_evidence or not preflight_evidence
             or not network_probe_evidence or not postgres_probe_evidence):
         return {"run_directory": str(run_dir), "attestation": None,
@@ -1512,6 +1600,7 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path, key_path: Path,
         "target_ref": predicate["target_ref"], "target_base": predicate["target_base"],
         "candidate_commit": predicate["candidate_commit"], "candidate_tree": predicate["candidate_tree"],
         "candidate_archive_sha256": predicate["candidate_archive_sha256"],
+        "candidate_history_sha256": predicate["candidate_history_sha256"],
         "runner_identity": predicate["runner_identity"], "runner_version": RUNNER_VERSION,
         "runner_image_id": predicate["runner_image_id"], "execution_host": predicate["execution_host"],
         "postgres_image_id": predicate["postgres_image_id"],
@@ -1597,7 +1686,8 @@ def main(argv: list[str] | None = None) -> int:
         result = execute(args.checkout, args.expected_predicate, args.reviewed_go_record,
                          args.attestation_key, args.attestation_key_id, args.output_dir, args.timeout)
         print(json.dumps({"executed": True, **result}, sort_keys=True))
-        return 0 if result["exit_code"] == 0 and result["cleanup_confirmed"] else 1
+        return 0 if (result["exit_code"] == 0 and result["cleanup_confirmed"]
+                     and result["attestation"] and result["failure"] is None) else 1
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, GateError) as error:
         print(json.dumps({"executed": False, "error": type(error).__name__, "detail": str(error)},
                          sort_keys=True), file=os.sys.stderr)

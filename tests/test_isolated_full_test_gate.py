@@ -93,7 +93,7 @@ def test_firewall_policy_render_and_inspect_match_both_namespaces(monkeypatch):
     def docker(*args, **kwargs):
         calls.append(args)
         return subprocess.CompletedProcess(args, 0,
-            saved(current_namespace[0], args[-1] == "ip6tables-save"), "")
+            saved(current_namespace[0], args[2] == "ip6tables-save"), "")
 
     monkeypatch.setattr(gate, "_docker", docker)
     for postgres_namespace in (False, True):
@@ -219,7 +219,7 @@ def _candidate_row(tmp_path):
                        "ShmSize": 256 * 1024**2, "Privileged": False,
                        "LogConfig": {"Type": "local", "Config": {"max-size": "128m", "max-file": "1"}},
                        "PidMode": "private", "IpcMode": "private", "PortBindings": {},
-                       "Tmpfs": {"/scratch": "rw,noexec,nosuid,nodev,size=2147483648,uid=10001,gid=10001,mode=448"},
+                       "Tmpfs": {"/scratch": "rw,exec,nosuid,nodev,size=2147483648,uid=10001,gid=10001,mode=448"},
                        "ExtraHosts": ["db:172.18.0.3"],
                        "CapDrop": ["ALL"], "SecurityOpt": ["no-new-privileges:true"]},
         "Mounts": mounts,
@@ -331,3 +331,421 @@ def test_log_redaction_streams_and_hashes_without_persisting_password(monkeypatc
     assert b"[REDACTED]" in content
     assert digest == hashlib.sha256(content).hexdigest()
     assert not log_path.with_suffix(".raw").exists()
+
+
+@pytest.mark.parametrize("offset", [65536 - 2 * 17 - 5, 65536 - 5, 65536, 65536 + 4])
+def test_log_redaction_covers_input_and_retained_prefix_boundaries(monkeypatch, tmp_path, offset):
+    secret = b"synthetic-password"
+    raw = b"x" * offset + secret + b"y" * 100
+
+    class FakeProcess:
+        def __init__(self, command, *, stdout, **kwargs):
+            stdout.write(raw)
+
+        def wait(self, timeout):
+            return 0
+
+    monkeypatch.setattr(gate.subprocess, "Popen", FakeProcess)
+    log = tmp_path / "log"
+    gate._write_redacted_log("a" * 64, log, secret.decode())
+    assert log.read_bytes() == raw.replace(secret, b"[REDACTED]")
+
+
+def test_archive_producer_has_kernel_write_bound_and_reaps_timeout(monkeypatch, tmp_path):
+    seen = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, command, *, stdout, preexec_fn, **kwargs):
+            seen["preexec"] = preexec_fn
+            stdout.write(b"archive")
+
+        def communicate(self, **kwargs):
+            if not seen.get("killed"):
+                raise subprocess.TimeoutExpired("git", 120)
+
+        def kill(self):
+            seen["killed"] = True
+
+    monkeypatch.setattr(gate.subprocess, "Popen", FakeProcess)
+    monkeypatch.setattr(gate.resource, "setrlimit", lambda kind, limits: seen.update(limits=limits))
+    with pytest.raises(gate.GateError, match="deadline"):
+        gate._archive(tmp_path, "a" * 40, tmp_path / "archive")
+    seen["preexec"]()
+    assert seen["limits"] == (gate.MAX_ARCHIVE_BYTES, gate.MAX_ARCHIVE_BYTES)
+    assert seen["killed"]
+
+
+def test_archive_kernel_bound_rejects_actual_git_overflow(monkeypatch, tmp_path):
+    monkeypatch.setattr(gate, "MAX_ARCHIVE_BYTES", 1024)
+    destination = tmp_path / "bounded.tar"
+    with pytest.raises(gate.GateError, match="byte limit"):
+        gate._archive(Path(gate.__file__).resolve().parents[1], gate.HISTORY_COMMITS[0], destination)
+    assert destination.stat().st_size <= 1024
+
+
+def test_trusted_launcher_does_not_import_hostile_candidate_before_fixed_exec(tmp_path):
+    import ast
+    from importlib.machinery import PathFinder
+
+    package = tmp_path / "skybuild"
+    package.mkdir()
+    marker = tmp_path / "executed"
+    (package / "__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('hostile')\n"
+        "import os\nos._exit(0)\n")
+    spec = PathFinder.find_spec("skybuild", [str(tmp_path)])
+    assert spec.origin == str(package / "__init__.py")
+    assert not marker.exists()
+    source = Path(gate.__file__).with_name("gate_container_entrypoint.py").read_text()
+    tree = ast.parse(source)
+    assert not any(isinstance(node, ast.Import) and any(name.name == "skybuild" for name in node.names)
+                   for node in ast.walk(tree))
+    assert "#!/usr/bin/env -S python3 -I" in source
+    assert 'os.execvpe(argv[0], argv, os.environ.copy())' in source
+
+
+def test_cli_rejects_null_attestation_even_after_zero_test_exit(monkeypatch, tmp_path):
+    monkeypatch.setattr(gate, "execute", lambda *args: {
+        "exit_code": 0, "cleanup_confirmed": True, "attestation": None, "failure": "GateError"})
+    assert gate.main(["--checkout", str(tmp_path), "--expected-predicate", "predicate",
+                      "--output-dir", str(tmp_path), "--reviewed-go-record", "go",
+                      "--attestation-key", "key", "--attestation-key-id", "key-1", "--execute"]) == 1
+
+
+def test_sanitized_history_is_deterministic_fetchable_and_contains_no_host_metadata(tmp_path):
+    checkout = Path(gate.__file__).resolve().parents[1]
+    history = tmp_path / "source/.git"
+    history.parent.mkdir()
+    first, size = gate._history_fixture(checkout, history)
+    second, other_size = gate._history_fixture(checkout, tmp_path / "repeat")
+    assert first == second and size == other_size < gate.MAX_HISTORY_PACK_BYTES
+    assert not (history / "hooks").exists()
+    assert not (history / "objects/info/alternates").exists()
+    assert "remote" not in (history / "config").read_text()
+    environment = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+    for commit in gate.HISTORY_COMMITS:
+        result = subprocess.run(["git", "-C", str(history.parent), "show",
+                                 commit + ":docs/design/mastertodo.md"], capture_output=True,
+                                env=environment, timeout=10, check=True)
+        assert b"SKYBUILD" in result.stdout
+    target = tmp_path / "fetched"
+    subprocess.run(["git", "init", "--quiet", str(target)], env=environment, check=True, timeout=10)
+    subprocess.run(["git", "-C", str(target), "fetch", "--quiet", str(history.parent),
+                    gate.HISTORY_COMMITS[0]], env=environment, check=True, timeout=10)
+
+
+def test_hostile_package_cannot_exit_before_trusted_launcher_exec(monkeypatch, tmp_path):
+    import gate_container_entrypoint as entrypoint
+
+    source = tmp_path / "candidate"
+    scratch = tmp_path / "scratch"
+    (source / "src/skybuild").mkdir(parents=True)
+    (source / "tests").mkdir()
+    (source / ".git").mkdir()
+    (source / ".git/HEAD").write_text("fixture")
+    marker = tmp_path / "hostile-ran"
+    (source / "src/skybuild/__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).touch()\nimport os\nos._exit(0)\n")
+    scratch.mkdir()
+    (scratch / ".firewall-ready").write_text("firewall-ready\n")
+    original_write = Path.write_text
+
+    def path(value):
+        value = str(value)
+        for prefix, replacement in (("/candidate", source), ("/scratch", scratch)):
+            if value == prefix or value.startswith(prefix + "/"):
+                return replacement / value.removeprefix(prefix).lstrip("/")
+        return Path(value)
+
+    def write(self, *args, **kwargs):
+        if self.name == ".skybuild-readonly-probe":
+            raise PermissionError("readonly mount")
+        return original_write(self, *args, **kwargs)
+
+    launched = []
+    monkeypatch.setattr(Path, "write_text", write)
+    monkeypatch.setattr(entrypoint, "Path", path)
+    monkeypatch.setattr(entrypoint, "os", SimpleNamespace(
+        environ={"SKYBUILD_GATE_RELEASE_FILE": "/scratch/.firewall-ready"},
+        chdir=lambda workspace: None,
+        execvpe=lambda executable, argv, environment: launched.append(argv)))
+    monkeypatch.setattr(entrypoint, "_network_preflight", lambda: None)
+    assert entrypoint.main() == 127
+    assert launched == [gate.DEFAULT_GATE_COMMAND]
+    assert not marker.exists()
+
+
+class _DockerModel:
+    """Interpret real builder arguments, then expose Docker-shaped observations."""
+
+    def __init__(self, predicate, mutation=None):
+        self.predicate = predicate
+        self.mutation = mutation
+        self.rows = {}
+        self.names = {}
+        self.calls = []
+        self.network = None
+        self.released = False
+
+    @staticmethod
+    def _bytes(value):
+        match = __import__("re").fullmatch(r"(\d+)([mg]?)", value)
+        return int(match[1]) * {"": 1, "m": 1024**2, "g": 1024**3}[match[2]]
+
+    def __call__(self, *args, **kwargs):
+        self.calls.append(args)
+
+        def result(value="", code=0, error=""):
+            return subprocess.CompletedProcess(args, code, value, error)
+
+        if args[:2] == ("image", "inspect"):
+            labels = {
+                "org.skybuild.full-test.policy-sha256": self.predicate["gate_policy_sha256"],
+                "org.skybuild.full-test.uv-lock-sha256": hashlib.sha256(b"lock").hexdigest(),
+                "org.skybuild.full-test.pyproject-sha256": hashlib.sha256(b"project").hexdigest(),
+                "org.skybuild.full-test.command-sha256": gate.DEFAULT_GATE_COMMAND_SHA256,
+                "org.skybuild.full-test.entrypoint-sha256": self.predicate["trusted_entrypoint_sha256"],
+                "org.skybuild.full-test.network-probe-sha256": self.predicate["network_probe_sha256"],
+                "org.skybuild.full-test.firewall-policy-sha256": gate.FIREWALL_POLICY_SHA256,
+            }
+            return result(json.dumps([{"Id": args[2], "Config": {"Labels": labels,
+                "Env": ["PATH=/usr/local/bin:/usr/bin:/bin"]}}]))
+        if args[:2] == ("network", "create"):
+            label = args[args.index("--label") + 1].split("=", 1)
+            self.network = {"Id": "e" * 64, "Internal": True, "EnableIPv6": False,
+                "Labels": {label[0]: label[1]}, "IPAM": {"Config": [{"Gateway": "172.18.0.1"}]}}
+            return result(self.network["Id"])
+        if args[:2] == ("network", "inspect"):
+            return result(json.dumps([self.network])) if self.network else result(
+                code=1, error="Error: No such network: " + args[2])
+        if args[:2] == ("network", "rm"):
+            self.network = None
+            return result()
+        if args[0] == "run":
+            options = {}
+            index = 1
+            flags = {"--detach", "--read-only"}
+            while not args[index].startswith("sha256:"):
+                item = args[index]
+                if item in flags:
+                    key, value = item, True
+                elif "=" in item:
+                    key, value = item.split("=", 1)
+                else:
+                    key, value = item, args[index + 1]
+                    index += 1
+                options.setdefault(key, []).append(value)
+                index += 1
+            image = args[index]
+            command = list(args[index + 1:])
+            single = lambda name, default=None: options.get(name, [default])[0]
+            labels = dict(item.split("=", 1) for item in options["--label"])
+            kind = labels[gate.KIND_LABEL]
+            identity = str(len(self.rows) + 1) * 64
+            mounts, tmpfs = [], {}
+            for item in options.get("--mount", []):
+                fields = dict((field.split("=", 1) if "=" in field else (field, True))
+                              for field in item.split(","))
+                mounts.append({"Type": fields["type"], "Source": fields["src"],
+                               "Destination": fields["dst"], "RW": not fields.get("readonly", False)})
+            for item in options.get("--tmpfs", []):
+                target, value = item.split(":", 1)
+                normalized = []
+                for field in value.split(","):
+                    if field.startswith("size="):
+                        field = "size=" + str(self._bytes(field.split("=", 1)[1]))
+                    elif field.startswith("mode="):
+                        field = "mode=" + str(int(field.split("=", 1)[1], 8))
+                    normalized.append(field)
+                tmpfs[target] = ",".join(normalized)
+                mounts.append({"Type": "tmpfs", "Destination": target, "RW": True})
+            network_mode = single("--network")
+            address = "172.18.0.2" if kind == "postgres" else "172.18.0.3"
+            row = {
+                "Id": identity, "Name": "/" + single("--name"), "Image": image,
+                "Config": {"Labels": labels, "User": single("--user", ""),
+                           "Cmd": command, "Entrypoint": [single("--entrypoint")],
+                           "Env": options.get("--env", [])},
+                "HostConfig": {"ReadonlyRootfs": single("--read-only", False),
+                    "NetworkMode": network_mode, "Memory": self._bytes(single("--memory")),
+                    "MemorySwap": self._bytes(single("--memory-swap")),
+                    "NanoCpus": int(float(single("--cpus")) * 1_000_000_000),
+                    "PidsLimit": int(single("--pids-limit")),
+                    "ShmSize": self._bytes(single("--shm-size", "64m")),
+                    "Privileged": False, "PortBindings": {}, "Tmpfs": tmpfs,
+                    "ExtraHosts": options.get("--add-host", []),
+                    "CapAdd": options.get("--cap-add", []), "CapDrop": options.get("--cap-drop", []),
+                    "SecurityOpt": [value + ":true" for value in options.get("--security-opt", [])],
+                    "LogConfig": {"Type": single("--log-driver"),
+                                  "Config": dict(value.split("=", 1) for value in options["--log-opt"])}},
+                "Mounts": mounts, "State": {"Status": "running", "Running": True},
+                "NetworkSettings": {"Networks": {network_mode: {
+                    "NetworkID": "e" * 64, "IPAddress": address}}},
+            }
+            if self.mutation == "wrong_pg_ip" and kind == "candidate":
+                row["HostConfig"]["ExtraHosts"] = ["db:" + address]
+            if self.mutation == "helper_label" and kind == "postgres_firewall":
+                labels[gate.KIND_LABEL] = "firewall"
+            if kind.endswith("probe"):
+                row["State"] = {"Status": "exited", "Running": False, "ExitCode": 0}
+            self.rows[identity] = row
+            self.names[single("--name")] = identity
+            return result(identity)
+        if args[:3] == ("inspect", "--type", "container"):
+            identity = self.names.get(args[3], args[3])
+            row = self.rows.get(identity)
+            if row is None:
+                return result(code=1, error="Error: No such object: " + args[3])
+            if row["Config"]["Labels"][gate.KIND_LABEL] == "candidate" and self.released:
+                row["State"] = {"Status": "exited", "Running": False,
+                                "ExitCode": 2 if self.mutation == "test_exit" else 0}
+            return result(json.dumps([row]))
+        if args[0] == "exec":
+            if args[2] in {"iptables-save", "ip6tables-save"}:
+                assert args[3:] == ("-t", "filter")
+                row = self.rows[args[1]]
+                postgres = row["Config"]["Labels"][gate.KIND_LABEL] == "postgres_firewall"
+                rules = gate._expected_firewall_rules("172.18.0.2", "172.18.0.3",
+                    ipv6=args[2] == "ip6tables-save", postgres_namespace=postgres)
+                text = ["*filter", *(":" + value + " [0:0]" for value in rules[:3]), *rules[3:], "COMMIT"]
+                return result("\n".join(text))
+            if args[2] == "python3":
+                self.released = True
+            return result()
+        if args[0] == "logs":
+            return result(self.log(args[1]))
+        if args[0] == "stop":
+            self.rows[args[-1]]["State"] = {"Running": False, "Status": "exited", "ExitCode": 1}
+            return result()
+        if args[0] == "rm":
+            if self.mutation == "cleanup":
+                raise gate.GateError("injected uncertain cleanup")
+            del self.rows[args[-1]]
+            return result()
+        raise AssertionError(args)
+
+    def log(self, identity):
+        row = self.rows[identity]
+        kind = row["Config"]["Labels"][gate.KIND_LABEL]
+        if kind.endswith("probe"):
+            port = int(row["Config"]["Cmd"][-1])
+            evidence = {"namespace": kind.removesuffix("_probe"), "dns_blocked": True,
+                "external_ipv4_blocked": True, "external_ipv6_blocked": True,
+                "host_gateway_listener_blocked": True, "host_listener_port": port,
+                "postgres_tcp_allowed": kind == "candidate_probe"}
+            prefix = "2026-10-10T00:00:00Z " if self.mutation == "probe_timestamp" else ""
+            return prefix + "GATE_NETWORK_PROBE=" + json.dumps(evidence) + "\n"
+        blocked = "GATE_CANDIDATE_BLOCKED=firewall_release_pending\n"
+        if not self.released:
+            return blocked
+        text = blocked + "\n".join(("GATE_FIREWALL_RELEASE=verified",
+            "GATE_CANDIDATE_ARCHIVE_READONLY=true", "GATE_CANDIDATE_COPY=complete",
+            "GATE_PREFLIGHT_SOURCE_PATH=/scratch/workspace/src/skybuild/__init__.py",
+            "GATE_COMMAND_LAUNCH=trusted_exec", "GATE_HOST_GATEWAY_PROBE=blocked",
+            "GATE_EXTERNAL_DIRECT_IP_PROBE=blocked", "GATE_EXTERNAL_DNS_PROBE=blocked"))
+        return text.replace("GATE_COMMAND_LAUNCH=trusted_exec", "") if self.mutation == "missing_preflight" else text
+
+
+def _execute_modeled_gate(monkeypatch, tmp_path, mutation=None):
+    import trusted_gate_attestation as attestation
+
+    key = tmp_path / "key"
+    key.write_bytes(b"k" * 32)
+    key.chmod(0o600)
+    predicate = {"bundle_id": "bundle-" + "a" * 24, "pr_number": 1,
+        "target_ref": "refs/heads/dev-001", "target_base": "b" * 40,
+        "candidate_commit": "c" * 40, "candidate_tree": "d" * 40,
+        "candidate_archive_sha256": "e" * 64, "candidate_history_sha256": "f" * 64,
+        "gate_argv": gate.DEFAULT_GATE_COMMAND, "gate_command_sha256": gate.DEFAULT_GATE_COMMAND_SHA256,
+        "gate_policy_sha256": "1" * 64, "runner_identity": "trusted-runner",
+        "runner_version": gate.RUNNER_VERSION, "runner_image_id": "sha256:" + "2" * 64,
+        "postgres_image_id": "sha256:" + "3" * 64, "firewall_image_id": "sha256:" + "4" * 64,
+        "firewall_policy_sha256": gate.FIREWALL_POLICY_SHA256,
+        "network_probe_sha256": hashlib.sha256(Path(gate.__file__).with_name("gate_network_probe.py").read_bytes()).hexdigest(),
+        "trusted_entrypoint_sha256": hashlib.sha256(Path(gate.__file__).with_name("gate_container_entrypoint.py").read_bytes()).hexdigest(),
+        "attestation_signer_sha256": hashlib.sha256(Path(attestation.__file__).read_bytes()).hexdigest(),
+        "candidate_blocked_until_probe": True, "execution_host": gate.platform.node().split(".", 1)[0].lower()}
+    runner = {"commit": "5" * 40, "tree": "6" * 40, "script_sha256": "7" * 64,
+        "entrypoint_sha256": predicate["trusted_entrypoint_sha256"],
+        "network_probe_sha256": predicate["network_probe_sha256"],
+        "attestation_signer_sha256": predicate["attestation_signer_sha256"]}
+    candidate = {"checkout": str(tmp_path), "commit": predicate["candidate_commit"], "tree": predicate["candidate_tree"]}
+
+    def archive(checkout, commit, destination):
+        with tarfile.open(destination, "w") as stream:
+            for name, data in {"src/skybuild/__init__.py": b"", "tests/test_one.py": b"",
+                               "uv.lock": b"lock", "pyproject.toml": b"project"}.items():
+                member = tarfile.TarInfo(name)
+                member.size = len(data)
+                stream.addfile(member, io.BytesIO(data))
+        return predicate["candidate_archive_sha256"], destination.stat().st_size
+
+    def history(checkout, destination):
+        destination.mkdir()
+        return predicate["candidate_history_sha256"], 10
+
+    monkeypatch.setattr(gate, "_candidate_identity", lambda *args: candidate)
+    monkeypatch.setattr(gate, "_runner_provenance", lambda: runner)
+    monkeypatch.setattr(gate, "_archive", archive)
+    monkeypatch.setattr(gate, "_history_fixture", history)
+    monkeypatch.setattr(gate, "_host_memory_check", lambda: 14)
+    monkeypatch.setattr(gate, "_OwnedHostListener", lambda address: SimpleNamespace(port=32768, close=lambda: None))
+    model = _DockerModel(predicate, mutation)
+    monkeypatch.setattr(gate, "_docker", model)
+
+    class FakeLogProcess:
+        def __init__(self, command, *, stdout, **kwargs):
+            assert command[:2] == ["docker", "logs"]
+            stdout.write(model.log(command[2]).encode())
+
+        def wait(self, timeout):
+            return 0
+
+    monkeypatch.setattr(gate.subprocess, "Popen", FakeLogProcess)
+    predicate_path = tmp_path / "predicate.json"
+    predicate_path.write_text(json.dumps(predicate))
+    predicate_path.chmod(0o600)
+    plan = gate.prepare(tmp_path, predicate_path)
+    go = {"decision": "GO", "task_id": gate.TASK_ID, "plan_sha256": gate.plan_digest(plan),
+        "predicate_sha256": plan["policy"]["predicate_sha256"], "attestation_key_id": "key-1",
+        "reviewer": "independent", "root_authorizer": "root", "runner_commit": runner["commit"],
+        "runner_tree": runner["tree"], "runner_script_sha256": runner["script_sha256"],
+        "entrypoint_sha256": runner["entrypoint_sha256"],
+        **{name: predicate[name] for name in ("runner_image_id", "postgres_image_id", "firewall_image_id",
+            "firewall_policy_sha256", "network_probe_sha256", "attestation_signer_sha256", "execution_host")}}
+    go_path = tmp_path / "go.json"
+    go_path.write_text(json.dumps(go))
+    go_path.chmod(0o600)
+    tmp_path.chmod(0o700)
+    result = gate.execute(tmp_path, predicate_path, go_path, key, "key-1", tmp_path)
+    return result, predicate, model, key
+
+
+def test_real_builder_inspect_cleanup_sign_and_verify_roundtrip(monkeypatch, tmp_path):
+    import trusted_gate_attestation as attestation
+
+    result, predicate, model, key = _execute_modeled_gate(monkeypatch, tmp_path)
+    assert result["failure"] is None and result["exit_code"] == 0 and result["cleanup_confirmed"]
+    assert not model.rows and model.network is None
+    receipt = json.loads(Path(result["attestation"]).read_bytes())
+    expected = {**{name: predicate[name] for name in attestation.PINNED_PREDICATE_FIELDS
+                   if name in predicate}, "environment_allowlist": gate.ENV_ALLOWLIST,
+                "resource_limits": gate.ATTESTED_CANDIDATE_LIMITS}
+    verified = attestation.verify_attestation(receipt, trusted_keys={"key-1": key},
+        expected_predicate=expected, expected_key_id="key-1")
+    assert verified["candidate_history_sha256"] == predicate["candidate_history_sha256"]
+    receipt["predicate"]["candidate_history_sha256"] = "0" * 64
+    with pytest.raises(attestation.AttestationError):
+        attestation.verify_attestation(receipt, trusted_keys={"key-1": key},
+            expected_predicate=expected, expected_key_id="key-1")
+
+
+@pytest.mark.parametrize("mutation", ["wrong_pg_ip", "helper_label", "probe_timestamp",
+                                     "missing_preflight", "test_exit", "cleanup"])
+def test_full_modeled_flow_rejects_mismatches_and_never_signs(monkeypatch, tmp_path, mutation):
+    result, predicate, model, key = _execute_modeled_gate(monkeypatch, tmp_path, mutation)
+    assert result["attestation"] is None
+    assert result["exit_code"] != 0
+    assert not list(tmp_path.glob("run-*/attestation.json"))
