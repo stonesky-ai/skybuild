@@ -331,3 +331,61 @@ def test_continuous_watch_failure_blocks_docker_but_cleanup_can_proceed(monkeypa
     monkeypatch.setattr(gate.subprocess, "run", lambda *args, **kwargs: pytest.fail("Docker must not run"))
     with pytest.raises(policy.PolicyError, match="Continuous"):
         gate._docker("start", "candidate")
+
+
+def usage_fixture(tmp_path, *, revised=True):
+    now = datetime.now(timezone.utc)
+    usage = {"confirmed_at": (now - timedelta(minutes=1)).isoformat(),
+             "valid_until": (now + timedelta(minutes=10)).isoformat(),
+             "weekly_used_percent": 56, "production_must_drain": True,
+             "stop_production_percent": 50}
+    usage_path = write(tmp_path / "usage.json", usage)
+    pin = {"path": str(usage_path), "sha256": policy.digest(usage_path.read_bytes()),
+           "valid_until": usage["valid_until"]}
+    owner = {"schema": "skybuild.usage-policy-owner-revision.v1",
+             "production_allowed": True, "weekly_production_stop_percent": None}
+    owner_path = write(tmp_path / "owner-policy.json", owner)
+    if revised:
+        pin["owner_policy"] = {"path": str(owner_path), "sha256": policy.digest(owner_path.read_bytes())}
+    return now, usage, usage_path, pin, owner, owner_path
+
+
+def test_explicit_owner_revision_accepts_truthful_56_percent(tmp_path):
+    now, usage, path, pin, _, _ = usage_fixture(tmp_path)
+    policy._check_usage(pin, now)
+    assert policy.parse(path.read_bytes())["weekly_used_percent"] == 56
+
+
+def test_legacy_weekly_cutoff_remains_unchanged(tmp_path):
+    now, usage, path, pin, _, _ = usage_fixture(tmp_path, revised=False)
+    with pytest.raises(policy.PolicyError, match="Legacy"):
+        policy._check_usage(pin, now)
+    usage.update(weekly_used_percent=42, production_must_drain=False)
+    write(path, usage); pin["sha256"] = policy.digest(path.read_bytes())
+    policy._check_usage(pin, now)
+
+
+@pytest.mark.parametrize("change", ["changed_hash", "denied", "threshold_present", "missing_threshold", "wrong_schema", "symlink", "expired", "usage_changed", "nonfinite"])
+def test_owner_revision_never_bypasses_pins_or_freshness(tmp_path, change):
+    now, usage, path, pin, owner, owner_path = usage_fixture(tmp_path)
+    if change == "changed_hash":
+        pin["owner_policy"]["sha256"] = "0" * 64
+    elif change == "symlink":
+        link = tmp_path / "linked-owner.json"; link.symlink_to(owner_path)
+        pin["owner_policy"]["path"] = str(link)
+    elif change in ("denied", "threshold_present", "missing_threshold", "wrong_schema"):
+        if change == "denied": owner["production_allowed"] = False
+        elif change == "threshold_present": owner["weekly_production_stop_percent"] = 50
+        elif change == "missing_threshold": del owner["weekly_production_stop_percent"]
+        else: owner["schema"] = "unknown"
+        write(owner_path, owner); pin["owner_policy"]["sha256"] = policy.digest(owner_path.read_bytes())
+    elif change == "expired":
+        usage["valid_until"] = (now - timedelta(seconds=1)).isoformat()
+        write(path, usage); pin.update(sha256=policy.digest(path.read_bytes()), valid_until=usage["valid_until"])
+    elif change == "usage_changed":
+        usage["weekly_used_percent"] = 57; write(path, usage)
+    elif change == "nonfinite":
+        usage["weekly_used_percent"] = float("nan")
+        path.write_text(json.dumps(usage)); pin["sha256"] = policy.digest(path.read_bytes())
+    with pytest.raises(policy.PolicyError):
+        policy._check_usage(pin, now)
