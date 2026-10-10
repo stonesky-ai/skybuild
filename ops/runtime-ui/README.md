@@ -174,7 +174,7 @@ rtk proxy scripts/project_python -m pytest \
   tests/test_runtime_stack_startup.py -q
 ```
 
-Result: 46 passed. These checks cover routes, empty lists, installation trust,
+Result: 47 passed. These checks cover routes, empty lists, installation trust,
 SNI, fixed destination, caller and server credential boundaries, task CRUD/history/
 workflow loading, mutation intent, request limits, unavailable panels, origin/Host
 checks, redirects, sanitized failures, qualified database checks, startup ordering,

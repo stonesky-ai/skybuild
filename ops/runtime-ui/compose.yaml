@@ -9,8 +9,6 @@ services:
     environment:
       PYTHONDONTWRITEBYTECODE: "1"
     command:
-      - python
-      - /runtime-ui/runtime_ui.py
       - --ui-checkout
       - /runtime-ui/ui
       - --api-checkout

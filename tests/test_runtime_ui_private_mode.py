@@ -1,6 +1,7 @@
 import json
 import importlib.util
 from pathlib import Path
+import re
 import shutil
 import subprocess
 
@@ -18,6 +19,20 @@ TOKEN = "private-workbench-token-which-must-never-escape"
 PROJECT = "skybuild"
 USERNAME = "user1"
 PASSWORD = "private-test-password"
+
+
+def test_workbench_compose_arguments_follow_image_entrypoint():
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    compose = (ROOT / "compose.yaml").read_text()
+    entrypoint_line = next(line for line in dockerfile.splitlines() if line.startswith("ENTRYPOINT "))
+    entrypoint = json.loads(entrypoint_line.removeprefix("ENTRYPOINT "))
+    command_section = compose.split("    command:\n", 1)[1].split("    ports:\n", 1)[0]
+    command = re.findall(r"^      - (.+)$", command_section, flags=re.MULTILINE)
+    argv = entrypoint + command
+
+    assert entrypoint == ["python", "/runtime-ui/runtime_ui.py"]
+    assert argv[:3] == ["python", "/runtime-ui/runtime_ui.py", "--ui-checkout"]
+    assert "python" not in command
 
 
 def token_file(path: Path, value: str = TOKEN) -> Path:
