@@ -472,6 +472,25 @@ def reconcile_worker(client: Any, manager: JobUnitManager, prepared: PreparedCPU
     if isinstance(latest, dict) and latest.get('phase') == 'failed':
         return {'observed': True, 'settled': False, 'state': current.get('state'),
                 'reason': 'failed terminal unit remains held for owner reconciliation'}
+    if current.get('state') == 'terminal':
+        state = manager.observe(prepared.unit_name)
+        if (not isinstance(latest, dict) or latest.get('phase') != 'completed'
+                or latest.get('result') != 'success' or latest.get('exit_status') != 0
+                or not latest.get('worker_result_digest')
+                or latest.get('host_id') != socket.gethostname()
+                or latest.get('unit_name') != prepared.unit_name
+                or latest.get('launch_nonce') != prepared.launch_nonce
+                or latest.get('invocation_id') != state.invocation_id
+                or state.unit != prepared.unit_name or state.launch_nonce != prepared.launch_nonce
+                or state.phase != 'completed' or state.result != 'success' or state.exit_status != 0):
+            return {'observed': False, 'settled': False,
+                    'reason': 'persisted terminal proof does not match the exact completed unit'}
+        verify_pins()
+        settled = client.settle_cpu_worker_dispatch(
+            prepared.plan.project_id, prepared.operation_id,
+            observation_id=latest['observation_id'])
+        return {'observed': True, 'settled': settled.get('state') == 'settled',
+                'state': settled.get('state')}
     state = manager.observe(prepared.unit_name)
     if (state.launch_nonce != prepared.launch_nonce or not state.invocation_id):
         return {'observed': False, 'settled': False, 'reason': 'unit identity remains unknown'}
