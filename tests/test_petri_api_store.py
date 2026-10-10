@@ -62,3 +62,41 @@ def test_public_workflow_cannot_invent_producer_or_publication_facts(store, acto
         assert client.post(path, json={"event": "claim"}).status_code == 409
         client.headers["Authorization"] = "Bearer " + people["outsider_token"]
         assert client.get(path).status_code == 403
+
+
+
+def test_http_claim_submit_and_validation_bind_exact_author_output(store, actors):
+    from test_petri_store import author_receipt, enrolled
+    from skybuild.store import Store
+    from skybuild.workflow import ValidationResult, ValidationStage, ResultState
+
+    project, people = actors
+    task = enrolled(store, people, project)
+    path = "/api/v1/projects/{}/tasks/{}".format(project, task["task_id"])
+    with TestClient(create_app(store)) as client:
+        client.headers["Authorization"] = "Bearer " + people["worker_token"]
+        claim = client.post(path + "/claim", json={"lease_seconds": 60},
+                            headers={"If-Match": str(task["revision"]), "Idempotency-Key": "http-worker-claim"})
+        assert claim.status_code == 200
+        working = client.get(path + "/workflow").json()
+        token = Store.workflow_token(working["task"])
+        receipt = author_receipt(token)
+        headers = {"If-Match": str(token.revision), "Idempotency-Key": "http-worker-submit"}
+        response = client.post(path + "/workflow", json={"event": "submit", **receipt}, headers=headers)
+        assert response.status_code == 200
+        submitted = response.json()
+        assert submitted["token"]["place"] == "validating"
+        assert submitted["token"]["source_head"] == receipt["source_head"]
+        assert submitted["token"]["input_generation"] == token.input_generation + 1
+        assert client.post(path + "/workflow", json={"event": "submit", **receipt}, headers=headers).json() == submitted
+        current = Store.workflow_token(submitted["task"])
+        evidence = ValidationResult(project, task["task_id"], ValidationStage.UNIT_TESTS, ResultState.PASSED,
+            attempt_id=current.attempt_id, source_head=current.source_head, target_base=current.target_base,
+            input_generation=current.input_generation, definition_revision=current.definition_revision,
+            policy_version=current.policy_version, claim_fence=current.claim_fence,
+            producer=people["worker"].principal_id, check_id="unit")
+        recorded = client.post(path + "/workflow", json={"event": "validation_result", "result": evidence.to_dict()},
+            headers={"If-Match": str(current.revision), "Idempotency-Key": "http-unit-result"})
+        assert recorded.status_code == 200
+        assert recorded.json()["token"]["evidence"][0]["source_head"] == receipt["source_head"]
+        assert recorded.json()["token"]["place"] == "validating"
