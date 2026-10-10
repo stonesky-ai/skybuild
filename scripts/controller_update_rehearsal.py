@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import secrets
 import signal
@@ -119,8 +120,11 @@ def _evidence_schema(evidence: dict) -> list[dict[str, object]]:
 
 
 def prepare(checkout: Path, evidence_path: Path, candidate_source: str = CANDIDATE_SOURCE,
-            candidate_tree: str = CANDIDATE_TREE, candidate_ref: str = CANDIDATE_REF) -> dict:
+            candidate_tree: str = CANDIDATE_TREE, candidate_ref: str = CANDIDATE_REF,
+            execution_host: str = "jeltz") -> dict:
     checkout = checkout.resolve()
+    if execution_host not in {"jeltz", "wonko"}:
+        raise PreparationError("Execution host must be explicitly identified as jeltz or wonko")
     if not _SHA40.fullmatch(candidate_source) or not _SHA40.fullmatch(candidate_tree):
         raise PreparationError("Candidate commit and tree must be full Git object IDs")
     if not re.fullmatch(r"refs/heads/(?:dev-[0-9]{3}|main)", candidate_ref):
@@ -140,7 +144,8 @@ def prepare(checkout: Path, evidence_path: Path, candidate_source: str = CANDIDA
     if _git(checkout, "ls-remote", "--exit-code", "origin", candidate_ref) != f"{candidate_source}\t{candidate_ref}":
         raise PreparationError("Candidate publication ref does not resolve to the pinned source")
 
-    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    evidence_bytes = evidence_path.read_bytes()
+    evidence = json.loads(evidence_bytes)
     # The accepted API source/image binding is supplied by the reviewed task
     # provenance (7da0ef6 + immutable image ID). `source_head` in the runtime
     # audit is the mounted workbench source, not the API image source.
@@ -148,8 +153,15 @@ def prepare(checkout: Path, evidence_path: Path, candidate_source: str = CANDIDA
     # predate it, so its candidate field is not used as a source of authority.
     api = [row for row in evidence.get("containers", [])
            if isinstance(row, dict) and row.get("name") == "/skybuild-pilot-api"]
-    if len(api) != 1 or api[0].get("image") != ACCEPTED_IMAGE or api[0].get("running") is not True:
-        raise PreparationError("Evidence does not identify the running accepted controller image")
+    pg = [row for row in evidence.get("containers", [])
+          if isinstance(row, dict) and row.get("name") == "/skybuild-pilot-pg"]
+    if (len(api) != 1 or api[0].get("image") != ACCEPTED_IMAGE or api[0].get("running") is not True
+            or not re.fullmatch(r"[0-9a-f]{64}", api[0].get("id", ""))):
+        raise PreparationError("Evidence does not identify the running accepted controller ID and image")
+    if (len(pg) != 1 or pg[0].get("running") is not True
+            or not re.fullmatch(r"[0-9a-f]{64}", pg[0].get("id", ""))
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", pg[0].get("image", ""))):
+        raise PreparationError("Evidence does not identify the running accepted PostgreSQL ID and image")
     if evidence.get("schema_unchanged") is not True or evidence.get("database_unchanged") is not True:
         raise PreparationError("Accepted-runtime evidence must confirm unchanged schema and database")
 
@@ -167,6 +179,17 @@ def prepare(checkout: Path, evidence_path: Path, candidate_source: str = CANDIDA
     return {
         "task_id": "SKYBUILD-MVP-ISOLATED-CONTROLLER-REHEARSAL",
         "mode": "preparation_only_no_runtime_changes",
+        "execution_host": execution_host,
+        "runtime_provenance": {
+            "authority_host": "jeltz",
+            "runtime_audit_sha256": hashlib.sha256(evidence_bytes).hexdigest(),
+            "accepted_api_container_id": api[0]["id"],
+            "accepted_api_image_id": ACCEPTED_IMAGE,
+            "accepted_postgres_container_id": pg[0]["id"],
+            "accepted_postgres_image_id": pg[0]["image"],
+            "remote_mode": execution_host == "wonko",
+            "remote_image_check": "Exact Docker image IDs must exist locally on Wonko before isolated execution.",
+        },
         "accepted_controller": {"source": ACCEPTED_SOURCE, "image": ACCEPTED_IMAGE},
         "candidate": {"published_ref": candidate_ref, "source": candidate_source,
                       "tree": candidate_tree,
@@ -186,6 +209,7 @@ def prepare(checkout: Path, evidence_path: Path, candidate_source: str = CANDIDA
         },
         "runtime_gate": [
             "Use a new isolated Docker network and disposable PostgreSQL data directory; no live mounts, credentials, or published ports.",
+            "In Wonko mode, preserve the Jeltz audit hash and full live IDs as provenance; verify exact accepted image IDs on Wonko and never inspect or change Jeltz containers.",
             "Load representative synthetic task and Cord history through the pinned accepted controller image.",
             "Build the exact candidate source into a separately identified immutable image while polling accepted-controller health throughout the build.",
             "Record full image/container IDs and journal every stop, start, health acknowledgment, and database identity.",
@@ -280,6 +304,161 @@ def _cleanup_candidate_image(reference: str, run_id: str, source: str, journal: 
                   image_id=image_id)
 
 
+def _missing_docker_object(stderr: str, reference: str, kinds: tuple[str, ...]) -> bool:
+    return stderr.strip() in ({f"Error: No such object: {reference}"}
+                              | {f"Error: No such {kind}: {reference}" for kind in kinds})
+
+
+def _container_row_for_cleanup(name: str, run_id: str, expected_id: str | None) -> dict | None:
+    target = expected_id or name
+    inspected = _docker("inspect", "--type", "container", target, check=False, timeout=10)
+    if inspected.returncode:
+        if not _missing_docker_object(inspected.stderr, target, ("container",)):
+            # A failed ID lookup may still be reconciled by the unique run-owned name.
+            if expected_id is None:
+                raise PreparationError("Container inspection failed with an unknown outcome")
+        elif expected_id is None:
+            return None
+        by_name = _docker("inspect", "--type", "container", name, check=False, timeout=10)
+        if by_name.returncode:
+            if _missing_docker_object(by_name.stderr, name, ("container",)):
+                return None
+            raise PreparationError("Container name could not be reconciled after ID inspection")
+        rows = json.loads(by_name.stdout)
+    else:
+        rows = json.loads(inspected.stdout)
+    if len(rows) != 1:
+        raise PreparationError("Container cleanup identity is ambiguous")
+    row = rows[0]
+    container_id = row.get("Id")
+    labels = row.get("Config", {}).get("Labels") or {}
+    if (not re.fullmatch(r"[0-9a-f]{64}", container_id or "")
+            or (expected_id is not None and container_id != expected_id)
+            or row.get("Name", "").lstrip("/") != name
+            or labels.get("skybuild.rehearsal.run-id") != run_id):
+        raise PreparationError("Container cleanup ownership or full ID did not match")
+    return row
+
+
+def _container_absent(name: str, run_id: str, expected_id: str | None) -> bool:
+    target = expected_id or name
+    by_id = _docker("inspect", "--type", "container", target, check=False, timeout=10)
+    if by_id.returncode == 0:
+        return False
+    if not _missing_docker_object(by_id.stderr, target, ("container",)):
+        raise PreparationError("Container removal outcome is unknown")
+    by_name = _docker("inspect", "--type", "container", name, check=False, timeout=10)
+    if by_name.returncode == 0:
+        # If there is a replacement under the unique name, it is never treated as absent.
+        row = json.loads(by_name.stdout)[0]
+        labels = row.get("Config", {}).get("Labels") or {}
+        if labels.get("skybuild.rehearsal.run-id") == run_id:
+            raise PreparationError("Run-owned container still exists after removal")
+        raise PreparationError("A different container now owns the rehearsal name")
+    if _missing_docker_object(by_name.stderr, name, ("container",)):
+        return True
+    raise PreparationError("Container name absence could not be confirmed")
+
+
+def _cleanup_container(name: str, run_id: str, expected_id: str | None, journal: "Journal") -> None:
+    row = _container_row_for_cleanup(name, run_id, expected_id)
+    if row is None:
+        journal.event("container_cleanup_acknowledged", container=name, container_id=expected_id,
+                      absent=True)
+        return
+    container_id = row["Id"]
+    removal_error = None
+    try:
+        removed = _docker("rm", "--force", "--volumes", container_id, check=False, timeout=20)
+        removal_code = removed.returncode
+    except Exception as error:
+        removal_code = None
+        removal_error = type(error).__name__
+    if not _container_absent(name, run_id, container_id):
+        raise PreparationError("Owned container removal was not acknowledged")
+    journal.event("container_cleanup_acknowledged", container=name, container_id=container_id,
+                  removal_returncode=removal_code, removal_error=removal_error)
+
+
+def _cleanup_network(name: str, run_id: str, expected_id: str | None, journal: "Journal") -> None:
+    inspected = _docker("network", "inspect", "--format",
+                        '{{.Id}} {{index .Labels "skybuild.rehearsal.run-id"}} {{.Internal}}',
+                        name, check=False, timeout=10)
+    if inspected.returncode:
+        if _missing_docker_object(inspected.stderr, name, ("network",)):
+            journal.event("network_cleanup_acknowledged", network=name, absent=True)
+            return
+        raise PreparationError("Network inspection failed with an unknown outcome")
+    fields = inspected.stdout.strip().split()
+    if (len(fields) != 3 or not re.fullmatch(r"[0-9a-f]{64}", fields[0])
+            or (expected_id is not None and fields[0] != expected_id)
+            or fields[1] != run_id or fields[2] != "true"):
+        raise PreparationError("Network cleanup ownership or isolation did not match")
+    removal_error = None
+    try:
+        removed = _docker("network", "rm", fields[0], check=False, timeout=10)
+        removal_code = removed.returncode
+    except Exception as error:
+        removal_code = None
+        removal_error = type(error).__name__
+    after = _docker("network", "inspect", "--format", "{{.Id}}", name, check=False, timeout=10)
+    if after.returncode == 0:
+        raise PreparationError("Owned network remains after removal")
+    if not _missing_docker_object(after.stderr, name, ("network",)):
+        raise PreparationError("Network removal outcome is unknown")
+    journal.event("network_cleanup_acknowledged", network=name, network_id=fields[0],
+                  removal_returncode=removal_code, removal_error=removal_error)
+
+
+def _cleanup_volume(name: str, run_id: str, attempted: bool, journal: "Journal") -> None:
+    if not attempted:
+        return
+    inspected = _docker("volume", "inspect", "--format",
+                        '{{.Name}} {{index .Labels "skybuild.rehearsal.run-id"}}',
+                        name, check=False, timeout=10)
+    if inspected.returncode:
+        if _missing_docker_object(inspected.stderr, name, ("volume",)):
+            journal.event("database_volume_cleanup_acknowledged", volume=name, absent=True)
+            return
+        raise PreparationError("Volume inspection failed with an unknown outcome")
+    fields = inspected.stdout.strip().split()
+    if fields != [name, run_id]:
+        raise PreparationError("Volume cleanup ownership did not match")
+    removal_error = None
+    try:
+        removed = _docker("volume", "rm", name, check=False, timeout=10)
+        removal_code = removed.returncode
+    except Exception as error:
+        removal_code = None
+        removal_error = type(error).__name__
+    after = _docker("volume", "inspect", "--format", "{{.Name}}", name, check=False, timeout=10)
+    if after.returncode == 0:
+        raise PreparationError("Owned volume remains after removal")
+    if not _missing_docker_object(after.stderr, name, ("volume",)):
+        raise PreparationError("Volume removal outcome is unknown")
+    journal.event("database_volume_cleanup_acknowledged", volume=name,
+                  removal_returncode=removal_code, removal_error=removal_error)
+
+
+def _create_rehearsal_container(name: str, run_id: str, profile: str, args: tuple[str, ...],
+                                timeout: int, attempted: set[str], created: dict[str, str],
+                                journal: "Journal") -> dict:
+    attempted.add(name)
+    journal.event("container_create_intent", container=name, run_id=run_id, profile=profile)
+    launched = _docker(*_docker_run_prefix(profile, "-d"), "--name", name, "--label",
+                       "skybuild.rehearsal.run-id=" + run_id, *args, timeout=timeout)
+    container_id = launched.stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", container_id):
+        raise PreparationError("Docker did not return a full container ID; reconcile by owned name")
+    # Persist the ID before inspect; an inspect failure must not lose cleanup identity.
+    created[name] = container_id
+    journal.event("container_create_acknowledged", container=name, container_id=container_id)
+    info = _inspect_container(name)
+    if info["id"] != container_id or info["rehearsal_run_id"] != run_id:
+        raise PreparationError("New container identity did not match this rehearsal")
+    return info
+
+
 def _psql_input(container: str, database: str, sql: str, *, timeout: int = 15) -> None:
     """Send SQL on stdin to psql inside the disposable PostgreSQL container."""
     _docker("exec", "-i", container, "psql", "-U", "postgres", "-d", database,
@@ -343,6 +522,11 @@ def _live_identity(name: str) -> dict:
             or not re.fullmatch(r"sha256:[0-9a-f]{64}", fields[1]) or fields[2] not in {"true", "false"}:
         raise PreparationError("Live accepted controller identity is ambiguous")
     return {"id": fields[0], "image": fields[1], "running": fields[2] == "true"}
+
+
+def _require_execution_host(expected: str) -> None:
+    if expected not in {"jeltz", "wonko"} or platform.node().split(".", 1)[0].lower() != expected:
+        raise PreparationError("Execution host does not match the host bound into the reviewed plan")
 
 
 def _available_gib() -> float:
@@ -498,9 +682,10 @@ def _check_writers(names: list[str], expected: str | None, journal: Journal,
 
 def execute(checkout: Path, evidence_path: Path, go_path: Path, evidence_output: Path,
             candidate_source: str = CANDIDATE_SOURCE, candidate_tree: str = CANDIDATE_TREE,
-            candidate_ref: str = CANDIDATE_REF) -> dict:
+            candidate_ref: str = CANDIDATE_REF, execution_host: str = "jeltz") -> dict:
     """Run the explicitly GO-authorized, isolated runtime exercise."""
-    plan = prepare(checkout, evidence_path, candidate_source, candidate_tree, candidate_ref)
+    plan = prepare(checkout, evidence_path, candidate_source, candidate_tree, candidate_ref,
+                   execution_host)
     expected_plan_sha256 = plan_digest(plan)
     go = _read_go_record(go_path)
     evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
@@ -515,25 +700,38 @@ def execute(checkout: Path, evidence_path: Path, go_path: Path, evidence_output:
             or go.get("postgres_image") != pg_image
             or go.get("candidate_source") != candidate_source
             or go.get("candidate_tree") != candidate_tree
+            or go.get("execution_host") != execution_host
+            or go.get("runtime_audit_sha256") != plan["runtime_provenance"]["runtime_audit_sha256"]
+            or go.get("accepted_api_container_id") != plan["runtime_provenance"]["accepted_api_container_id"]
+            or go.get("accepted_pg_container_id") != plan["runtime_provenance"]["accepted_postgres_container_id"]
             or not isinstance(go.get("reviewer"), str) or not go["reviewer"].strip()
             or not isinstance(go.get("root_authorizer"), str) or not go["root_authorizer"].strip()):
         raise PreparationError("A matching independent-review and root GO record is required")
 
+    _require_execution_host(execution_host)
     accepted_image = ACCEPTED_IMAGE
     run_id = uuid4().hex[:12]
-    live_api = _live_identity("skybuild-pilot-api")
-    live_pg = _live_identity("skybuild-pilot-pg")
-    if (not live_api["running"] or live_api["image"] != accepted_image
-            or live_api["id"] != api_rows[0].get("id")
-            or not live_pg["running"] or live_pg["image"] != pg_image
-            or live_pg["id"] != pg_rows[0].get("id")
-            or go.get("accepted_api_container_id") != live_api["id"]
-            or go.get("accepted_pg_container_id") != live_pg["id"]):
-        raise PreparationError("Current accepted API/PostgreSQL IDs differ from reviewed GO or runtime evidence")
+    if execution_host == "jeltz":
+        live_api = _live_identity("skybuild-pilot-api")
+        live_pg = _live_identity("skybuild-pilot-pg")
+        if (not live_api["running"] or live_api["image"] != accepted_image
+                or live_api["id"] != api_rows[0].get("id")
+                or not live_pg["running"] or live_pg["image"] != pg_image
+                or live_pg["id"] != pg_rows[0].get("id")):
+            raise PreparationError("Current accepted Jeltz API/PostgreSQL IDs differ from reviewed audit")
+    else:
+        if _image_id(accepted_image) != accepted_image or _image_id(pg_image) != pg_image:
+            raise PreparationError("Wonko lacks exact accepted API/PostgreSQL image IDs from Jeltz audit")
+        live_api = {"id": api_rows[0]["id"], "image": accepted_image, "running": True}
+        live_pg = {"id": pg_rows[0]["id"], "image": pg_image, "running": True}
     journal = Journal(evidence_output, {"task_id": plan["task_id"], "run_id": run_id,
                                         "accepted_source": ACCEPTED_SOURCE,
                                         "accepted_image": accepted_image, "candidate_source": candidate_source,
                                         "candidate_tree": candidate_tree, "postgres_image": pg_image,
+                                        "execution_host": execution_host,
+                                        "runtime_audit_sha256": plan["runtime_provenance"]["runtime_audit_sha256"],
+                                        "jeltz_accepted_api_container_id": api_rows[0]["id"],
+                                        "jeltz_accepted_pg_container_id": pg_rows[0]["id"],
                                         "accepted_api_container_id": live_api["id"],
                                         "accepted_pg_container_id": live_pg["id"],
                                         "reviewer": go["reviewer"], "root_authorizer": go["root_authorizer"]})
@@ -543,17 +741,11 @@ def execute(checkout: Path, evidence_path: Path, go_path: Path, evidence_output:
     failed = "skybuild-mvp-rehearsal-failed-" + run_id
     candidate = "skybuild-mvp-rehearsal-candidate-" + run_id
     names = [old, failed, candidate]
-    private_dir = Path(tempfile.mkdtemp(prefix="skybuild-mvp-rehearsal-"))
-    private_dir.chmod(0o700)
+    private_dir: Path | None = None
     volume = "skybuild-mvp-rehearsal-data-" + run_id
-    password_file = private_dir / "pg-password"
-    password = secrets.token_urlsafe(32)
-    password_file.write_text(password + "\n", encoding="ascii")
-    password_file.chmod(0o600)
-    admin_dsn = f"postgresql://postgres:{password}@db:5432/skybuild_rehearsal"
     runtime_role = "runtime_" + run_id
-    runtime_password = secrets.token_urlsafe(32)
-    runtime_dsn = f"postgresql://{runtime_role}:{runtime_password}@db:5432/skybuild_rehearsal"
+    admin_dsn = None
+    runtime_dsn = None
     owner, owner_token = "rehearsal-owner-" + run_id, secrets.token_urlsafe(32)
     worker, worker_token = "rehearsal-worker-" + run_id, secrets.token_urlsafe(32)
     project, task = "rehearsal-project-" + run_id, "rehearsal-task-" + run_id
@@ -561,25 +753,23 @@ def execute(checkout: Path, evidence_path: Path, go_path: Path, evidence_output:
     result = {"ok": False}
     cleanup_errors = []
     created_containers: dict[str, str] = {}
+    container_create_attempted: set[str] = set()
     network_id = None
-    network_owned = False
-    volume_owned = False
+    network_create_attempted = False
+    volume_create_attempted = False
     candidate_image_id = None
     build_process = None
 
-    def create_container(name: str, *args: str, profile: str = "api", timeout: int = 30) -> dict:
-        launched = _docker(*_docker_run_prefix(profile, "-d"), "--name", name, "--label",
-                           "skybuild.rehearsal.run-id=" + run_id, *args, timeout=timeout)
-        container_id = launched.stdout.strip()
-        if not re.fullmatch(r"[0-9a-f]{64}", container_id):
-            raise PreparationError("Docker did not return a full container ID")
-        created_containers[name] = container_id
-        info = _inspect_container(name)
-        if info["id"] != container_id or info["rehearsal_run_id"] != run_id:
-            raise PreparationError("New container identity did not match this rehearsal")
-        return info
-
     try:
+        private_dir = Path(tempfile.mkdtemp(prefix="skybuild-mvp-rehearsal-"))
+        private_dir.chmod(0o700)
+        password_file = private_dir / "pg-password"
+        password = secrets.token_urlsafe(32)
+        password_file.write_text(password + "\n", encoding="ascii")
+        password_file.chmod(0o600)
+        admin_dsn = f"postgresql://postgres:{password}@db:5432/skybuild_rehearsal"
+        runtime_password = secrets.token_urlsafe(32)
+        runtime_dsn = f"postgresql://{runtime_role}:{runtime_password}@db:5432/skybuild_rehearsal"
         available = _available_gib()
         journal.event("host_memory_preflight", available_gib=round(available, 2), reserve_gib=8)
         if available < 8:
@@ -587,17 +777,22 @@ def execute(checkout: Path, evidence_path: Path, go_path: Path, evidence_output:
         if _image_id(accepted_image) != accepted_image or _image_id(pg_image) != pg_image:
             raise PreparationError("Pinned accepted API or PostgreSQL image is not present locally by exact ID")
         journal.event("images_pinned", accepted_image=accepted_image, postgres_image=pg_image)
+        journal.event("network_create_intent", network=network, run_id=run_id, internal=True)
+        network_create_attempted = True
         network_result = _docker("network", "create", "--internal", "--label",
                                  "skybuild.rehearsal.run-id=" + run_id, network)
         network_id = network_result.stdout.strip()
         if not re.fullmatch(r"[0-9a-f]{64}", network_id):
-            raise PreparationError("Docker did not return a full isolated network ID")
+            network_id = None
+            raise PreparationError("Docker did not return a full isolated network ID; reconcile by owned name")
+        journal.event("network_create_acknowledged", network=network, network_id=network_id)
         network_identity = _docker("network", "inspect", "--format",
                                    '{{.Id}} {{index .Labels "skybuild.rehearsal.run-id"}}', network).stdout.strip().split()
         if network_identity != [network_id, run_id]:
             raise PreparationError("Isolated network identity is not owned by this rehearsal")
-        network_owned = True
         journal.event("network_created", network=network, internal=True)
+        journal.event("volume_create_intent", volume=volume, run_id=run_id)
+        volume_create_attempted = True
         volume_result = _docker("volume", "create", "--label",
                                 "skybuild.rehearsal.run-id=" + run_id, volume)
         if volume_result.stdout.strip() != volume:
@@ -606,14 +801,15 @@ def execute(checkout: Path, evidence_path: Path, go_path: Path, evidence_output:
                                 '{{index .Labels "skybuild.rehearsal.run-id"}}', volume).stdout.strip()
         if volume_labels != run_id:
             raise PreparationError("Database volume is not owned by this rehearsal")
-        volume_owned = True
+        journal.event("volume_create_acknowledged", volume=volume, run_id=run_id)
         journal.event("database_volume_created", volume=volume)
         _require_image_absent(candidate_image)
-        pg_info = create_container(pg, "--network", network, "--network-alias", "db",
-                "--mount", f"type=volume,src={volume},dst=/var/lib/postgresql/data",
-                "--mount", f"type=bind,src={password_file},dst=/run/secrets/admin-password,readonly",
-                "--env", "POSTGRES_PASSWORD_FILE=/run/secrets/admin-password", pg_image,
-                profile="postgres", timeout=30)
+        pg_info = _create_rehearsal_container(pg, run_id, "postgres",
+                ("--network", network, "--network-alias", "db",
+                 "--mount", f"type=volume,src={volume},dst=/var/lib/postgresql/data",
+                 "--mount", f"type=bind,src={password_file},dst=/run/secrets/admin-password,readonly",
+                 "--env", "POSTGRES_PASSWORD_FILE=/run/secrets/admin-password", pg_image), 30,
+                container_create_attempted, created_containers, journal)
         pg_id = pg_info["id"]
         journal.event("postgres_started", container=pg, container_id=pg_id, image_id=pg_image)
         ready_deadline = time.monotonic() + 45
@@ -649,9 +845,10 @@ def execute(checkout: Path, evidence_path: Path, go_path: Path, evidence_output:
         _provision_principals(network, accepted_image, admin_dsn, runtime_role,
                               project, owner, owner_token,
                               worker, worker_token)
-        old_info = create_container(old, "--network", network, "--env", "SKYBUILD_DSN=" + runtime_dsn,
-                                    "--env", "SKYBUILD_EXPECTED_DATABASE=skybuild_rehearsal",
-                                    accepted_image, timeout=30)
+        old_info = _create_rehearsal_container(old, run_id, "api",
+                ("--network", network, "--env", "SKYBUILD_DSN=" + runtime_dsn,
+                 "--env", "SKYBUILD_EXPECTED_DATABASE=skybuild_rehearsal", accepted_image), 30,
+                container_create_attempted, created_containers, journal)
         old_id = old_info["id"]
         journal.event("accepted_controller_started", container=old, container_id=old_id,
                       image_id=accepted_image)
@@ -747,10 +944,11 @@ def execute(checkout: Path, evidence_path: Path, go_path: Path, evidence_output:
         journal.event("accepted_controller_stopped", container=old, container_id=old_id)
         _check_writers(names, expected=None, journal=journal)
 
-        failed_started = create_container(failed, "--network", network,
-                "--env", "SKYBUILD_DSN=" + runtime_dsn,
-                "--env", "SKYBUILD_EXPECTED_DATABASE=skybuild_rehearsal",
-                "--entrypoint", "/bin/false", candidate_id, timeout=20)
+        failed_started = _create_rehearsal_container(failed, run_id, "api",
+                ("--network", network, "--env", "SKYBUILD_DSN=" + runtime_dsn,
+                 "--env", "SKYBUILD_EXPECTED_DATABASE=skybuild_rehearsal",
+                 "--entrypoint", "/bin/false", candidate_id), 20,
+                container_create_attempted, created_containers, journal)
         failed_info = failed_started
         failed_deadline = time.monotonic() + 10
         while failed_info["running"] and time.monotonic() < failed_deadline:
@@ -790,9 +988,10 @@ def execute(checkout: Path, evidence_path: Path, go_path: Path, evidence_output:
             raise PreparationError("Accepted controller stop before candidate promotion was not acknowledged")
         journal.event("accepted_controller_stopped_for_candidate", container=old, container_id=old_id)
         _check_writers(names, expected=None, journal=journal)
-        candidate_container = create_container(candidate, "--network", network,
-                "--env", "SKYBUILD_DSN=" + runtime_dsn,
-                "--env", "SKYBUILD_EXPECTED_DATABASE=skybuild_rehearsal", candidate_id, timeout=20)
+        candidate_container = _create_rehearsal_container(candidate, run_id, "api",
+                ("--network", network, "--env", "SKYBUILD_DSN=" + runtime_dsn,
+                 "--env", "SKYBUILD_EXPECTED_DATABASE=skybuild_rehearsal", candidate_id), 20,
+                container_create_attempted, created_containers, journal)
         journal.event("candidate_started", container=candidate, container_id=candidate_container["id"],
                       image_id=candidate_id)
         _wait_api(candidate, journal)
@@ -825,97 +1024,65 @@ def execute(checkout: Path, evidence_path: Path, go_path: Path, evidence_output:
     finally:
         # Cleanup is fail-closed: every removal is individually journaled; any
         # uncertain Docker acknowledgment makes the result unsuccessful.
+        def record_cleanup_failure(resource: str, error: Exception) -> None:
+            cleanup_errors.append(resource)
+            with suppress(Exception):
+                journal.event("cleanup_unconfirmed", resource=resource,
+                              error=type(error).__name__)
+
         if build_process is not None:
             try:
                 _stop_build_process(build_process)
                 journal.event("candidate_build_process_stopped", returncode=build_process.returncode)
             except Exception as error:
-                cleanup_errors.append("candidate-build-process")
-                with suppress(Exception):
-                    journal.event("candidate_build_process_cleanup_unconfirmed", error=type(error).__name__)
+                record_cleanup_failure("candidate-build-process", error)
         for name in [candidate, failed, old, pg]:
-            container_id = created_containers.get(name)
-            if container_id is None:
+            if name not in container_create_attempted:
                 continue
             try:
-                inspected = _docker("inspect", "--type", "container", container_id, check=False, timeout=10)
-                if inspected.returncode:
-                    cleanup_errors.append(name)
-                    journal.event("container_cleanup_unconfirmed", container=name, container_id=container_id,
-                                  error="created container ID unavailable")
-                    continue
-                row = json.loads(inspected.stdout)[0]
-                if (row["Id"] != container_id
-                        or (row.get("Config", {}).get("Labels") or {}).get("skybuild.rehearsal.run-id") != run_id):
-                    cleanup_errors.append(name)
-                    journal.event("container_cleanup_unconfirmed", container=name, container_id=container_id,
-                                  error="container ownership identity changed")
-                    continue
-                if row["State"]["Running"]:
-                    _docker("stop", "--time", "10", container_id, timeout=20)
-                _docker("rm", container_id, timeout=15)
-                journal.event("container_cleanup_acknowledged", container=name, container_id=row["Id"])
+                _cleanup_container(name, run_id, created_containers.get(name), journal)
             except Exception as error:
-                cleanup_errors.append(name)
-                with suppress(Exception):
-                    journal.event("container_cleanup_unconfirmed", container=name, error=type(error).__name__)
+                record_cleanup_failure(name, error)
         try:
             _cleanup_candidate_image(candidate_image, run_id, candidate_source, journal,
                                      candidate_image_id)
         except Exception as error:
-            cleanup_errors.append(candidate_image)
-            with suppress(Exception):
-                journal.event("candidate_image_cleanup_unconfirmed", image_reference=candidate_image,
-                              image_id=candidate_image_id, error=type(error).__name__)
-        if network_owned:
-            network_identity = _docker("network", "inspect", "--format",
-                                       '{{.Id}} {{index .Labels "skybuild.rehearsal.run-id"}}',
-                                       network, check=False, timeout=10)
-            if network_identity.returncode == 0 and network_identity.stdout.strip().split() == [network_id, run_id]:
-                removed = _docker("network", "rm", network_id, check=False, timeout=10)
-                if removed.returncode == 0:
-                    journal.event("network_cleanup_acknowledged", network_id=network_id)
-                else:
-                    cleanup_errors.append(network)
-                    with suppress(Exception):
-                        journal.event("network_cleanup_unconfirmed", network_id=network_id)
-            else:
-                cleanup_errors.append(network)
-                with suppress(Exception):
-                    journal.event("network_cleanup_unconfirmed", network_id=network_id,
-                                  error="network ownership identity changed")
-        if volume_owned:
-            volume_identity = _docker("volume", "inspect", "--format",
-                                      '{{.Name}} {{index .Labels "skybuild.rehearsal.run-id"}}',
-                                      volume, check=False, timeout=10)
-            if volume_identity.returncode == 0 and volume_identity.stdout.strip().split() == [volume, run_id]:
-                volume_removed = _docker("volume", "rm", volume, check=False, timeout=10)
-                if volume_removed.returncode == 0:
-                    journal.event("database_volume_cleanup_acknowledged", volume=volume)
-                else:
-                    cleanup_errors.append(volume)
-                    with suppress(Exception):
-                        journal.event("database_volume_cleanup_unconfirmed", volume=volume)
-            else:
-                cleanup_errors.append(volume)
-                with suppress(Exception):
-                    journal.event("database_volume_cleanup_unconfirmed", volume=volume,
-                                  error="volume ownership identity changed")
-        try:
-            shutil.rmtree(private_dir)
-            if private_dir.exists():
-                raise OSError("private rehearsal directory still exists")
-            journal.event("synthetic_secret_cleanup_acknowledged")
-        except OSError as error:
-            cleanup_errors.append(str(private_dir))
-            with suppress(Exception):
-                journal.event("synthetic_secret_cleanup_unconfirmed", error=type(error).__name__)
+            record_cleanup_failure(candidate_image, error)
+        if network_create_attempted:
+            try:
+                _cleanup_network(network, run_id, network_id, journal)
+            except Exception as error:
+                record_cleanup_failure(network, error)
+        if volume_create_attempted:
+            try:
+                _cleanup_volume(volume, run_id, volume_create_attempted, journal)
+            except Exception as error:
+                record_cleanup_failure(volume, error)
+        if private_dir is not None:
+            try:
+                metadata = private_dir.lstat()
+                if (not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)
+                        or metadata.st_uid != os.getuid() or metadata.st_mode & 0o077):
+                    raise PreparationError("Private rehearsal directory ownership or mode changed")
+                shutil.rmtree(private_dir)
+                if private_dir.exists():
+                    raise OSError("private rehearsal directory still exists")
+                journal.event("synthetic_secret_cleanup_acknowledged")
+            except Exception as error:
+                record_cleanup_failure("synthetic-secrets", error)
         if cleanup_errors:
             result["ok"] = False
             result["cleanup_unconfirmed"] = cleanup_errors
-        with suppress(Exception):
+        try:
             journal.event("run_finished", ok=result["ok"], cleanup_unconfirmed=cleanup_errors)
-        journal.close()
+        except Exception as error:
+            result["ok"] = False
+            result.setdefault("evidence_errors", []).append("run_finished:" + type(error).__name__)
+        try:
+            journal.close()
+        except Exception as error:
+            result["ok"] = False
+            result.setdefault("evidence_errors", []).append("journal_close:" + type(error).__name__)
     return result
 
 
@@ -926,6 +1093,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--candidate-source", default=CANDIDATE_SOURCE)
     parser.add_argument("--candidate-tree", default=CANDIDATE_TREE)
     parser.add_argument("--candidate-ref", default=CANDIDATE_REF)
+    parser.add_argument("--execution-host", choices=("jeltz", "wonko"), default="jeltz",
+                        help="Bind runtime execution to Jeltz or the isolated Wonko host")
     parser.add_argument("--execute", action="store_true",
                         help="Run isolated rehearsal only with a matching independent-review/root GO record")
     parser.add_argument("--reviewed-go-record", type=Path)
@@ -937,10 +1106,12 @@ def main(argv: list[str] | None = None) -> int:
                 raise PreparationError("Execution requires reviewed GO record and fresh evidence-output path")
             result = execute(args.checkout, args.accepted_runtime_evidence,
                              args.reviewed_go_record, args.evidence_output,
-                             args.candidate_source, args.candidate_tree, args.candidate_ref)
+                             args.candidate_source, args.candidate_tree, args.candidate_ref,
+                             args.execution_host)
         else:
             result = prepare(args.checkout, args.accepted_runtime_evidence,
-                             args.candidate_source, args.candidate_tree, args.candidate_ref)
+                             args.candidate_source, args.candidate_tree, args.candidate_ref,
+                             args.execution_host)
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         print(json.dumps({"prepared": False, "error": str(error)}, sort_keys=True), file=sys.stderr)
         return 2

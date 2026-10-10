@@ -105,6 +105,15 @@ def test_writer_probe_requires_the_expected_container_id(monkeypatch, tmp_path):
     journal.close()
 
 
+def test_execution_host_is_exact_and_bound(monkeypatch):
+    monkeypatch.setattr(rehearsal.platform, "node", lambda: "Wonko.example.test")
+    rehearsal._require_execution_host("wonko")
+    with pytest.raises(rehearsal.PreparationError, match="does not match"):
+        rehearsal._require_execution_host("jeltz")
+    with pytest.raises(rehearsal.PreparationError, match="does not match"):
+        rehearsal._require_execution_host("unknown")
+
+
 def test_all_rehearsal_container_runs_are_no_pull_and_resource_limited():
     for profile in ("postgres", "api", "probe"):
         prefix = rehearsal._docker_run_prefix(profile, "--rm")
@@ -170,4 +179,128 @@ def test_candidate_image_cleanup_refuses_unowned_image(monkeypatch, tmp_path):
     with pytest.raises(rehearsal.PreparationError, match="not owned"):
         rehearsal._cleanup_candidate_image("candidate:run", "run", "b" * 40, journal)
     assert not any(call[:2] == ("image", "rm") for call in calls)
+    journal.close()
+
+
+@pytest.mark.parametrize("kind", ["network", "volume"])
+def test_cleanup_reconciles_create_success_when_creation_inspection_failed(monkeypatch, tmp_path, kind):
+    journal = _private_journal(tmp_path)
+    run_id = "run"
+    name = kind + "-run"
+    object_id = "a" * 64
+    state = {"exists": True, "removed": False}
+    calls = []
+
+    def fake_docker(*args, **kwargs):
+        calls.append(args)
+        if kind == "network" and args[:2] == ("network", "inspect"):
+            if not state["exists"]:
+                return rehearsal.subprocess.CompletedProcess(args, 1, "", f"Error: No such network: {name}")
+            return rehearsal.subprocess.CompletedProcess(args, 0, f"{object_id} {run_id} true", "")
+        if kind == "volume" and args[:2] == ("volume", "inspect"):
+            if not state["exists"]:
+                return rehearsal.subprocess.CompletedProcess(args, 1, "", f"Error: No such volume: {name}")
+            return rehearsal.subprocess.CompletedProcess(args, 0, f"{name} {run_id}", "")
+        if args[:2] == (kind, "rm"):
+            state["exists"] = False
+            state["removed"] = True
+            return rehearsal.subprocess.CompletedProcess(args, 0, name, "")
+        pytest.fail(f"unexpected Docker call: {args}")
+
+    monkeypatch.setattr(rehearsal, "_docker", fake_docker)
+    # This is the cleanup path after create returned but its first inspect failed.
+    if kind == "network":
+        rehearsal._cleanup_network(name, run_id, None, journal)
+    else:
+        rehearsal._cleanup_volume(name, run_id, True, journal)
+    assert state["removed"]
+    assert any(call[:2] == (kind, "rm") for call in calls)
+    journal.close()
+
+
+def test_container_create_timeout_reconciles_by_name_and_refuses_foreign_container(monkeypatch, tmp_path):
+    journal = _private_journal(tmp_path)
+    name, run_id = "api-run", "run"
+    container_id = "b" * 64
+    state = {"label": run_id, "exists": True}
+    calls = []
+
+    def fake_docker(*args, **kwargs):
+        calls.append(args)
+        if args[:2] == ("run", "--pull=never"):
+            raise rehearsal.subprocess.TimeoutExpired(["docker", "run"], 20)
+        if args[:3] == ("inspect", "--type", "container"):
+            target = args[-1]
+            if not state["exists"]:
+                return rehearsal.subprocess.CompletedProcess(args, 1, "", f"Error: No such object: {target}")
+            if target not in {name, container_id}:
+                pytest.fail(f"unexpected inspection target: {target}")
+            row = {"Id": container_id, "Name": "/" + name,
+                   "Config": {"Labels": {"skybuild.rehearsal.run-id": state["label"]}},
+                   "State": {"Running": False}}
+            return rehearsal.subprocess.CompletedProcess(args, 0, json.dumps([row]), "")
+        if args[:2] == ("rm", "--force"):
+            state["exists"] = False
+            return rehearsal.subprocess.CompletedProcess(args, 0, container_id, "")
+        pytest.fail(f"unexpected Docker call: {args}")
+
+    monkeypatch.setattr(rehearsal, "_docker", fake_docker)
+    attempted, created = set(), {}
+    with pytest.raises(rehearsal.subprocess.TimeoutExpired):
+        rehearsal._create_rehearsal_container(name, run_id, "api", ("image",), 20,
+                                              attempted, created, journal)
+    assert name in attempted and name not in created
+    rehearsal._cleanup_container(name, run_id, None, journal)
+    assert not state["exists"]
+
+    state.update(label="foreign", exists=True)
+    with pytest.raises(rehearsal.PreparationError, match="ownership or full ID"):
+        rehearsal._cleanup_container(name, run_id, None, journal)
+    assert state["exists"]
+    assert not any(call[:2] == ("rm", "--force") and call[-1] != container_id for call in calls)
+    journal.close()
+
+
+def test_container_id_is_journaled_before_post_create_inspection(monkeypatch, tmp_path):
+    journal = _private_journal(tmp_path)
+    name, run_id, container_id = "api-run", "run", "c" * 64
+    monkeypatch.setattr(rehearsal, "_docker", lambda *args, **kwargs:
+                        rehearsal.subprocess.CompletedProcess(args, 0, container_id, ""))
+    monkeypatch.setattr(rehearsal, "_inspect_container",
+                        lambda _name: (_ for _ in ()).throw(TimeoutError("inspect timeout")))
+    attempted, created = set(), {}
+    with pytest.raises(TimeoutError):
+        rehearsal._create_rehearsal_container(name, run_id, "api", ("image",), 20,
+                                              attempted, created, journal)
+    assert attempted == {name}
+    assert created == {name: container_id}
+    journal.close()
+
+
+@pytest.mark.parametrize("kind", ["network", "volume"])
+def test_cleanup_confirms_absence_after_remove_timeout(monkeypatch, tmp_path, kind):
+    journal = _private_journal(tmp_path)
+    run_id, name, object_id = "run", kind + "-run", "d" * 64
+    state = {"exists": True}
+
+    def fake_docker(*args, **kwargs):
+        if kind == "network" and args[:2] == ("network", "inspect"):
+            if not state["exists"]:
+                return rehearsal.subprocess.CompletedProcess(args, 1, "", f"Error: No such network: {name}")
+            return rehearsal.subprocess.CompletedProcess(args, 0, f"{object_id} {run_id} true", "")
+        if kind == "volume" and args[:2] == ("volume", "inspect"):
+            if not state["exists"]:
+                return rehearsal.subprocess.CompletedProcess(args, 1, "", f"Error: No such volume: {name}")
+            return rehearsal.subprocess.CompletedProcess(args, 0, f"{name} {run_id}", "")
+        if args[:2] == (kind, "rm"):
+            state["exists"] = False
+            raise rehearsal.subprocess.TimeoutExpired(["docker", kind, "rm"], 10)
+        pytest.fail(f"unexpected Docker call: {args}")
+
+    monkeypatch.setattr(rehearsal, "_docker", fake_docker)
+    if kind == "network":
+        rehearsal._cleanup_network(name, run_id, object_id, journal)
+    else:
+        rehearsal._cleanup_volume(name, run_id, True, journal)
+    assert not state["exists"]
     journal.close()
