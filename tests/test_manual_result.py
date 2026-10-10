@@ -301,7 +301,7 @@ def test_real_client_requires_disabled_automatic_retries(collection):
 
 
 
-def cli_args(collection):
+def cli_args(collection, *, duration=1):
     _, repo, kwargs, *_ = collection
     assignment = repo.parent / 'assignment.json'
     assignment.write_text(json.dumps(kwargs['assignment']))
@@ -314,7 +314,7 @@ def cli_args(collection):
               'base-sha': kwargs['base_sha'], 'message-id': kwargs['message_id'],
               'approval-until': '2999-01-01T00:00:00+00:00', 'token-file': token,
               'checkout': repo, 'assignment': assignment,
-              'destination': kwargs['destination'], 'duration': 1}
+              'destination': kwargs['destination'], 'duration': duration}
     return [str(part) for pair in values.items() for part in ('--' + pair[0], pair[1])]
 
 
@@ -333,7 +333,7 @@ int configure_resolver(unsigned short port) {
     r->nsaddr_list[0].sin_family = AF_INET;
     r->nsaddr_list[0].sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     r->nsaddr_list[0].sin_port = htons(port);
-    r->retrans = 3; r->retry = 1;
+    r->retrans = 30; r->retry = 1;
     r->options |= RES_INIT;
     r->options &= ~(RES_ROTATE | RES_USEVC);
     return 0;
@@ -344,15 +344,19 @@ int configure_resolver(unsigned short port) {
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as resolver:
         resolver.bind(('127.0.0.1', 0))
         resolver.settimeout(0.2)
-        prefix = ("import ctypes; lib=ctypes.CDLL(" + repr(str(library)) +
+        # Include a slow cold start in the wall budget, but still reach real DNS.
+        duration = 5
+        prefix = ("import time; time.sleep(1.1); import ctypes; lib=ctypes.CDLL(" + repr(str(library)) +
                   "); assert lib.configure_resolver(" + str(resolver.getsockname()[1]) + ") == 0; ")
         monkeypatch.setattr(module, '_CHILD_CODE', prefix + module._CHILD_CODE)
         started = time.monotonic()
-        assert module.main(cli_args(collection)) == 2
-        assert time.monotonic() - started < 1.8
+        assert module.main(cli_args(collection, duration=duration)) == 2
+        assert time.monotonic() - started < duration + 0.8
         assert resolver.recvfrom(4096)[0]  # Actual libc resolver reached the dropped UDP reply.
     assert not collection[2]['destination'].exists()
-    assert 'synthetic-token' not in capsys.readouterr().err
+    stderr = capsys.readouterr().err
+    assert 'synthetic-token' not in stderr
+    assert json.loads(stderr)['child_termination'] == 'confirmed'
 
 
 def test_cli_supervisor_bounds_progressing_http_body(collection, monkeypatch):
@@ -381,24 +385,27 @@ def test_cli_supervisor_bounds_progressing_http_body(collection, monkeypatch):
     thread.start()
     try:
         # Exercise real CLI credential/client setup and real progressing HTTP.
-        code = module._CHILD_CODE.replace('from skybuild.manual_result import _main;',
+        duration = 5
+        code = 'import time; time.sleep(1.1); ' + module._CHILD_CODE.replace('from skybuild.manual_result import _main;',
             'import skybuild.manual_result as m; '
             'm._private_endpoint=lambda url,resolver:url; '
             'm.receive_result=lambda client,*args,**kwargs:client.whoami(); '
             'from skybuild.manual_result import _main;')
         monkeypatch.setattr(module, '_CHILD_CODE', code)
-        argv = cli_args(collection)
+        argv = cli_args(collection, duration=duration)
         argv[argv.index('--url') + 1] = 'http://127.0.0.1:' + str(server.server_port)
-        started = time.monotonic()
         # Server thread belongs to the test process, not the standalone CLI.
+        # Measure main's budget after the separate parent imports its modules.
         script = ('import sys; sys.path.insert(0,' +
                   repr(str(module.Path(module.__file__).resolve().parents[1])) +
                   '); import skybuild.manual_result as m; m._CHILD_CODE=' + repr(code) +
-                  '; raise SystemExit(m.main(' + repr(argv) + '))')
+                  '; import time, json; started=time.monotonic(); result=m.main(' + repr(argv) +
+                  '); print(json.dumps({"elapsed":time.monotonic()-started})); raise SystemExit(result)')
         outcome = subprocess.run([module.sys.executable, '-c', script],
-                                 capture_output=True, timeout=2)
+                                 capture_output=True, timeout=duration + 10)
         assert outcome.returncode == 2
-        assert time.monotonic() - started < 1.8
+        assert json.loads(outcome.stdout)['elapsed'] < duration + 0.8
+        assert json.loads(outcome.stderr)['child_termination'] == 'confirmed'
         assert reached.is_set()  # An unrelated preflight error cannot satisfy this test.
     finally:
         server.shutdown()
@@ -414,13 +421,14 @@ def test_cli_cutoff_preserves_saved_evidence_for_valid_restart(collection, monke
     path = collection[2]['destination']
     original = path.read_bytes()
     path.unlink()
-    code = ("import sys; sys.path.insert(0," + repr(str(module.Path(module.__file__).resolve().parents[1])) +
+    duration = 5
+    code = ("import time; time.sleep(1.1); import sys; sys.path.insert(0," + repr(str(module.Path(module.__file__).resolve().parents[1])) +
             "); import time, signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); from pathlib import Path; from skybuild.manual_cord import _private_write; "
-            "_private_write(Path(" + repr(str(path)) + "), " + repr(original) + "); time.sleep(3)")
+            "_private_write(Path(" + repr(str(path)) + "), " + repr(original) + "); time.sleep(15)")
     monkeypatch.setattr(module, '_CHILD_CODE', code)
     started = time.monotonic()
-    assert module.main(cli_args(collection)) == 2
-    assert time.monotonic() - started < 1.8
+    assert module.main(cli_args(collection, duration=duration)) == 2
+    assert time.monotonic() - started < duration + 0.8
     assert path.read_bytes() == original
     actions = collection[5]
     previous = actions[-1]

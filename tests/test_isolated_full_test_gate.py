@@ -808,6 +808,9 @@ def test_hostile_package_cannot_exit_before_trusted_launcher_exec(monkeypatch, t
     original_write = Path.write_text
 
     def path(value):
+        physical = Path(value)
+        if physical.is_relative_to(tmp_path):
+            return physical
         value = str(value)
         for prefix, replacement in (("/candidate", source), ("/scratch", scratch)):
             if value == prefix or value.startswith(prefix + "/"):
