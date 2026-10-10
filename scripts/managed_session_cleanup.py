@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import tempfile
 import time
 
 
@@ -34,12 +35,22 @@ def record(path):
              "exit_code": os.environ.get("EXIT_CODE"), "exit_status": os.environ.get("EXIT_STATUS"),
              "invocation_id": os.environ.get("INVOCATION_ID"), "finished_at": time.time()}
     destination = path.with_name(f"{launch['unit']}.result.json")
-    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(descriptor, "w") as stream:
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as stream:
+        pending = Path(stream.name)
         json.dump(value, stream, sort_keys=True)
         stream.write("\n")
         stream.flush()
         os.fsync(stream.fileno())
+    try:
+        # Publish a complete record without replacing an existing result.
+        os.link(pending, destination)
+        descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    finally:
+        pending.unlink(missing_ok=True)
     return 0 if not remaining else 1
 
 

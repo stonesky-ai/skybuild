@@ -135,6 +135,7 @@ def service_command(args, unit):
     environment = {key: os.environ[key] for key in ("HOME", "USER", "LOGNAME", "LANG", "TERM", "PATH")
                    if key in os.environ}
     environment["UV_CACHE_DIR"] = str(args.state_dir / "uv-cache")
+    environment["SKYBUILD_SESSION_UNIT"] = unit
     return argv + ["--", "/usr/bin/env", "-i", *[f"{key}={value}" for key, value in environment.items()],
                    *args.command]
 

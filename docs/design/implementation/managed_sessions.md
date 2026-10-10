@@ -35,6 +35,6 @@ For a merge run, pass the exact target and the existing reviewed integration com
 
 Read-only Wonko checks found systemd 259, cgroup v2, a working user bus, and about 22.6 GiB available at the time of the check. The `memory.low` values of the user-service ancestors were zero. Password-free sudo was unavailable. This user-level setup therefore does not claim effective `MemoryLow` protection. Effective protection needs a separately configured parent reservation or a privileged service configuration. Other programs outside the managed state directory can still use host memory.
 
-Do not move or terminate another session. Existing sessions keep their current lifecycle. Apply this setup to new runs. The source change to `skybuild_job_unit.py` takes effect when its reviewed version is deployed. Existing service properties do not change with a source edit.
+Do not move or terminate another session. Existing sessions keep their current lifecycle. Apply this setup to new runs. The existing `JobUnitManager` is unchanged. It retains completed units for its own observation contract. Do not use that adapter for analysis sessions. Use `managed_session.py`, which has a separate durable cleanup hook and does not need a retained active unit. Existing service properties do not change with a source edit.
 
 The service wrapper uses only the Python standard library. Its systemd cleanup hook uses `/usr/bin/python3` so cleanup does not depend on a package install or a project environment. Use the checkout's `scripts/project_python` for project tests and commands.

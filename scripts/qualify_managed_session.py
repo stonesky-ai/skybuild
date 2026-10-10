@@ -28,7 +28,8 @@ def payload(args):
         raise ValueError("The qualification target differs from the approved target")
     child = subprocess.Popen(["/usr/bin/node", "-e", "setInterval(() => {}, 1000)"], start_new_session=True)
     pending = args.output / "processes.pending"
-    pending.write_text(json.dumps({"main": identity(os.getpid()), "child": identity(child.pid)}))
+    pending.write_text(json.dumps({"unit": os.environ["SKYBUILD_SESSION_UNIT"],
+                                   "main": identity(os.getpid()), "child": identity(child.pid)}))
     pending.replace(args.output / "processes.json")
     while not (args.output / "finish").exists():
         time.sleep(0.05)
@@ -76,17 +77,25 @@ def qualify(args):
             elif case in {"normal", "oom"}:
                 (case_dir / "finish").touch()
             status = process.wait(timeout=65)
-        for name, recorded in processes.items():
+        for name in ("main", "child"):
+            recorded = processes[name]
             actual = identity(recorded["pid"])
             if actual and actual["start_ticks"] == recorded["start_ticks"] and actual["state"] != "Z":
                 raise RuntimeError(f"The {case} service left its {name} process alive")
         if (case == "normal") != (status == 0):
             raise RuntimeError(f"The {case} service returned an unexpected exit status")
         state = Path.home() / "my_code/skybuild-managed-state"
+        evidence = json.loads((state / f"{processes['unit']}.result.json").read_text())
+        expected = {"normal": "success", "sigkill": "signal", "timeout": "timeout", "oom": "oom-kill"}[case]
+        if evidence.get("systemd_result") != expected or evidence.get("cleanup_confirmed") is not True:
+            raise RuntimeError(f"The {case} service has no matching result and cleanup evidence")
+        if case == "oom" and int((evidence.get("memory_events") or {}).get("oom_kill", 0)) < 1:
+            raise RuntimeError("The OOM service has no cgroup OOM kill event")
         if (state / "merge-slot.json").exists():
             raise RuntimeError(f"The {case} service did not release its merge slot")
         report = {"case": case, "exit_code": status, "descendants_stopped": True,
-                  "merge_slot_released": True}
+                  "merge_slot_released": True, "systemd_result": evidence["systemd_result"],
+                  "memory_peak_bytes": evidence.get("memory_peak_bytes")}
         reports.append(report)
         print(json.dumps(report), flush=True)
     (args.output / "summary.json").write_text(json.dumps({"host": socket.gethostname(), "cases": reports}, indent=2)+"\n")
