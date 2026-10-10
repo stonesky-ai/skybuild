@@ -92,9 +92,9 @@ def receive_result(client, project, checkout, *, assignment, assignment_id, task
     scopes = identity.get('grants', {}).get(project) if isinstance(identity, dict) and isinstance(identity.get('grants'), dict) else None
     if (not isinstance(identity, dict) or identity.get('principal_id') != dispatcher
             or identity.get('is_admin') is not False or set(identity.get('grants', {})) != {project}
-            or not isinstance(scopes, list) or len(scopes) != 3
+            or not isinstance(scopes, list) or len(scopes) != 4
             or not all(isinstance(scope, str) for scope in scopes)
-            or set(scopes) != {'cord:read', 'cord:send', 'cord:handle'}):
+            or set(scopes) != {'tasks:read', 'cord:read', 'cord:send', 'cord:handle'}):
         raise ResultError("Collector credential differs from scoped dispatcher")
     found = None
     for page in range(max_pages):
