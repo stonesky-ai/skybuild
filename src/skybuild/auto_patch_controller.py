@@ -219,6 +219,8 @@ def run(*, repo: Path, manifest: Path, project: str, dispatcher: str, url: str,
             check_weekly_usage(weekly_usage, permit)
             resource_admission(hostwatch, permit, selected_count=2)
             log = state_dir / ("worker-" + item["worker"] + ".log")
+            with log.open("xb") as stream:
+                os.fchmod(stream.fileno(), 0o600)
             remaining = int((expiry - datetime.now(timezone.utc)).total_seconds())
             if remaining < 2:
                 raise AutoControllerError("Approval interval is too short for bounded launch")
