@@ -459,7 +459,7 @@ def test_schema_010_role_audit_and_atomic_candidate_requalification(monkeypatch)
             assert connection.execute('SELECT max(version) FROM skybuild.schema_migrations').fetchone()[0] == 10
             assert connection.execute("SELECT to_regclass('skybuild.cpu_fake_dispatches')").fetchone()[0] is None
             assert runtime_role.audit_runtime_role(connection, target, role)['findings'] == [
-                'missing table: cpu_fake_dispatches', 'missing table: cpu_fake_receipts']
+                'missing table: ' + name for name in sorted(absent_tables)]
         with psycopg.connect(dsn) as connection:
             upgrade(connection)
         assert store.readiness() == {'ready': True, 'schema_version': candidate_version}
