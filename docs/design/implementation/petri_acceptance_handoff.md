@@ -29,7 +29,7 @@ Record the final source tree, all parent heads, project requirement profile and 
 ## Bounded concurrency model
 
 `PetriWorkflow.tla` checks two workers, two claim fences, one task and one external effect.
-SANY passes. TLC passes with 501 generated states and 285 distinct states, at depth 10.
+SANY passes. TLC passes with 571 generated states and 285 distinct states, at depth 10.
 The broken fence and late-pass configurations each produce the intended invariant violation at depth 5.
 The JVM heap is limited to 256 MiB. TLC uses one worker.
 See `../models/PetriWorkflow.md` for assumptions and limits.

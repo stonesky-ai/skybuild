@@ -23,7 +23,7 @@ This model adds only the Petri place, pending control, claim fence and check-ord
 Run SANY first. Run TLC with `JAVA_TOOL_OPTIONS=-Xmx256m`, `-workers 1` and a private `-metadir`.
 The `-deadlock` option disables deadlock checking because this model checks safety and permits terminal states.
 
-The normal configuration passes: 501 states generated, 285 distinct states, depth 10.
+The normal configuration passes: 571 states generated, 285 distinct states, depth 10.
 The broken fence configuration fails `CurrentFenceWrites` after claim, expiry, replacement claim and stale submission.
 The broken result configuration fails `FailureCannotAdvance` after submission, failure and late pass.
 Both broken checks exit with status 12 and reach the expected failure at depth 5.

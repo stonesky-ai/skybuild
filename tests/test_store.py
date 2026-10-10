@@ -7,6 +7,7 @@ from pathlib import Path
 import secrets
 from threading import Barrier
 from uuid import uuid4
+from unittest.mock import patch
 
 import psycopg
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
@@ -52,8 +53,19 @@ def seed_api_authority(store, project):
         )
 
 
-def create(store, principal, project, task_id='T1', **fields):
-    return store.create_task(principal, project, {'task_id': task_id, 'title': 'Test task', 'description': 'Full brief', **fields}, 'create-' + task_id)
+def legacy_create(store, principal, project, task_id='T1', **fields):
+    """Build a synthetic pre-Petri task for existing compatibility tests.
+
+    Replace only the pure enrollment helper during fixture construction. The
+    transaction, journal, authorization and all subsequent guards are unchanged.
+    Default-enrollment acceptance tests call Store.create_task directly.
+    """
+    with patch.object(store, '_new_task_metadata', side_effect=lambda task: task['metadata']):
+        return store.create_task(principal, project, {'task_id': task_id, 'title': 'Test task', 'description': 'Full brief', **fields}, 'create-' + task_id)
+
+
+# Existing legacy scenarios retain their fixture import without changing scope.
+create = legacy_create
 
 
 def test_manual_workflow_actions_are_journaled_and_idempotent(store, actors):

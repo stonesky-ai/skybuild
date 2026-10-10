@@ -467,16 +467,28 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
                 connection.execute(sql.SQL('INSERT INTO tasks (project_id, task_id, {}) VALUES (%s, %s, {})').format(sql.SQL(', ').join(map(sql.Identifier, columns)), sql.SQL(', ').join(sql.Placeholder() for _ in columns)), (project_id, task_id, *parameters))
                 self._dependencies(connection, project_id, task_id, values['dependencies'])
                 result = self._task(connection, project_id, task_id)
-                from .enrollment import enrollment_token, install_token
-                metadata = json.loads(json.dumps(result['metadata']))
-                install_token(metadata, enrollment_token(result, input_generation=1, revision=result['revision'], new=True))
-                _validate_metadata(metadata)
+                metadata = self._new_task_metadata(result)
                 connection.execute('UPDATE tasks SET metadata = %s WHERE project_id = %s AND task_id = %s',
                                    (Jsonb(metadata), project_id, task_id))
                 result = self._task(connection, project_id, task_id)
                 self._journal(connection, principal, result)
+                if self._petri(result) and self.workflow_token(result).place.value == 'ready':
+                    connection.execute('UPDATE task_readiness SET assessed_generation = input_generation '
+                                       'WHERE project_id = %s AND task_id = %s', (project_id, task_id))
                 return result
             return self._idempotent(connection, principal, project_id, 'task.create', idempotency_key, body, mutation)
+
+    @staticmethod
+    def _new_task_metadata(task):
+        """Enroll new tasks. Legacy test fixtures replace only this pure helper."""
+        from .enrollment import enrollment_token, install_token
+        metadata = json.loads(json.dumps(task['metadata']))
+        token = enrollment_token(task, input_generation=1, revision=task['revision'], new=True)
+        install_token(metadata, token)
+        metadata['_skybuild_workflow']['readiness'] = {
+            'input_generation': 1, 'assessed_generation': 1 if token.place.value == 'ready' else 0}
+        _validate_metadata(metadata)
+        return metadata
 
     def list_tasks(self, principal, project_id, *, limit=100, offset=0, after_task_id=None, by_id=False) -> list[dict]:
         self._page(limit, offset)
@@ -648,7 +660,7 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
             after_token = replace(after_token, input_generation=values['metadata']['_skybuild_workflow']['readiness']['input_generation'])
         facts = kernel.journal_facts(token, after_token, event)
         if receipt is not None:
-            facts['author_output_receipt'] = receipt
+            facts['author_output_receipt' if event['event'] == 'submit' else 'integration_receipt'] = receipt
         metadata = json.loads(json.dumps(before['metadata']))
         metadata['_skybuild_workflow']['petri']['token'] = after_token.to_dict()
         if event['event'] in {'reopen', 'release_hold', 'resume_deferred'}:
@@ -809,7 +821,8 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
                 allowed = {'submission_verified', 'result_authorized', 'validation_verified', 'integration_fixed',
                            'bundle_id', 'publication_required', 'acceptance_verified', 'publication_verified',
                            'task_included', 'policy_reason', 'failure_confirmed', 'completion_evidence',
-                           'publication_policy_version', 'acceptance_policy'}
+                           'publication_policy_version', 'acceptance_policy', 'integration_observation_verified',
+                           'exclusion_verified', 'publication_outcome'}
                 if set(checked) - allowed:
                     _invalid('Receipt cannot replace database input or ownership facts')
                 context.update({key: value for key, value in checked.items() if key != 'completion_evidence'})
@@ -836,7 +849,8 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
                     from .completion import freeze_without_publication_policy
                     prepared = freeze_without_publication_policy(before, context)
                 after = self._apply_workflow_event(connection, principal, prepared, request, context,
-                                                   journal_before=before)
+                                                   journal_before=before,
+                                                   receipt=evidence if event in {'integration_progress', 'exclude_from_bundle'} else None)
                 if event == 'accept':
                     self._invalidate_dependents(connection, principal, project_id, task_id)
                 return self._workflow_view(connection, principal, after)

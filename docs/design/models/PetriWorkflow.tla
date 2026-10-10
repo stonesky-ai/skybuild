@@ -50,10 +50,14 @@ ApplyControl == /\ pending \in {"Hold", "Deferred"} /\ effect = "resolved"
                 /\ UNCHANGED <<fence, captured, writes, failed, effect>>
 Release == /\ marking \subseteq {"Hold", "Deferred"} /\ Move("Ready")
            /\ UNCHANGED <<owner, fence, captured, writes, failed, pending, effect>>
+Exclude == /\ At("Integrating") /\ effect = "resolved" /\ pending = "none"
+           /\ Move("Validating")
+           /\ UNCHANGED <<owner, fence, captured, writes, failed, pending, effect>>
+Observe == /\ At("Integrating") /\ UNCHANGED vars
 Accept == /\ At("Integrating") /\ effect = "resolved" /\ pending = "none"
           /\ Move("Done") /\ owner' = "none"
           /\ UNCHANGED <<fence, captured, writes, failed, pending, effect>>
-Next == Expire \/ Pass \/ Fail \/ Freeze \/ Dispatch \/ Resolve \/ ApplyControl \/ Release \/ Accept
+Next == Expire \/ Pass \/ Fail \/ Freeze \/ Dispatch \/ Resolve \/ ApplyControl \/ Release \/ Accept \/ Exclude \/ Observe
         \/ (\E w \in Workers : Claim(w) \/ Submit(w))
         \/ (\E kind \in {"Hold", "Deferred"} : Control(kind))
 Spec == Init /\ [][Next]_vars

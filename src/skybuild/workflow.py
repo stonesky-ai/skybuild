@@ -364,7 +364,7 @@ class WorkflowContext(TypedDict, total=False):
 _ACTIVE_PLACES = (Place.READY, Place.WORKING, Place.VALIDATING, Place.INTEGRATING)
 _CONTROL_EVENTS = frozenset({"validation_result", "validation_failure", "integration_failure",
                              "work_failure", "hold", "release_hold", "defer", "resume_deferred",
-                             "reopen", "update_control"})
+                             "reopen", "update_control", "integration_progress", "exclude_from_bundle"})
 TRANSITIONS = (
     TransitionSpec("claim", (Place.READY,), Place.WORKING, "claim"),
     TransitionSpec("submit", (Place.WORKING,), Place.VALIDATING, "submit"),
@@ -373,6 +373,8 @@ TRANSITIONS = (
     TransitionSpec("validation_result", (Place.VALIDATING,), None, "validation_result"),
     TransitionSpec("validation_failure", (Place.VALIDATING,), Place.READY, "validation_failure"),
     TransitionSpec("integration_failure", (Place.INTEGRATING,), Place.READY, "integration_failure"),
+    TransitionSpec("integration_progress", (Place.INTEGRATING,), None, "integration_progress"),
+    TransitionSpec("exclude_from_bundle", (Place.INTEGRATING,), Place.VALIDATING, "exclude_from_bundle"),
     TransitionSpec("work_failure", (Place.WORKING,), Place.READY, "work_failure"),
     TransitionSpec("hold", _ACTIVE_PLACES + (Place.DEFERRED,), Place.HOLD, "hold"),
     TransitionSpec("release_hold", (Place.HOLD,), Place.READY, "release_hold"),
@@ -513,6 +515,17 @@ def _control_guard(token, name, context):
     for field in ("source_head", "target_base", "definition_revision", "input_generation", "policy_version"):
         if field not in context or type(context[field]) is not type(getattr(token, field)) or context[field] != getattr(token, field):
             return False
+    if name == "integration_progress":
+        return (token.bundle_id is not None and context.get("bundle_id") == token.bundle_id
+                and context.get("integration_observation_verified") is True
+                and context.get("publication_outcome") in {"pending", "unknown", "applied", "rejected"})
+    if name == "exclude_from_bundle":
+        return (token.pending_action is None and token.bundle_id is not None
+                and context.get("bundle_id") == token.bundle_id
+                and context.get("exclusion_verified") is True
+                and context.get("publication_outcome") == "unpublished"
+                and context.get("validation_verified") is True
+                and context.get("effects_resolved") is True)
     if name == "validation_result":
         return context.get("result_authorized") is True
     if token.pending_action is not None and name not in {
@@ -608,7 +621,10 @@ def _apply_control(token, event, context, spec):
             if not event[field].strip():
                 _record_error(f"Workflow control requires a nonempty {field}")
             changes[field] = event[field]
-    if name in {"validation_failure", "integration_failure", "work_failure"}:
+    if name == "exclude_from_bundle":
+        changes.update(bundle_id=None, policy_reason=None,
+                       next_action=event.get("next_action", "Reassess current validation before selecting another bundle"))
+    elif name in {"validation_failure", "integration_failure", "work_failure"}:
         changes.update(faults=token.faults + (reason,), blocker=reason, evidence=_stale_evidence(token),
                        next_action=event.get("next_action", "Correct the fault and reassess the task"))
     elif name in {"hold", "defer"}:

@@ -49,3 +49,43 @@ def test_control_during_unknown_publication_retains_token_and_blocks_new_work():
     released = workflow.apply(held, event(held, "release_hold", reason="Reconciled"), context(held))
     assert released.place == Place.READY
     assert released.next_action.startswith("Reassess")
+
+
+@pytest.mark.parametrize("outcome", ["pending", "unknown", "applied", "rejected"])
+def test_verified_integration_observation_preserves_pending_control_and_inputs(outcome):
+    current = replace(token(Place.INTEGRATING), pending_action="hold")
+    facts = context(current, effects_resolved=False, publication_outcome=outcome)
+    after = TaskWorkflow().apply(current, event(current, "integration_progress", reason="Observed publication"), facts)
+    assert after.place == Place.INTEGRATING and after.pending_action == "hold"
+    assert after.bundle_id == current.bundle_id and after.evidence == current.evidence
+    assert after.claim_fence == current.claim_fence and after.attempt_id == current.attempt_id
+
+
+@pytest.mark.parametrize("field,value", [("integration_observation_verified", False),
+    ("bundle_id", "other"), ("publication_outcome", "invented")])
+def test_integration_observation_rejects_unverified_or_wrong_bundle(field, value):
+    current = token(Place.INTEGRATING)
+    with pytest.raises(DomainError):
+        TaskWorkflow().apply(current, event(current, "integration_progress", reason="Observed"),
+                             context(current, **{field: value}))
+
+
+def test_verified_exclusion_preserves_current_validation_without_advancing_acceptance():
+    current = token(Place.INTEGRATING)
+    current = replace(current, evidence=(result(current),))
+    after = TaskWorkflow().apply(current, event(current, "exclude_from_bundle", reason="Excluded before dispatch"),
+                                 context(current, publication_outcome="unpublished"))
+    assert after.place == Place.VALIDATING and after.bundle_id is None
+    assert after.evidence == current.evidence
+    assert after.input_generation == current.input_generation
+    assert after.attempt_id == current.attempt_id and after.claim_fence == current.claim_fence
+
+
+@pytest.mark.parametrize("change", [{"exclusion_verified": False}, {"validation_verified": False},
+    {"effects_resolved": False}, {"publication_outcome": "unknown"}, {"publication_outcome": "applied"},
+    {"bundle_id": "other"}])
+def test_exclusion_requires_resolved_unpublished_current_bundle(change):
+    current = token(Place.INTEGRATING)
+    with pytest.raises(DomainError):
+        TaskWorkflow().apply(current, event(current, "exclude_from_bundle", reason="Exclude"),
+                             context(current, **{**{"publication_outcome": "unpublished"}, **change}))
