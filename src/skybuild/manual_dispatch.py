@@ -239,6 +239,7 @@ def dispatch(repo: Path, brief_path: str, *, worker: str, dispatcher: str, proje
                                 or task["status"] not in {"ready", "in-progress"}
                                 or type(task.get("revision")) is not int or task["revision"] < 1):
                             raise DispatchError("Task is unavailable or not ready for manual dispatch")
+                        _require_dispatchable_place(task)
                         envelope = {**envelope, "schema": "manual-work-v2",
                                     "task_status": task["status"], "task_revision": task["revision"]}
                         try:
@@ -266,6 +267,7 @@ def dispatch(repo: Path, brief_path: str, *, worker: str, dispatcher: str, proje
                                 or type(task.get("revision")) is not int
                                 or task["revision"] != envelope["task_revision"]):
                             raise DispatchError("Task changed before assignment send")
+                        _require_dispatchable_place(task)
                     if mode == "new" and _published_head(repo, base_ref) != envelope["base_sha"]:
                         raise DispatchError("Published development head changed before send")
                     state = {**intended, "status": "sending", "result": None}
@@ -281,6 +283,14 @@ def dispatch(repo: Path, brief_path: str, *, worker: str, dispatcher: str, proje
                 "message_id": result["message_id"], "state_file": str(path), "mode": mode}
     finally:
         os.close(lock_descriptor)
+
+
+def _require_dispatchable_place(task):
+    petri = task.get("metadata", {}).get("_skybuild_workflow", {}).get("petri")
+    if isinstance(petri, dict) and petri.get("schema_version") == 1:
+        token = petri.get("token", {})
+        if token.get("place") != "ready" or token.get("pending_action") is not None or token.get("superseded"):
+            raise DispatchError("Petri task is not permitted Ready work")
 
 
 def main() -> int:

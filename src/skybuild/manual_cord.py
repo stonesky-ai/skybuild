@@ -1,12 +1,12 @@
 """One-shot REST/Cord transport for the manually assigned worker pilot.
 
-This module does not start a model or claim, reserve, or fence a task. The
-dispatcher binds and rechecks an API task status/revision snapshot; that read
-does not prevent concurrent assignments. The dispatcher separately reviews
-the reported Git head.
+This module starts no model. Petri assignments acquire a fenced API claim;
+legacy assignments retain their read-only status/revision check. A submitted
+head is proposed work. The dispatcher separately reviews the reported head.
 """
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -18,6 +18,7 @@ from pathlib import Path
 from .client import Client, ClientError
 from .fleet_preflight import PreflightError, _token_from_file, probe_private_api
 from .manual_assignment import AssignmentError, verify_assignment
+from .manual_dispatch import _read_state
 
 
 class ManualCordError(ValueError):
@@ -93,8 +94,13 @@ def receive_assignment(client: Client, project: str, checkout: Path, *, worker: 
         task = client.get_task(project, envelope["task_id"])
     except ClientError as error:
         raise ManualCordError(f"Assigned task check failed ({error.code})") from None
-    if (not isinstance(task, dict) or task.get("task_id") != envelope["task_id"]
-            or task.get("status") != envelope["task_status"]
+    if not isinstance(task, dict) or task.get("task_id") != envelope["task_id"]:
+        raise ManualCordError("Assigned task response differs")
+    petri = _petri_token(task)
+    claim_state = None
+    if petri is not None:
+        claim_state = _claim_assignment(client, project, envelope, task, destination, worker)
+    elif (task.get("status") != envelope["task_status"]
             or type(task.get("revision")) is not int
             or task["revision"] != envelope["task_revision"]):
         raise ManualCordError("Task changed after dispatcher prepared the assignment")
@@ -102,15 +108,88 @@ def receive_assignment(client: Client, project: str, checkout: Path, *, worker: 
     _private_write(destination, payload)
     key = "manual-receipt-" + hashlib.sha256(message_id.encode()).hexdigest()
     client.message_action(project, message_id, "receipt", idempotency_key=key)
-    return {"saved": str(destination), "message_id": message_id, "assignment_id": snapshot["assignment_id"],
+    response = {"saved": str(destination), "message_id": message_id, "assignment_id": snapshot["assignment_id"],
             "base_sha": snapshot["base_sha"], "verified": True,
             "authority": "api", "brief_authority": "git",
             "task_revision": snapshot["task_revision"], "task_status": snapshot["task_status"]}
+    if claim_state is not None:
+        response.update(place="working", workflow_state=str(_workflow_path(destination)),
+                        claim_fence=claim_state["token"]["claim_fence"], attempt_id=claim_state["token"]["attempt_id"])
+    return response
+
+
+def _petri_token(task):
+    if not isinstance(task, dict) or not isinstance(task.get("metadata", {}), dict):
+        raise ManualCordError("Task response is invalid")
+    workflow = task.get("metadata", {}).get("_skybuild_workflow", {})
+    if not isinstance(workflow, dict):
+        raise ManualCordError("Workflow response is invalid")
+    petri = workflow.get("petri")
+    if isinstance(petri, dict) and petri.get("schema_version") == 1:
+        if not isinstance(petri.get("token"), dict):
+            raise ManualCordError("Petri task response is invalid")
+        return petri["token"]
+    return None
+
+
+def _workflow_path(assignment_path):
+    return assignment_path.with_name(assignment_path.name + ".workflow.json")
+
+
+def _claim_assignment(client, project, assignment, task, destination, worker):
+    """Persist a stable claim request before I/O and retain its exact binding."""
+    fingerprint = hashlib.sha256(json.dumps(assignment, sort_keys=True).encode()).hexdigest()
+    intent = {"schema": "manual-petri-claim-v1", "project_id": project, "worker": worker,
+              "assignment_id": assignment["assignment_id"], "task_id": assignment["task_id"],
+              "expected_revision": assignment["task_revision"], "assignment_sha256": fingerprint}
+    path = _workflow_path(destination)
+    intent_path = path.with_name(path.name + ".intent")
+    existing = _read_state(intent_path)
+    saved = _read_state(path)
+    if saved is not None and (existing is None or
+            {name: saved.get(name) for name in intent} != intent or
+            not isinstance(saved.get("token"), dict) or not isinstance(saved.get("claim"), dict) or
+            saved["token"].get("project_id") != project or
+            saved["token"].get("task_id") != assignment["task_id"] or saved["claim"].get("holder") != worker):
+        raise ManualCordError("Saved workflow binding requires reconciliation before claiming")
+    if existing is None:
+        token = _petri_token(task)
+        if (task.get("revision") != assignment["task_revision"] or token.get("place") != "ready"
+                or token.get("pending_action") is not None or token.get("superseded")):
+            raise ManualCordError("Petri assignment is no longer permitted Ready work")
+    elif existing != intent:
+        raise ManualCordError("Assignment differs from the durable claim intent")
+    # Validate local ownership and sync the pinned assignment before the API
+    # acquires ownership. Local collisions must never create a remote claim.
+    payload = (json.dumps(assignment, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
+    _private_write(destination, payload)
+    _private_write(intent_path, (json.dumps(intent, sort_keys=True) + "\n").encode())
+    key = "manual-claim-" + hashlib.sha256((project + "\n" + assignment["assignment_id"] + "\n" + fingerprint).encode()).hexdigest()
+    claim = client.claim_task(project, assignment["task_id"], expected_revision=intent["expected_revision"],
+                              idempotency_key=key, lease_seconds=300)
+    view = client.task_workflow(project, assignment["task_id"])
+    token = view.get("token") if isinstance(view, dict) else None
+    if (not isinstance(claim, dict) or not isinstance(token, dict) or claim.get("holder") != worker
+            or claim.get("held") is not True or type(claim.get("fence")) is not int
+            or token.get("claim_fence") != claim["fence"] or not token.get("attempt_id")
+            or token.get("place") != "working" or token.get("pending_action") is not None
+            or token.get("project_id") != project or token.get("task_id") != assignment["task_id"]
+            or token.get("revision") != claim.get("task_revision")):
+        raise ManualCordError("Claim binding changed; preserve the durable intent and reconcile")
+    try:
+        lease_until = datetime.fromisoformat(claim["lease_until"].replace("Z", "+00:00"))
+        if lease_until.tzinfo is None or lease_until <= datetime.now(timezone.utc):
+            raise ValueError
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise ManualCordError("Assignment claim lease is not current; reconcile ownership") from None
+    state = {**intent, "token": token, "claim": claim}
+    _private_write(path, (json.dumps(state, sort_keys=True) + "\n").encode())
+    return state
 
 
 
 def send_result(client: Client, project: str, checkout: Path, worktree: Path, *, worker: str,
-                assignment: dict, result: dict) -> dict:
+                assignment: dict, result: dict, workflow_state: Path | None = None) -> dict:
     """Send a result tied to a clean owned branch and exact local Git head."""
     snapshot = verify_assignment(assignment, checkout, worker=worker)
     required = {"schema", "assignment_id", "phase", "branch", "head_sha", "checks",
@@ -152,9 +231,78 @@ def send_result(client: Client, project: str, checkout: Path, worktree: Path, *,
     message = {"recipient": assignment["dispatcher"], "subject": "Manual work result",
                "body": body, "category": "manual-work"}
     key = "manual-result-" + hashlib.sha256((snapshot["assignment_id"] + body).encode()).hexdigest()
+    if workflow_state is not None:
+        _submit_result(client, project, assignment, result, worker, workflow_state, key)
+    elif _petri_token(client.get_task(project, assignment["task_id"])) is not None:
+        raise ManualCordError("Petri result requires the saved fenced assignment binding")
     sent = client.send_message(project, message, idempotency_key=key)
     return {"assignment_id": snapshot["assignment_id"], "head_sha": head,
             "message_id": sent.get("message_id"), "sent": True}
+
+
+def _submit_result(client, project, assignment, result, worker, path, key):
+    state = _read_state(path)
+    if state is None:
+        task = client.get_task(project, assignment["task_id"])
+        if _petri_token(task) is not None:
+            raise ManualCordError("Petri result requires the saved fenced assignment binding")
+        return
+    fingerprint = hashlib.sha256(json.dumps(assignment, sort_keys=True).encode()).hexdigest()
+    if (state.get("schema") != "manual-petri-claim-v1" or state.get("project_id") != project
+            or state.get("worker") != worker or state.get("assignment_id") != assignment["assignment_id"]
+            or state.get("task_id") != assignment["task_id"] or state.get("assignment_sha256") != fingerprint):
+        raise ManualCordError("Result differs from the saved fenced assignment")
+    token = state["token"]
+    receipt = {name: token[name] for name in ("attempt_id", "claim_fence", "input_generation",
+                                             "definition_revision", "policy_version")}
+    receipt.update(source_head=result["head_sha"], source_branch="refs/heads/" + assignment["branch"],
+                   target_base=assignment["base_sha"])
+    intent_path = path.with_name(path.name + ".submit")
+    intent = _read_state(intent_path)
+    if result["phase"] != "ready-for-review":
+        if intent is not None:
+            raise ManualCordError("A submitted attempt cannot report more author work")
+        _current_assignment(client, project, assignment, token)
+        return
+    if intent is None:
+        current = _current_assignment(client, project, assignment, token)
+        intent = {"body": receipt, "expected_revision": current["revision"], "idempotency_key": key}
+        _private_write(intent_path, (json.dumps(intent, sort_keys=True) + "\n").encode())
+    elif intent.get("body") != receipt or intent.get("idempotency_key") != key:
+        raise ManualCordError("Result differs from the durable submission intent")
+    outcome = client.workflow_transition(project, assignment["task_id"], "submit", intent["body"],
+                                         expected_revision=intent["expected_revision"],
+                                         idempotency_key=intent["idempotency_key"])
+    if not isinstance(outcome, dict) or outcome.get("token", {}).get("place") != "validating":
+        raise ManualCordError("Task submission is unconfirmed; preserve the durable intent")
+
+
+def _current_assignment(client, project, assignment, token):
+    view = client.task_workflow(project, assignment["task_id"])
+    current = view.get("token") if isinstance(view, dict) else None
+    if (not isinstance(current, dict) or current.get("place") != "working"
+            or current.get("pending_action") is not None or
+            any(current.get(name) != token.get(name) for name in
+                ("project_id", "task_id", "attempt_id", "claim_fence", "input_generation",
+                 "definition_revision", "policy_version", "source_head", "target_base"))):
+        raise ManualCordError("Result attempt or inputs are stale")
+    return current
+
+
+def renew_assignment(client, project, assignment, worker, path):
+    """Renew one current claim. An expired lease requires reconciliation."""
+    state = _read_state(path)
+    fingerprint = hashlib.sha256(json.dumps(assignment, sort_keys=True).encode()).hexdigest()
+    if (state is None or state.get("project_id") != project or state.get("worker") != worker
+            or state.get("assignment_sha256") != fingerprint):
+        raise ManualCordError("Renewal requires the saved fenced assignment binding")
+    current = _current_assignment(client, project, assignment, state["token"])
+    from uuid import uuid4
+    claim = client.request("POST", Client._path(project, "tasks/" + Client._segment(assignment["task_id"]) + "/claim/renew"),
+                           body={"fence": current["claim_fence"], "lease_seconds": 300},
+                           revision=current["revision"], idempotency_key="manual-renew-" + uuid4().hex)
+    return {"assignment_id": assignment["assignment_id"], "claim_fence": claim["fence"],
+            "lease_until": claim["lease_until"], "renewed": True}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -165,6 +313,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--worker", required=True)
     parser.add_argument("--checkout", type=Path, required=True)
     parser.add_argument("--ca-file", type=Path)
+    parser.add_argument("--workflow", action="store_true", help="Use the explicit Petri worker credential profile")
     commands = parser.add_subparsers(dest="command", required=True)
     receive = commands.add_parser("receive", help="Save one verified assignment before receipt")
     receive.add_argument("--dispatcher", required=True)
@@ -174,20 +323,27 @@ def main(argv: list[str] | None = None) -> int:
     report.add_argument("--assignment", type=Path, required=True)
     report.add_argument("--result", type=Path, required=True)
     report.add_argument("--worktree", type=Path, required=True)
+    renewal = commands.add_parser("renew", help="Renew one current Petri assignment claim")
+    renewal.add_argument("--assignment", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        probe_private_api(args.url, args.project, args.token_file, args.worker, ca_file=args.ca_file)
+        probe_private_api(args.url, args.project, args.token_file, args.worker, ca_file=args.ca_file,
+                          **({"workflow": True} if args.workflow else {}))
         with Client(args.url, _token_from_file(args.token_file), retries=0, trust_env=False,
                     ca_file=args.ca_file) as client:
             if args.command == "receive":
                 output = receive_assignment(client, args.project, args.checkout, worker=args.worker,
                                             dispatcher=args.dispatcher, message_id=args.message_id,
                                             destination=args.destination)
+            elif args.command == "renew":
+                assignment = json.loads(args.assignment.read_text(encoding="utf-8"))
+                output = renew_assignment(client, args.project, assignment, args.worker, _workflow_path(args.assignment))
             else:
                 assignment = json.loads(args.assignment.read_text(encoding="utf-8"))
                 result = json.loads(args.result.read_text(encoding="utf-8"))
                 output = send_result(client, args.project, args.checkout, args.worktree,
-                                     worker=args.worker, assignment=assignment, result=result)
+                                     worker=args.worker, assignment=assignment, result=result,
+                                     workflow_state=_workflow_path(args.assignment))
         print(json.dumps(output, sort_keys=True))
         return 0
     except (PreflightError, AssignmentError, ManualCordError, ClientError, OSError, ValueError, TypeError):
