@@ -101,6 +101,39 @@ def test_changed_assignment_cannot_reuse_claim_identity(worker):
     assert len(client.claims) == 1
 
 
+def test_existing_different_assignment_destination_never_acquires_claim(worker):
+    client, _, destination = worker
+    destination.write_text('{"assignment_id":"different"}\n')
+    destination.chmod(0o600)
+    with pytest.raises(ManualCordError, match="different evidence"):
+        claim(worker)
+    assert client.claims == [] and client.token["place"] == "ready"
+    assert json.loads(destination.read_text()) == {"assignment_id": "different"}
+
+
+def test_orphan_mismatched_workflow_snapshot_never_acquires_claim(worker):
+    client, _, destination = worker
+    path = _workflow_path(destination)
+    path.write_text('{"assignment_id":"different"}\n')
+    path.chmod(0o600)
+    with pytest.raises(ManualCordError, match="reconciliation"):
+        claim(worker)
+    assert client.claims == [] and client.token["place"] == "ready"
+    assert not destination.exists()
+
+
+def test_saved_workflow_identity_is_checked_even_with_existing_claim_intent(worker):
+    claim(worker)
+    client, _, destination = worker
+    path = _workflow_path(destination)
+    state = json.loads(path.read_text())
+    state["assignment_id"] = "different"
+    path.write_text(json.dumps(state))
+    with pytest.raises(ManualCordError, match="reconciliation"):
+        claim(worker)
+    assert len(client.claims) == 1
+
+
 def test_expired_claim_replay_never_restores_assignment_permission(worker):
     claim(worker)
     client, _, _ = worker
@@ -127,6 +160,15 @@ def test_lost_submission_reply_replays_exact_proposed_output(worker):
                          "input_generation", "definition_revision", "policy_version"}
     with pytest.raises(ManualCordError, match="differs"):
         _submit_result(client, "project", assignment, report() | {"head_sha": "c" * 40}, "worker", path, "different-key")
+
+
+def test_rework_submission_reports_actual_pinned_assignment_base(worker):
+    client, assignment, destination = worker
+    client.token["target_base"] = "c" * 40
+    claim(worker)
+    _submit_result(client, "project", assignment, report(), "worker", _workflow_path(destination), "result-key")
+    assert client.submissions[0][1]["target_base"] == assignment["base_sha"]
+    assert client.submissions[0][1]["target_base"] != "c" * 40
 
 
 @pytest.mark.parametrize("change", [{"claim_fence": 2}, {"attempt_id": "other"}, {"input_generation": 4},
