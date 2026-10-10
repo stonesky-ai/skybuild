@@ -67,10 +67,15 @@ elif name == "curl":
         sys.exit(22)
     print('{"status":"ready"}')
 '''.replace("PYTHON", sys.executable)
-    for name in ("docker", "curl", "sleep"):
+    for name in ("docker", "curl"):
         target = binary / name
         target.write_text(fake)
         target.chmod(0o755)
+    # Poll delays have no behavior to simulate. Avoid 30 Python interpreter
+    # launches in readiness-failure tests under the bounded gate.
+    sleep = binary / "sleep"
+    sleep.write_text("#!/bin/sh\nexit 0\n")
+    sleep.chmod(0o755)
     environment = dict(os.environ, PATH=str(binary) + os.pathsep + os.environ["PATH"],
                        SKYBUILD_PILOT_STATE=str(state), STARTUP_FIXTURE=str(fixture),
                        STARTUP_TRACE=str(trace))
@@ -139,3 +144,4 @@ def test_gateway_readiness_failure_is_not_reported_as_success(startup):
     assert result.returncode != 0
     assert "SkyBuild Workbench did not become TLS-verified ready" in result.stderr
     assert "are ready" not in result.stdout
+    assert len([event for event in events if event[0] == "curl" and ":8443/" in event[-1]]) == 30
