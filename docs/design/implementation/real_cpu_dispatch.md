@@ -24,14 +24,19 @@ manifest outside the controller checkout and private worker attempt state. The
 worker import checkout must equal the verified controller source root; the
 candidate clone is made separately under private attempt state. The bridge
 constructs the exact `JobUnitManager` with Python's real `subprocess.run`; its
-launch and reconcile APIs accept no caller-supplied process witness. The
-manifest schema is
+launch and reconcile APIs accept no caller-supplied process witness. It also
+constructs the REST client from a separate private owner token and pinned CA;
+caller-supplied clients are not accepted. Owner, worker, and Git credential
+files must be distinct. The owner token digest stays only in the in-memory
+prepared handle and is never copied into worker state or argv. The manifest schema is
 `skybuild.cpu-worker-controller-profile.v1` and has exactly these fields:
 
 ```json
 {
   "schema": "skybuild.cpu-worker-controller-profile.v1",
   "profile_id": "bounded-trusted-cpu-patch-v1",
+  "project_id": "<owner-approved project identifier>",
+  "api_url": "<owner-approved HTTPS API origin>",
   "controller_head": "<reviewed 40-character Git commit>",
   "controller_files": {
     "scripts/skybuild_job_unit.py": "<SHA-256>",
