@@ -27,4 +27,3 @@ For guarded task actions, read the action-specific validator as well as the API 
 New tasks start in proposed triage. Create them there, read the returned task/workflow, then use the guarded transition that the current workflow permits; do not request `ready` during creation or infer readiness after a rejected transition. Task records can come from legacy/imported domains as well as Petri. Inspect the actual task kind and returned workflow shape before indexing a domain-specific member such as `petri`; missing workflow data is not evidence that a task is ready.
 
 The skill-creator validator requires PyYAML, which is not in SkyBuild's project test environment. If that dependency is absent, run the validator through `uv run --no-project --with pyyaml python /absolute/path/to/quick_validate.py /absolute/skill/path`, using a writable task-owned `UV_CACHE_DIR`. Do not add the validator's dependency to SkyBuild runtime requirements.
-
