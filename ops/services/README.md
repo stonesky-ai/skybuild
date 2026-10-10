@@ -19,14 +19,18 @@ blocks actions. Never replace an identity pin to bypass a failed check.
 
 User units require the actual user bus and exact fragment path. Transient units
 are observation-only. Their original bounded controller owns their lifetime.
-The existing Wonko host watch is transient. This command cannot renew it.
+The inventory uses the owned persistent fleet watch on each worker host.
+Other owners' transient jobs are outside this inventory.
 Worker capabilities are separate from active jobs. A completed one-shot worker
 is not a persistent service. This command never replays a worker attempt.
 
-Wowbagger now has the reviewed runtime and exact worker image. Its networkless
-image smoke passed on that host. Its bounded managed watch runs for 60 minutes;
-the service lifetime is 3700 seconds. The inventory observes this exact service.
-It does not restart or renew the watch. Wonko's current watch is also bounded.
+Both worker hosts have the reviewed runtime and exact worker image. Wowbagger's
+networkless image smoke passed on that host. Each owned fleet watch restarts
+only its read-only sampler after the eight-hour bound. The static unit checks
+its exact host, reviewed source head and clean checkout on each start. The
+service uses 128 MiB, no swap, 10% CPU and 32 tasks. User lingering is enabled
+on both hosts. The previous owned Wowbagger bootstrap watch stopped after the
+successor sample passed; its cleanup receipt proves no remaining child.
 
 Runtime and image capability checks do not establish product-worker readiness.
 Scoped API identities, controller profiles, permits and qualified task inputs
