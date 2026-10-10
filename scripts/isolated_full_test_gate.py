@@ -40,6 +40,7 @@ MAX_HISTORY_PACK_BYTES = 64 * 1024 * 1024
 HISTORY_COMMITS = [
     "6d96075f88493d0b54577a2a8c9526f19a78a5ed",
     "d79d2e1947d2c8e9edb577ab5f5093edfa3c94e3",
+    "7d40df9fa7b26035736ffa613b5c5dad548269f5",
 ]
 RUN_ID_LABEL = "skybuild.full-test.run-id"
 KIND_LABEL = "skybuild.full-test.kind"

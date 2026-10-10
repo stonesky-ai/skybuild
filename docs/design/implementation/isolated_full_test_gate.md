@@ -35,23 +35,28 @@ and PostgreSQL base image ID
 `sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54`.
 The runner uses the pinned uv 0.11.22 binary and exact project lock with
 `--offline --no-build --no-install-project`; the builder context contains only
-the project metadata, lock, uv binary, trusted metadata writer, and pinned Git
-runtime payload. Dependency preparation runs in a disposable, resource-limited
+the project metadata, lock, uv binary, trusted metadata writer, and pinned runner tool
+payload. Dependency preparation runs in a disposable, resource-limited
 container with no network, mounting only that context read-only, the local uv
 cache, and a temporary output directory. It never pulls an image or builds a
 candidate package. The final runner image starts from the exact Python base
 filesystem in a clean `scratch` stage so inherited environment values do not
 bypass the candidate allowlist.
 
-The runner base does not include Git, which the unchanged suite uses for local
-repository fixtures. `scripts/gate_images/trusted_git_packages.json` pins the
-exact Git 2.47.3 package and required runtime packages from Debian trixie by
+The runner base needs extra tools for the unchanged suite. Local repository
+fixtures use Git. Session scans use ripgrep. DNS supervisor tests compile C.
+TLS configuration tests use the Docker CLI and Compose without a daemon socket. `scripts/gate_images/trusted_git_packages.json` pins the
+exact Git, ripgrep, GCC, C headers, linker, Docker CLI, Compose, and their
+required packages from Debian trixie by
 version and SHA-256. The packages were resolved from the pinned base's signed
 APT repository metadata and are unpacked from a local package directory; the
 image builder and candidate runtime do not use network access or package
 managers. The final image includes the Git executable, its core helpers,
 templates, and package runtime files, while its immutable image ID pins the
-complete staged payload.
+complete staged payload. The builder installs the `cc` alias explicitly because
+archive extraction does not run Debian package scripts. Before accepting the
+image, the builder runs the tools and compiles and executes a small C program
+with no network, no Docker socket, and the candidate privilege restrictions.
 
 The firewall image stages only the host's pinned nftables `iptables` multicall
 binary, conntrack matcher, and their non-glibc shared libraries. Its payload
@@ -108,9 +113,10 @@ offline regression before image qualification. Changing uv requires a new
 protocol review. No candidate module or build backend runs during this
 preparation.
 
-Existing ledger tests require two frozen source commits:
-`6d96075f88493d0b54577a2a8c9526f19a78a5ed` and
-`d79d2e1947d2c8e9edb577ab5f5093edfa3c94e3`. The supervisor constructs a shallow
+Existing ledger and promotion tests require three frozen source commits:
+`6d96075f88493d0b54577a2a8c9526f19a78a5ed`,
+`d79d2e1947d2c8e9edb577ab5f5093edfa3c94e3`, and
+`7d40df9fa7b26035736ffa613b5c5dad548269f5`. The supervisor constructs a shallow
 Git fixture containing only those commits and their trees/blobs. Its pack has
 a 64 MiB kernel write bound. The fixture receives synthetic HEAD, refs, shallow
 metadata, and a minimal config; host Git config, hooks, alternates, credentials,

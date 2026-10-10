@@ -69,7 +69,8 @@ def test_debian_git_package_manifest_is_pinned_to_the_python_base():
     assert manifest["schema"] == "skybuild.isolated-gate-debian-git-packages.v1"
     assert manifest["base_image_id"] == builder.PYTHON_BASE_ID
     assert manifest["repository_suite"] == "Debian trixie"
-    assert {row["name"] for row in manifest["packages"]} >= {"git", "git-man", "perl-base"}
+    assert {row["name"] for row in manifest["packages"]} >= {"git", "git-man", "perl-base", "ripgrep", "gcc", "libc6-dev",
+                                                     "docker-cli", "docker-compose"}
     assert all(len(row["sha256"]) == 64 for row in manifest["packages"])
 
 
@@ -183,3 +184,57 @@ def test_runner_environment_metadata_rejects_dynamic_or_wrong_project(tmp_path, 
 
     with pytest.raises(ValueError):
         write_environment(project, environment, environment / "lib/site-packages", "0.11.22")
+
+
+def test_runner_tool_smoke_has_no_socket_and_runs_compiled_program(monkeypatch):
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        return SimpleNamespace(stdout="runner-tools-ok\n", returncode=1 if "inspect" in command else 0)
+
+    monkeypatch.setattr(builder, "_run", run)
+    result = builder._smoke_runner_tools("sha256:" + "a" * 64)
+    command = commands[0]
+    assert "--network=none" in command
+    assert "--read-only" in command and "--cap-drop=ALL" in command
+    assert "--mount" not in command and "--privileged" not in command
+    assert "docker compose version" in command[-1]
+    assert "cc /tmp/smoke.c -o /tmp/smoke; /tmp/smoke" in command[-1]
+    assert result["compiler_program_executed"] is True
+    assert result["docker_socket_mounted"] is False
+
+
+def test_runner_tool_smoke_requires_compiled_program_output(monkeypatch):
+    monkeypatch.setattr(builder, "_run", lambda *a, **k: SimpleNamespace(stdout="versions only", returncode=1))
+    with pytest.raises(builder.BuildError, match="compiled program"):
+        builder._smoke_runner_tools("sha256:" + "a" * 64)
+
+
+def test_runner_tool_smoke_cleans_owned_container_after_timeout(monkeypatch):
+    commands = []
+    name = None
+    removed = False
+
+    def run(command, **kwargs):
+        nonlocal name, removed
+        commands.append(command)
+        if command[:2] == ["docker", "run"]:
+            name = command[command.index("--name") + 1]
+            raise builder.BuildError("smoke timeout")
+        if command[:3] == ["docker", "container", "rm"]:
+            assert command[-1] == name
+            removed = True
+            return SimpleNamespace(returncode=0)
+        if removed:
+            return SimpleNamespace(returncode=1)
+        return SimpleNamespace(returncode=0, stdout=json.dumps([{
+            "Name": "/" + name,
+            "Config": {"Labels": {"skybuild.isolated.tool-smoke": "true"}},
+        }]))
+
+    monkeypatch.setattr(builder, "_run", run)
+    with pytest.raises(builder.BuildError, match="smoke timeout"):
+        builder._smoke_runner_tools("sha256:" + "a" * 64)
+    assert removed
+    assert commands[-1] == ["docker", "container", "inspect", name]

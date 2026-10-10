@@ -316,7 +316,7 @@ def _copy_pinned_package(source: Path, destination: Path, expected_sha256: str) 
 
 
 def stage_git_payload(root: Path, package_dir: Path) -> dict:
-    """Unpack only the SHA-pinned Git/runtime packages bootstrapped from Debian trixie."""
+    """Unpack the SHA-pinned runner tools and dependencies from Debian trixie."""
     manifest = json.loads(GIT_PACKAGE_MANIFEST.read_bytes())
     if set(manifest) != {"schema", "base_image_id", "repository_suite", "packages"}:
         raise BuildError("trusted Git package manifest has an unexpected shape")
@@ -357,6 +357,16 @@ def stage_git_payload(root: Path, package_dir: Path) -> dict:
             or not any((root / "usr/lib/git-core").glob("git-upload-pack*"))
             or not (root / "usr/share/git-core/templates").is_dir()):
         raise BuildError("trusted Debian package payload is missing Git runtime components")
+    # Debian creates this compiler alias in a maintainer script. Extraction does
+    # not run package scripts, so install the exact equivalent alias explicitly.
+    cc = root / "usr/bin/cc"
+    if not cc.exists() and not cc.is_symlink():
+        cc.symlink_to("gcc")
+    required = ("usr/bin/rg", "usr/bin/gcc", "usr/bin/as", "usr/bin/ld",
+                "usr/include/stdio.h", "usr/bin/docker",
+                "usr/libexec/docker/cli-plugins/docker-compose")
+    if any(not (root / name).exists() for name in required):
+        raise BuildError("trusted Debian payload is missing required runner tools")
     files = {}
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root).as_posix()
@@ -368,6 +378,44 @@ def stage_git_payload(root: Path, package_dir: Path) -> dict:
             raise BuildError("trusted Git package payload contains a special file")
     return {"schema": "skybuild.isolated-gate-git-payload.v1", "base_image_id": PYTHON_BASE_ID,
             "repository_suite": manifest["repository_suite"], "packages": package_rows, "files": files}
+
+
+def _smoke_runner_tools(image_id: str) -> dict:
+    """Check tools under candidate restrictions without a Docker daemon socket."""
+    name = "skybuild-runner-tools-smoke-" + uuid4().hex[:16]
+    command = [
+        "docker", "run", "--pull=never", "--rm", "--init", "--name", name,
+        "--label", "skybuild.isolated.tool-smoke=true", "--network=none",
+        "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+        "--user", f"{os.geteuid()}:{os.getegid()}", "--memory=256m",
+        "--memory-swap=256m", "--cpus=1", "--pids-limit=64",
+        "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=67108864,mode=1777",
+        image_id, "/bin/sh", "-ec",
+        "git --version; rg --version; docker --version; docker compose version; "
+        "printf '#include <stdio.h>\\nint main(void) { puts(\"runner-tools-ok\"); return 0; }\\n' "
+        "> /tmp/smoke.c; cc /tmp/smoke.c -o /tmp/smoke; /tmp/smoke",
+    ]
+    try:
+        result = _run(command, timeout=60)
+    finally:
+        inspected = _run(["docker", "container", "inspect", name], timeout=20, check=False)
+        if inspected.returncode == 0:
+            try:
+                rows = json.loads(inspected.stdout)
+            except json.JSONDecodeError as error:
+                raise BuildError("runner tool cleanup identity is unreadable") from error
+            if (len(rows) != 1 or rows[0].get("Name", "").lstrip("/") != name
+                    or (rows[0].get("Config", {}).get("Labels") or {}).get(
+                        "skybuild.isolated.tool-smoke") != "true"):
+                raise BuildError("runner tool cleanup refused an unowned container")
+            _run(["docker", "container", "rm", "--force", name], timeout=30)
+            remaining = _run(["docker", "container", "inspect", name], timeout=20, check=False)
+            if remaining.returncode == 0:
+                raise BuildError("runner tool container cleanup is unconfirmed")
+    if "runner-tools-ok" not in result.stdout:
+        raise BuildError("runner compiler smoke did not execute its compiled program")
+    return {"network": "none", "docker_socket_mounted": False,
+            "compiler_program_executed": True, "output": result.stdout.strip()}
 
 
 def _image_digest(image_id: str) -> str:
@@ -504,6 +552,7 @@ def build(checkout: Path, output: Path, *, gate_policy_sha256: str, uv_binary: P
         git_manifest = stage_git_payload(git_rootfs, git_package_dir.resolve(strict=True))
         runner_id = _build_image(context, "Dockerfile.runner", runner_tag, PYTHON_BASE_ID,
                                  runner_args)
+        runner_tools = _smoke_runner_tools(runner_id)
         rootfs = context / "firewall-rootfs"
         manifest = stage_firewall_payload(rootfs)
         firewall_id = _build_image(context, "Dockerfile.firewall", firewall_tag, PYTHON_BASE_ID,
@@ -519,6 +568,7 @@ def build(checkout: Path, output: Path, *, gate_policy_sha256: str, uv_binary: P
         "firewall_smoke": firewall_smoke,
         "runner_environment": runner_environment,
         "git_payload": git_manifest,
+        "runner_tools": runner_tools,
         "runner_build": runner_args,
         "network": "none",
         "candidate_installation": False,
