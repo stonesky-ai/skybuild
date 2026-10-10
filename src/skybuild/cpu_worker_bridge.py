@@ -38,7 +38,7 @@ PROFILE = 'bounded-trusted-cpu-patch-v1'
 WORKER_SOURCE = {
     'src/skybuild/__init__.py': '6dc62b0e7d135b949d66c97b99c12155a4ffa60d822b994b9a5d109b1ebe9af1',
     # Auto-worker client from 3bb plus this branch's CPU dispatch endpoints.
-    'src/skybuild/client.py': '9a6ab69f0b3294e429375ada334d263d9df1b26878f11f928b98a5f024c9679e',
+    'src/skybuild/client.py': '0a82e21643184e1cf8bd6587ab87affbe9807e28c475df2ef6f8de98cf960ff3',
     'src/skybuild/fleet_preflight.py': 'f2ec5d39b6b1bc0c0a71354a7be89837bd153b5812a9be55f8a951a15fc9424c',
     'src/skybuild/auto_patch_worker.py': 'bf16d653051d9a4da12585b5291449144c402930c62477146f20999096e5318f',
     'src/skybuild/auto_patch_permit.py': 'de6cf3cbc6ca88f90c68bb397959cbf1c040feba1d355dd199bb142959f45eea',
