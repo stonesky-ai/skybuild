@@ -732,6 +732,9 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
                     prepared['metadata']['_skybuild_completion'] = change['metadata']['_skybuild_completion']
                 else:
                     prepared = before
+                if event == 'freeze' and context.get('publication_required') is False:
+                    from .completion import freeze_without_publication_policy
+                    prepared = freeze_without_publication_policy(before, context)
                 after = self._apply_workflow_event(connection, principal, prepared, request, context,
                                                    journal_before=before)
                 if event == 'accept':
@@ -824,6 +827,8 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
         _body(body, {'reason', 'generation', 'source_head', 'author', 'policy_ref',
                      'acceptance', 'checks', 'review', 'publication'})
         def changes(before, connection):
+            if self._petri(before):
+                raise DomainError('workflow_conflict', 'Petri completion requires verified workflow acceptance', 409)
             current = self._principal(connection, principal.principal_id)
             if not current.is_admin:
                 raise DomainError('authorization', 'Only an owner/admin may attest completion', 403)

@@ -17,6 +17,7 @@ from _repo_guard import verify_skybuild
 import prepare_bundle as preparation
 from skybuild.bundling import BundleCandidate, BundlePlanningError, plan_bundles
 from skybuild.client import Client, ClientError
+from skybuild.integration_workflow import selection_fault
 from skybuild.fleet_preflight import _token_from_file, _resolved_addresses
 from skybuild.manual_dispatch import _private_endpoint
 
@@ -69,6 +70,10 @@ def marshall(checkout, catalog, output, client, *, project, principal, prepare_n
                 or not isinstance(task.get("dependencies"), list)
                 or any(not isinstance(value, str) or not value for value in task["dependencies"])):
             raise BundlePlanningError("Invalid API task snapshot")
+        fault = selection_fault(task, member["head_sha"], supplied["base_sha"])
+        if fault:
+            skipped.append({"task_id": task_id, "reason": fault})
+            continue
         if task.get("status") not in ("ready", "in-progress"):
             skipped.append({"task_id": task_id, "reason": "API task is not eligible"})
             continue
