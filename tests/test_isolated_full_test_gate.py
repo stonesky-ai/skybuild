@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import errno
 import io
 import json
 import os
@@ -15,6 +16,166 @@ import pytest
 
 import isolated_full_test_gate as gate
 import build_isolated_gate_images as image_builder
+import gate_network_probe as network_probe
+
+
+def test_network_connect_probe_requires_completed_connection(monkeypatch):
+    class FakeSocket:
+        def __init__(self, *_args):
+            self.closed = False
+
+        def settimeout(self, _timeout):
+            pass
+
+        def connect_ex(self, _address):
+            return errno.EINPROGRESS
+
+        def getsockopt(self, _level, _option):
+            return 0
+
+        def close(self):
+            self.closed = True
+
+    sock = FakeSocket()
+    monkeypatch.setattr(network_probe.socket, "socket", lambda *_args: sock)
+    monkeypatch.setattr(network_probe.time, "monotonic", iter((10.0, 10.1)).__next__)
+    monkeypatch.setattr(network_probe.select, "select", lambda *_args: ([], [], []))
+
+    assert network_probe._connect("192.0.2.10", 5432) == (False, "timeout")
+    assert sock.closed
+
+
+def test_network_connect_probe_accepts_only_completed_success(monkeypatch):
+    class FakeSocket:
+        def __init__(self, completion_error):
+            self.completion_error = completion_error
+            self.closed = False
+
+        def settimeout(self, _timeout):
+            pass
+
+        def connect_ex(self, _address):
+            return errno.EINPROGRESS
+
+        def getsockopt(self, _level, _option):
+            return self.completion_error
+
+        def close(self):
+            self.closed = True
+
+    sock = FakeSocket(0)
+    monkeypatch.setattr(network_probe.socket, "socket", lambda *_args: sock)
+    monkeypatch.setattr(network_probe.time, "monotonic", iter((10.0, 10.1)).__next__)
+    monkeypatch.setattr(network_probe.select, "select", lambda *_args: ([], [sock], []))
+
+    assert network_probe._connect("192.0.2.10", 5432) == (True, "connected")
+    assert sock.closed
+
+
+def test_network_connect_probe_keeps_unknown_completion_errors_indeterminate(monkeypatch):
+    class FakeSocket:
+        def settimeout(self, _timeout):
+            pass
+
+        def connect_ex(self, _address):
+            return errno.EINPROGRESS
+
+        def getsockopt(self, _level, _option):
+            return errno.ECONNREFUSED
+
+        def close(self):
+            pass
+
+    sock = FakeSocket()
+    monkeypatch.setattr(network_probe.socket, "socket", lambda *_args: sock)
+    monkeypatch.setattr(network_probe.time, "monotonic", iter((10.0, 10.1)).__next__)
+    monkeypatch.setattr(network_probe.select, "select", lambda *_args: ([], [sock], []))
+
+    # An unknown result must fail the blocking requirement. It is not proof
+    # that the firewall blocked the connection or that a listener accepted it.
+    assert network_probe._connect("192.0.2.10", 5432) == (None, "ECONNREFUSED")
+
+
+def test_network_connect_probe_requires_writable_completion(monkeypatch):
+    class FakeSocket:
+        def settimeout(self, _timeout):
+            pass
+
+        def connect_ex(self, _address):
+            return errno.EINPROGRESS
+
+        def getsockopt(self, _level, _option):
+            return 0
+
+        def close(self):
+            pass
+
+    sock = FakeSocket()
+    monkeypatch.setattr(network_probe.socket, "socket", lambda *_args: sock)
+    monkeypatch.setattr(network_probe.time, "monotonic", iter((10.0, 10.1)).__next__)
+    monkeypatch.setattr(network_probe.select, "select", lambda *_args: ([], [], [sock]))
+
+    assert network_probe._connect("192.0.2.10", 5432) == (None, "exceptional")
+
+
+def test_dns_probe_counts_sendto_eperm_as_blocked(monkeypatch):
+    class FakeSocket:
+        closed = False
+
+        def settimeout(self, _timeout):
+            pass
+
+        def sendto(self, _payload, _address):
+            raise PermissionError(errno.EPERM, "blocked by firewall")
+
+        def recvfrom(self, _size):
+            raise AssertionError("recvfrom must not run when sendto is blocked")
+
+        def close(self):
+            self.closed = True
+
+    sock = FakeSocket()
+    monkeypatch.setattr(network_probe.socket, "socket", lambda *_args: sock)
+
+    assert network_probe._dns_blocked() is True
+    assert sock.closed
+
+
+def test_dns_probe_rejects_any_received_response(monkeypatch):
+    class FakeSocket:
+        def settimeout(self, _timeout):
+            pass
+
+        def sendto(self, payload, _address):
+            return len(payload)
+
+        def recvfrom(self, _size):
+            return b"dns response", ("127.0.0.11", 53)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(network_probe.socket, "socket", lambda *_args: FakeSocket())
+
+    assert network_probe._dns_blocked() is False
+
+
+def test_network_probe_does_not_turn_indeterminate_results_into_passes(monkeypatch):
+    output = io.StringIO()
+    monkeypatch.setattr(network_probe, "_connect", lambda *_args: (None, "EINTR"))
+    monkeypatch.setattr(network_probe, "_dns_blocked", lambda: True)
+    monkeypatch.setattr(network_probe.sys, "stdout", output)
+
+    exit_code = network_probe.main(
+        ["probe", "candidate", "172.20.0.2", "172.20.0.1", "45001"]
+    )
+
+    result = json.loads(output.getvalue().removeprefix("GATE_NETWORK_PROBE="))
+    assert exit_code == 1
+    assert result["postgres_tcp_allowed"] is False
+    assert result["host_gateway_listener_blocked"] is False
+    assert result["external_ipv4_blocked"] is False
+    assert result["external_ipv6_blocked"] is False
 
 
 def test_gate_policy_is_the_existing_manual_full_suite_command():
