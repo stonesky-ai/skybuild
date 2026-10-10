@@ -82,6 +82,10 @@ def test_container_argv_has_no_network_or_credentials_and_pins_all_mounts(tmp_pa
     assert not any('token' in item.lower() or 'credential' in item.lower() for item in argv)
     assert not any(item.startswith('GIT_') for item in argv)
     assert all(str(path) in ' '.join(argv) for path in (source, inputs, output))
+    assert f'type=bind,src={source},dst=/source,readonly' in argv
+    assert f'type=bind,src={inputs},dst=/input,readonly' in argv
+    assert f'type=bind,src={output},dst=/work' in argv
+    assert '/input/source' not in ' '.join(argv)
     assert len(run_id) == 64 and name == 'skybuild-cpu-' + run_id[:24]
 
 

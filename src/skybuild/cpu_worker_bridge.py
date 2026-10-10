@@ -656,7 +656,7 @@ def _worker_docker_argv(plan: CPUWorkerPlan, assignment: dict, preclaim: dict,
     run_id = _digest(identity.encode())
     name = 'skybuild-cpu-' + run_id[:24]
     cidfile = plan.external_state_dir / ('container-' + preclaim['attempt_id'] + '.id')
-    mounts = ((plan.worker_source_dir, '/input/source', True),
+    mounts = ((plan.worker_source_dir, '/source', True),
               (plan.worker_input_dir, '/input', True),
               (plan.worker_output_dir, '/work', False))
     if any(not path.is_absolute() or ',' in str(path) for path, _, _ in mounts):
@@ -668,8 +668,8 @@ def _worker_docker_argv(plan: CPUWorkerPlan, assignment: dict, preclaim: dict,
                  '--pids-limit', '32', '--memory', str(permit['memory_max_bytes']),
                  '--memory-swap', str(permit['memory_max_bytes']), '--cpus', '1.0',
                  '--env', 'HOME=/tmp', '--env', 'PYTHONDONTWRITEBYTECODE=1',
-                 '--env', 'PYTHONPATH=/input/source/src:/input/source/scripts:/input/source',
-                 '--workdir', '/input/source']
+                 '--env', 'PYTHONPATH=/source/src:/source/scripts:/source',
+                 '--workdir', '/source']
     labels = {'role': 'cpu-patch-worker', 'task': assignment['task_id'],
               'assignment': assignment['assignment_id'], 'attempt': preclaim['attempt_id'],
               'run': run_id, 'launch': launch_nonce, 'image': image_id}
@@ -679,7 +679,7 @@ def _worker_docker_argv(plan: CPUWorkerPlan, assignment: dict, preclaim: dict,
         mount = f'type=bind,src={source},dst={destination}'
         arguments.extend(('--mount', mount + (',readonly' if readonly else '')))
     arguments.extend((image_id, '-m', 'skybuild.auto_patch_worker', '--worker', plan.worker_id,
-                      '--checkout', '/input/source', '--assignment', '/input/assignment.json',
+                      '--checkout', '/source', '--assignment', '/input/assignment.json',
                       '--preclaim', '/input/preclaim.json', '--patch', '/input/approved.patch',
                       '--patch-sha256', plan.patch_digest, '--state-dir', '/work'))
     return tuple(arguments), name, run_id
