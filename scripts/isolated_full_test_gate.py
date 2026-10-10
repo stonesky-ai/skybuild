@@ -787,6 +787,12 @@ def _missing_network_error(stderr: str, name: str) -> bool:
     }
 
 
+def _has_no_new_privileges(options: object) -> bool:
+    return isinstance(options, list) and any(
+        option in {"no-new-privileges", "no-new-privileges:true"} for option in options
+    )
+
+
 def _container_info(name: str, run_id: str, expected_id: str | None, kind: str,
                     image_id: str | None = None) -> dict | None:
     target = expected_id or name
@@ -956,7 +962,7 @@ def _check_candidate_inspect(row: dict, *, name: str, run_id: str, container_id:
             or host.get("PortBindings") not in ({}, None)
             or host.get("CapAdd") not in ([], None)
             or "ALL" not in host.get("CapDrop", [])
-            or "no-new-privileges:true" not in host.get("SecurityOpt", [])
+            or not _has_no_new_privileges(host.get("SecurityOpt"))
             or host.get("Tmpfs") is None
             or set(host["Tmpfs"]) != {"/scratch"}
             or not {"size=2147483648", "uid=10001", "gid=10001", "mode=448"}
@@ -1038,12 +1044,14 @@ def _check_postgres_inspect(row: dict, *, name: str, run_id: str, container_id: 
             or log_config.get("Config") != {"max-size": "32m", "max-file": "2"}
             or host.get("CapAdd") not in ([], None) or "ALL" not in host.get("CapDrop", [])
             or host.get("SecurityOpt") is None
-            or "no-new-privileges:true" not in host.get("SecurityOpt", [])
+            or not _has_no_new_privileges(host.get("SecurityOpt"))
             or host.get("Tmpfs") is None
             or row.get("Config", {}).get("User") not in ("999:999", "999")
             or set(networks) != {network}
-            or len(mounts) != 3 or actual_tmpfs != expected_tmpfs
-            or any(mount.get("Type") != "tmpfs" or mount.get("RW") is not True for mount in mounts)
+            or set(tmpfs) != expected_tmpfs
+            or (mounts and (len(mounts) != 3 or actual_tmpfs != expected_tmpfs
+                            or any(mount.get("Type") != "tmpfs" or mount.get("RW") is not True
+                                   for mount in mounts)))
             or "/var/lib/postgresql/data" not in tmpfs
             or "size=1073741824" not in tmpfs["/var/lib/postgresql/data"]
             or "/var/run/postgresql" not in tmpfs
