@@ -15,6 +15,8 @@ Before reading a referenced file, confirm its path exists with `rg --files` or `
 
 For nested candidate validation, rebind the child environment to that candidate. The reviewed integration and disposable PostgreSQL helpers use `_project_environment.project_environment` for this boundary; never forward the author's `UV_PROJECT_ENVIRONMENT`, `PYTHONPATH`, or `UV_WORKING_DIR` unchanged into another checkout's gate. An exact Git head/tree does not prove tests imported that checkout's source.
 
+When a project runner uses `safe_path=True`, inspect module resolution before importing a helper beside an external script; script siblings may not be on `sys.path`. Load a known private helper by its exact absolute path only after checking its required integrity hash. Do not weaken runner isolation or assume `/tmp` siblings are importable.
+
 After applying a patch or creating a file, verify the target exists and `git status` or `git diff` shows the expected change before relying on it; a tool response alone does not prove the write succeeded.
 
 Use a context-bounded patch for structural code edits. If a scripted replacement is necessary, assert its expected match count before writing; an unrestricted replacement can insert local variables into unrelated tests. Check each tool command's exit code before continuing dependent calls, including calls orchestrated in JavaScript.
