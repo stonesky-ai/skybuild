@@ -623,7 +623,7 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries, T
                                        (task['project_id'], task['task_id'])).fetchone()
             next_fence = self._require_claim_eligible(connection, task['project_id'], task, claim)
         except DomainError as error:
-            if error.code not in {'authority', 'claim_conflict', 'workflow_conflict', 'effect_conflict', 'capacity_conflict', 'usage_conflict'}:
+            if error.code not in {'authority', 'claim_conflict', 'workflow_conflict', 'effect_conflict', 'capacity_conflict'}:
                 raise
             return checked
         return {**checked, 'admission_permitted': True, 'claim_live': True,

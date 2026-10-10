@@ -15,11 +15,10 @@ from test_store import store, actors
 
 
 class PreviewConnection:
-    def __init__(self, *, claim=None, reservation=False, effect=False, usage=False):
+    def __init__(self, *, claim=None, reservation=False, effect=False):
         self.claim = claim
         self.reservation = reservation
         self.effect = effect
-        self.usage = usage
         self.statements = []
 
     def execute(self, query, parameters):
@@ -30,8 +29,6 @@ class PreviewConnection:
         elif 'FROM cpu_reservations' in query and self.reservation:
             self.row = {'held': True}
         elif 'FROM task_effects' in query and self.effect:
-            self.row = {'held': True}
-        elif 'FROM task_usage_events' in query and self.usage:
             self.row = {'held': True}
         return self
 
@@ -66,7 +63,7 @@ def test_preview_enables_claim_without_allocating_attempt_or_ownership():
     assert task['metadata']['_skybuild_workflow']['petri']['token']['attempt_id'] is None
 
 
-@pytest.mark.parametrize('case', ['missing_grant', 'held', 'reservation', 'effect', 'usage', 'pending', 'superseded', 'stale', 'dependencies', 'exhausted'])
+@pytest.mark.parametrize('case', ['missing_grant', 'held', 'reservation', 'effect', 'pending', 'superseded', 'stale', 'dependencies', 'exhausted'])
 def test_preview_rejects_each_real_claim_blocker(case):
     task, context, principal = preview_inputs()
     options = {}
@@ -78,8 +75,6 @@ def test_preview_rejects_each_real_claim_blocker(case):
         options['reservation'] = True
     elif case == 'effect':
         options['effect'] = True
-    elif case == 'usage':
-        options['usage'] = True
     elif case == 'pending':
         task['metadata']['_skybuild_workflow']['petri']['token']['pending_action'] = 'hold'
     elif case == 'superseded':
