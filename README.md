@@ -34,9 +34,32 @@ At cycle closeout, merge the current `dev-NNN` branch to `main`, start the next 
 Use Python 3.12 or later and `uv`:
 
 ```sh
-uv sync --extra test
-uv run python -m pytest
+scripts/project_python -m pytest
 ```
+
+`scripts/project_python` runs Python through `uv` with this checkout's locked
+runtime and test dependencies, its own `.venv`, and its absolute `src` and
+`scripts` paths. Use
+it for repository scripts too, including help:
+
+```sh
+scripts/project_python scripts/marshall_bundle.py --help
+```
+
+The launcher preserves your working directory and Python arguments. From another
+directory, use absolute launcher and script/test paths. It replaces inherited
+`PYTHONPATH` and `UV_PROJECT_ENVIRONMENT`, so another checkout's editable install
+cannot select the package for this command. Dependency synchronization failure
+stops the invocation; no fallback to system Python occurs. The launcher requires
+`uv`, a POSIX shell, and the committed `pyproject.toml` and `uv.lock`. It does not
+start a service unless the Python command you explicitly supply does so.
+Its cache defaults to ignored `.uv-cache/` inside the checkout, which also works
+when the home directory is read-only. An explicit `UV_CACHE_DIR` remains supported
+for a writable shared cache.
+Python's `-P` mode suppresses implicit caller/script-directory imports; repository
+helpers resolve through the explicit `scripts` path. External scripts that depend
+on sibling imports need their own invocation instead. Python options such as
+`-E` or `-I` deliberately bypass `PYTHONPATH`; do not use them for source checks.
 
 PostgreSQL tests require explicit disposable targets. Without these variables, database integration tests skip:
 
@@ -44,7 +67,7 @@ PostgreSQL tests require explicit disposable targets. Without these variables, d
 export SKYBUILD_TEST_DSN='postgresql://USER:PASSWORD@127.0.0.1:PORT/skybuild_test'
 export SKYBUILD_HTTP_TEST_DSN='postgresql://USER:PASSWORD@127.0.0.1:PORT/skybuild_http_test'
 export SKYBUILD_IMPORT_TEST_DSN='postgresql://USER:PASSWORD@127.0.0.1:PORT/skybuild_import_test'
-uv run python -m pytest
+scripts/project_python -m pytest
 ```
 
 Use newly created, task-owned databases. These are example placeholders, not credentials or a command to reuse an application database. The HTTP integration suite requires a database name beginning with `skybuild_` and ending with `_test`; the importer suite requires the exact `skybuild_import_test` name and creates isolated test databases from it.
