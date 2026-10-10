@@ -59,6 +59,10 @@ def preflight(checkout, *, required=(), discover=(), refs=(), interpreter=None, 
         if not ref.startswith("refs/") or any(c in ref for c in "\n\r\0"):
             raise PreflightError("explicit_ref_required")
         try:
+            _run(checkout, ["git", "check-ref-format", ref])
+        except PreflightError:
+            raise PreflightError("explicit_ref_required") from None
+        try:
             resolved_refs[ref] = _run(checkout, ["git", "rev-parse", "--verify", ref + "^{commit}"])
         except PreflightError:
             raise PreflightError("ref_unavailable_fetch_explicitly: " + ref) from None

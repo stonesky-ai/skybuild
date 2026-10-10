@@ -111,6 +111,11 @@ def test_missing_discovery_and_revision_expressions_fail(checkout):
         preflight.preflight(checkout, discover=["invented/*"])
     with pytest.raises(preflight.PreflightError, match="explicit_ref_required"):
         preflight.preflight(checkout, refs=["HEAD~1"])
+    branch = subprocess.check_output(
+        ["git", "-C", str(checkout), "branch", "--show-current"], text=True
+    ).strip()
+    with pytest.raises(preflight.PreflightError, match="explicit_ref_required"):
+        preflight.preflight(checkout, refs=[f"refs/heads/{branch}~0"])
 
 
 def test_cli_failure_has_no_raw_subprocess_output(checkout):
