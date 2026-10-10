@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timezone
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from enum import Enum
 import json
+from typing import TypedDict
 
 from .contracts import DomainError, valid_identifier
 
@@ -56,7 +57,8 @@ def _counter(value, name, optional=False, signed=False):
     if optional and value is None:
         return
     minimum = -(2**31) if signed else 0
-    if type(value) is not int or not minimum <= value < 2**31:
+    maximum = 2**31 if signed else 2**63
+    if type(value) is not int or not minimum <= value < maximum:
         _record_error(f"Invalid workflow {name}")
 
 
@@ -192,6 +194,7 @@ class TaskToken:
     definition_revision: int = 0
     input_generation: int = 0
     policy_version: str = ""
+    policy_reason: str | None = None
     requirements: tuple[ValidationStage, ...] = ()
     dependencies: tuple[str, ...] = ()
     evidence: tuple[ValidationResult, ...] = ()
@@ -228,7 +231,7 @@ class TaskToken:
             _text_field(getattr(self, name), name, maximum=200)
         _text_field(self.next_action, "next_action")
         for name in ("source_branch", "source_head", "target_base", "blocker", "hold_reason",
-                     "deferred_until", "milestone_task_id", "attempt_id", "bundle_id", "pending_action"):
+                     "deferred_until", "milestone_task_id", "attempt_id", "bundle_id", "pending_action", "policy_reason"):
             _text_field(getattr(self, name), name, optional=True)
         for name in ("links", "findings", "faults", "dependencies"):
             _items(getattr(self, name), name, identifier=name == "dependencies")
@@ -306,6 +309,176 @@ def _construct_record(cls, body):
         return cls(**body)
     except TypeError:
         _record_error("Missing or invalid workflow record fields")
+
+
+class WorkflowEvent(TypedDict, total=False):
+    """Bounded mutation input. Store verifies authority and operation identity."""
+
+    event: str
+    operation_id: str
+    expected_revision: int
+    reason: str
+    next_action: str
+    responsible: str
+    until: str
+    milestone_task_id: str
+    result: dict
+
+
+class WorkflowContext(TypedDict, total=False):
+    """Trusted facts read by Store in the same transaction as the mutation.
+
+    Never copy these facts from a caller request. The pure kernel cannot verify
+    credentials, perform claims, check publication or resolve external effects.
+    """
+
+    source_head: str | None
+    target_base: str | None
+    definition_revision: int
+    input_generation: int
+    policy_version: str
+    current_inputs: bool
+    dependencies_satisfied: bool
+    admission_permitted: bool
+    effects_resolved: bool
+    claim_live: bool
+    attempt_id: str
+    claim_fence: int
+    responsible: str
+    submission_verified: bool
+    validation_verified: bool
+    integration_fixed: bool
+    bundle_id: str | None
+    publication_required: bool
+    acceptance_verified: bool
+    publication_verified: bool
+    task_included: bool
+    policy_reason: str
+
+
+# Task 03 extends this catalogue with validation and control transitions.
+TRANSITIONS = (
+    TransitionSpec("claim", (Place.READY,), Place.WORKING, "claim"),
+    TransitionSpec("submit", (Place.WORKING,), Place.VALIDATING, "submit"),
+    TransitionSpec("freeze", (Place.VALIDATING,), Place.INTEGRATING, "freeze"),
+    TransitionSpec("accept", (Place.INTEGRATING,), Place.DONE, "accept"),
+)
+
+
+def _workflow_event(value: WorkflowEvent) -> dict:
+    if not isinstance(value, dict) or set(value) - WorkflowEvent.__annotations__.keys():
+        _record_error("Unsupported workflow event or field")
+    for name in ("event", "operation_id"):
+        _text_field(value.get(name), name, maximum=200, identifier=True)
+    _counter(value.get("expected_revision"), "expected_revision")
+    for name in ("reason", "next_action", "responsible", "until", "milestone_task_id"):
+        if name in value:
+            _text_field(value[name], name, maximum=200 if name == "responsible" else 4096)
+    if "result" in value:
+        ValidationResult.from_dict(value["result"])
+    try:
+        size = len(json.dumps(value, allow_nan=False, ensure_ascii=False).encode())
+    except (TypeError, ValueError, RecursionError, UnicodeError):
+        _record_error("Workflow event must be finite JSON")
+    if size > 16_384:
+        _record_error("Workflow event exceeds 16 KiB")
+    return value
+
+
+class TaskWorkflow:
+    """Apply guarded changes without storage, dispatch or external operations.
+
+    Store must commit the returned token, journal facts and claim effects in one
+    transaction. Store also owns permission checks and idempotency replay.
+    """
+
+    @staticmethod
+    def _guard(token: TaskToken, name: str, context: WorkflowContext) -> bool:
+        if not isinstance(context, dict) or token.superseded or token.pending_action is not None:
+            return False
+        if context.get("current_inputs") is not True or context.get("effects_resolved") is not True:
+            return False
+        for field in ("source_head", "target_base", "definition_revision", "input_generation", "policy_version"):
+            if field not in context or type(context[field]) is not type(getattr(token, field)) or context[field] != getattr(token, field):
+                return False
+        if name == "claim":
+            return (context.get("dependencies_satisfied") is True and
+                    context.get("admission_permitted") is True and
+                    context.get("claim_live") is True and
+                    valid_identifier(context.get("attempt_id")) and
+                    type(context.get("claim_fence")) is int and 0 < context["claim_fence"] < 2**63 and
+                    isinstance(context.get("responsible"), str) and
+                    bool(context["responsible"].strip()) and len(context["responsible"]) <= 200 and
+                    "\x00" not in context["responsible"])
+        if name == "submit":
+            return (context.get("claim_live") is True and context.get("submission_verified") is True and
+                    token.attempt_id is not None and token.claim_fence is not None and
+                    context.get("attempt_id") == token.attempt_id and
+                    type(context.get("claim_fence")) is int and context["claim_fence"] == token.claim_fence)
+        if name == "freeze":
+            if context.get("validation_verified") is not True or context.get("integration_fixed") is not True:
+                return False
+            if context.get("publication_required") is True:
+                return valid_identifier(context.get("bundle_id"))
+            return (context.get("publication_required") is False and
+                    isinstance(context.get("policy_reason"), str) and bool(context["policy_reason"].strip()) and
+                    len(context["policy_reason"]) <= 4096 and "\x00" not in context["policy_reason"])
+        if name == "accept":
+            if context.get("acceptance_verified") is not True:
+                return False
+            if context.get("publication_required") is True:
+                return (token.bundle_id is not None and context.get("bundle_id") == token.bundle_id and
+                        context.get("publication_verified") is True and context.get("task_included") is True)
+            return (context.get("publication_required") is False and
+                    isinstance(context.get("policy_reason"), str) and bool(context["policy_reason"].strip()) and
+                    len(context["policy_reason"]) <= 4096 and "\x00" not in context["policy_reason"])
+        return False
+
+    def enabled(self, token: TaskToken, context: WorkflowContext) -> tuple[str, ...]:
+        """List available event names from the same rules used by apply."""
+        return tuple(spec.event for spec in TRANSITIONS
+                     if token.place in spec.sources and self._guard(token, spec.guard, context))
+
+    def apply(self, token: TaskToken, event: WorkflowEvent, context: WorkflowContext) -> TaskToken:
+        event = _workflow_event(event)
+        if event["expected_revision"] != token.revision:
+            raise DomainError("workflow_conflict", "Task revision has changed", 409)
+        spec = next((item for item in TRANSITIONS if item.event == event["event"]), None)
+        if spec is None or token.place not in spec.sources or not self._guard(token, spec.guard, context):
+            raise DomainError("workflow_conflict", "Workflow transition is not enabled", 409)
+        # Normal-path events have no caller-controlled detail fields.
+        if set(event) != {"event", "operation_id", "expected_revision"}:
+            _record_error("Unsupported fields for normal workflow transition")
+        changes = {"place": spec.destination or token.place, "revision": token.revision + 1}
+        if spec.event == "claim":
+            changes.update(attempt_id=context["attempt_id"], claim_fence=context["claim_fence"],
+                           responsible=context["responsible"])
+        elif spec.event == "freeze":
+            changes["bundle_id"] = context.get("bundle_id") if context["publication_required"] else None
+        if spec.event in {"freeze", "accept"}:
+            changes["policy_reason"] = None if context["publication_required"] else context["policy_reason"]
+        return replace(token, **changes)
+
+    @staticmethod
+    def journal_facts(before: TaskToken, after: TaskToken, event: WorkflowEvent) -> dict:
+        """Return bounded facts for the journal committed with the token.
+
+        This method does not attest authority or persist a journal event.
+        """
+        event = _workflow_event(event)
+        if ((before.project_id, before.task_id) != (after.project_id, after.task_id) or
+                after.revision != before.revision + 1 or event["expected_revision"] != before.revision):
+            _record_error("Journal facts require one revision of the same task")
+        return {"project_id": after.project_id, "task_id": after.task_id,
+                "operation_id": event["operation_id"], "event": event["event"],
+                "from_place": before.place.value, "to_place": after.place.value,
+                "revision": after.revision, "input_generation": after.input_generation,
+                "attempt_id": after.attempt_id, "claim_fence": after.claim_fence,
+                "source_head": after.source_head, "target_base": after.target_base,
+                "definition_revision": after.definition_revision, "policy_version": after.policy_version,
+                "bundle_id": after.bundle_id, "policy_reason": after.policy_reason,
+                "acceptance_mode": ("without_publication" if after.policy_reason is not None else "publication")
+                if after.place in {Place.INTEGRATING, Place.DONE} else None}
 
 
 ACTION_FIELDS = frozenset({"reason", "next_action", "responsible", "until", "milestone_task_id"})

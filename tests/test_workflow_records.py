@@ -47,7 +47,7 @@ def test_spec_serialization_supports_current_place_destination():
 
 @pytest.mark.parametrize("record, field, value", [
     (TaskToken, "place", "ready"), (TaskToken, "priority", True),
-    (TaskToken, "input_generation", -1), (TaskToken, "revision", 2**31),
+    (TaskToken, "input_generation", -1), (TaskToken, "revision", 2**63),
     (TaskToken, "claim_fence", False), (TaskToken, "title", "x" * 501),
     (TaskToken, "responsible", "x" * 201), (TaskToken, "next_action", "x" * 4097),
     (TaskToken, "dependencies", ["TASK-0"]), (TaskToken, "dependencies", ("bad/id",)),
@@ -156,3 +156,18 @@ def test_nested_result_rejects_null_parameter_text_before_storage(parameters):
     with pytest.raises(DomainError) as error:
         TaskToken.from_dict(body)
     assert error.value.status_code == 422
+
+
+
+def test_workflow_counters_match_postgresql_bigint_bounds():
+    maximum = 2**63 - 1
+    current = TaskToken("project", "TASK-1", revision=maximum, input_generation=maximum,
+                        definition_revision=maximum, claim_fence=maximum)
+    assert TaskToken.from_dict(current.to_dict()) == current
+    evidence = result(input_generation=maximum, definition_revision=maximum, claim_fence=maximum)
+    assert ValidationResult.from_dict(evidence.to_dict()) == evidence
+    for field in ("revision", "input_generation", "definition_revision", "claim_fence"):
+        with pytest.raises(DomainError):
+            TaskToken("project", "TASK-1", **{field: maximum + 1})
+    with pytest.raises(DomainError):
+        TaskToken("project", "TASK-1", priority=2**31)
