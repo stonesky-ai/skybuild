@@ -42,16 +42,14 @@ def _usage(task, *, kind="consumed", operation="provider-request-1", quantity="0
 def _claim_attempt(store, people, project, task):
     owner, worker = people["owner"], people["worker"]
     petri = task.get("metadata", {}).get("_skybuild_workflow", {}).get("petri")
+    ready = store.task_action(owner, project, task["task_id"], "ready",
+                              {"reason": "Reviewed usage test definition"},
+                              task["revision"], "ready-" + task["task_id"])
     if not petri:
-        ready = store.task_action(owner, project, task["task_id"], "ready",
-                                  {"reason": "Reviewed usage test definition"},
-                                  task["revision"], "ready-" + task["task_id"])
         task = store.initialize_workflow(owner, project, task["task_id"], ready["revision"],
                                          "initialize-" + task["task_id"])["task"]
-    elif petri["token"]["place"] != "ready":
-        task = store.task_action(owner, project, task["task_id"], "ready",
-                                 {"reason": "Reviewed usage test definition"},
-                                 task["revision"], "ready-" + task["task_id"])
+    else:
+        task = ready
     claim = store.claim_task(worker, project, task["task_id"], task["revision"],
                              "claim-" + task["task_id"])
     return store.get_task(owner, project, task["task_id"]), claim
