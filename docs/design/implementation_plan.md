@@ -1,6 +1,6 @@
 # SkyBuild implementation plan
 
-Derived from architecture revision A42, 2026-10-09. Status: MVP sequence refined; the launch-free task API and frozen-ledger cutover are complete for the SkyBuild project. Fleet activation and model execution remain separate boundaries. [architecture.md](architecture.md) governs. This plan supersedes the delivery section of the dated combined revision 2 plan.
+Derived from architecture revision A43, 2026-10-09. Status: MVP sequence refined; the launch-free task API and frozen-ledger cutover are complete for the SkyBuild project. Fleet activation and model execution remain separate boundaries. [architecture.md](architecture.md) governs. This plan supersedes the delivery section of the dated combined revision 2 plan.
 
 ## Planning discipline
 
@@ -69,6 +69,10 @@ This sequencing refinement implements the existing MVP boundary; it does not mar
 Steps 4 and 5 can be developed against fixed contracts and fake adapters while step 3 is being validated. Their live adoption still waits for the applicable controls. Do not wait until the end to discover that no reviewer profile or remote publication mechanism can qualify: investigate those two feasibility risks early, without starting runtime work.
 
 One profile may qualify for both authoring and review, but those are distinct qualifications and sessions. The shared endpoint's model-list response proves neither. A narrow Qwen author path does not remove the need for a qualified coordinator/reviewer for higher-risk work. Start with whichever allowed route first meets the actual task classes and enforceable controls; additional accounts/providers and automatic failover can follow as their adapters qualify. An unavailable alternative stays disabled. Do not build a universal agent harness to use the shared endpoint.
+
+### README workflow smoke test
+
+After source reconciliation into dev-004, execute the owner's one-line README task before the staged coding pilot. Use a randomly selected README and one `modified on` line with the actual execution datetime and timezone. Verify the accepted Petri runtime and worker credential profile first. Preserve the task, assignment, claim/fence, submitted output, validation, independent review, bundle and confirmed dev-inclusion evidence. Runtime promotion remains a separate controlled operation. This smoke test does not count as the substantive collector, concurrent coding or remote-worker proof. The REST API already owns the imported tasks; reconcile stale records instead of repeating the ledger import. See [reconciliation](handoffs/pilot_petri_reconciliation_20261010.md).
 
 ### Parallel work without enlarging the MVP
 

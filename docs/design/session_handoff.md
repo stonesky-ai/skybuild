@@ -1,5 +1,9 @@
 # SkyBuild session handoff
 
+## 2026-10-09 Petri and REST pilot reconciliation
+
+This checkpoint supersedes the operational branch, ledger-authority and runtime claims below. Petri PR 68 and dev-003 PR 49 are merged; dev-004 and standing PR 69 are the current cycle. The REST API owns all 69 observed tasks. The accepted endpoint is healthy, but its Petri workflow route returned 404 at 2026-10-10 02:11 UTC; live Petri deployment remains unverified. Six refreshed staged briefs preserve task IDs and owned paths, correct Petri freshness semantics and meet the assignment receiver's length limits. Historical A1/A2 handoffs and the current boundaries are retained in [reconciliation](handoffs/pilot_petri_reconciliation_20261010.md). Its source publication still requires exact-head review and a passing combined gate; no task completion or runtime promotion follows from this checkpoint. The next owner-selected step is one README workflow smoke task, followed by the substantive staged pilot.
+
 ## 2026-10-09 current resume checkpoint
 
 Current checkout is `/home/kevin/my_code/skybuild`, branch `dev-002`, clean at `2c4a78f477c1a93d5ea7840f6ae5f3a76c5aeb2f` (`origin/dev-002`). The latest completed bundle is PR 47, `Route collected Cord results by worker phase`, merged as that commit. PR 46 retired the Markdown task ledgers in merge `c310dd16779c8ce8f10ece07d5c67c30512db1ec`. PR 46's combined gate passed 1,052 tests (1 skipped); PR 47's passed 1,055 tests (1 skipped). Both candidates had independent exact-head review passes. The ledger source is frozen in Git history; the REST/PostgreSQL API now owns imported SkyBuild tasks.
