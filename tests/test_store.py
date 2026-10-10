@@ -17,6 +17,9 @@ from skybuild.contracts import DomainError, Principal
 from skybuild.store import OPERATIONS, Store
 
 
+TEST_WORKER_OPERATIONS = OPERATIONS - {'tasks:usage-record', 'tasks:usage-resolve'}
+
+
 @pytest.fixture(scope='module')
 def store():
     dsn = os.environ.get('SKYBUILD_TEST_DSN')
@@ -37,7 +40,8 @@ def actors(store):
     identities = {}
     for name in ('owner', 'worker', 'peer', 'outsider'):
         principal_id, token = name + '-' + uuid4().hex, secrets.token_urlsafe(32)
-        store.provision_principal(principal_id, token, is_admin=name == 'owner', grants={project: OPERATIONS} if name != 'outsider' else {})
+        grants = {project: TEST_WORKER_OPERATIONS} if name != 'outsider' else {}
+        store.provision_principal(principal_id, token, is_admin=name == 'owner', grants=grants)
         identities[name] = store.authenticate(token)
         identities[name + '_token'] = token
     return project, identities
@@ -386,7 +390,7 @@ def test_identity_guard_and_readiness(store):
     assert error('database_identity', wrong.migrate).status_code == 503
     error('database_identity', wrong.readiness)
     store.migrate()
-    assert store.readiness() == {'ready': True, 'schema_version': 13}
+    assert store.readiness() == {'ready': True, 'schema_version': 16}
 
 
 def test_store_can_bind_operations_to_postgres_system_identifier(store):
@@ -420,7 +424,7 @@ def test_upgrade_001_to_002_preserves_existing_records_and_is_repeatable(store):
         error('schema_mismatch', upgraded.readiness)
         upgraded.migrate()
         upgraded.migrate()
-        assert upgraded.readiness() == {'ready': True, 'schema_version': 13}
+        assert upgraded.readiness() == {'ready': True, 'schema_version': 16}
         with upgraded._connection() as connection:
             assert connection.execute('SELECT * FROM tasks').fetchone() == task_before
             assert connection.execute('SELECT * FROM messages').fetchone() == message_before

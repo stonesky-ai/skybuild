@@ -184,7 +184,7 @@ def test_schema_012_atomic_upgrade_preserves_history_and_recovers(schema_012_dat
     upgrade()
     with pytest.raises(RuntimeError, match="incompatible schema"):
         accepted.readiness()
-    assert registry.readiness() == {"ready": True, "schema_version": 13}
+    assert registry.readiness() == {"ready": True, "schema_version": 16}
     assert snapshot() == retained
     with psycopg.connect(admin) as connection:
         assert audit_runtime_role(connection, database, role)["ok"]

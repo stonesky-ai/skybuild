@@ -13,7 +13,8 @@ from psycopg import sql
 # No automatic grants on future objects. A schema change must update this policy.
 READ_ONLY = {"schema_migrations", "principals", "principal_grants", "ledger_imports"}
 APPEND_ONLY = {"task_journal", "cord_journal", "effect_journal", "claim_journal",
-               "cpu_journal", "observation_events", "task_lineage", "idempotency"}
+               "cpu_journal", "observation_events", "task_lineage", "idempotency",
+               "task_usage_events"}
 MUTABLE = {"tasks", "messages", "task_readiness", "task_effects", "task_claims",
            "cpu_pools", "cpu_reservations", "observation_projections",
            "cpu_fake_dispatches", "cpu_fake_receipts"}

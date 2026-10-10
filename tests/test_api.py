@@ -192,3 +192,40 @@ def test_no_launch_or_admin_http_routes(api):
     client, _ = api
     paths = client.get("/openapi.json").json()["paths"]
     assert not any(any(word in path for word in ("launch", "provision", "migrate", "execute")) for path in paths)
+
+
+def test_task_usage_routes_validate_exact_decimal_and_use_store(api):
+    import uuid
+
+    client, store = api
+    path = "/api/v1/projects/skybuild/tasks/task-a/usage-history"
+    body = {
+        "event_kind": "consumed", "attempt_id": "attempt-1", "task_revision": 1,
+        "definition_revision": 1, "input_generation": 1, "claim_fence": 1,
+        "provider": "provider-x", "model": "model-x", "pool_id": "pool-x",
+        "policy_window_id": "window-x", "operation_id": "request-1",
+        "unit": "provider-units", "quantity": "0.125",
+        "evidence_ref": "receipt:request-1", "evidence_sha256": "a" * 64,
+        "reason": "Record known usage",
+    }
+    invalid = client.post(path, json={**body, "quantity": "01"})
+    assert invalid.status_code == 422
+    assert not store.calls
+
+    recorded = client.post(path, json=body)
+    assert recorded.status_code == 201
+    assert store.calls[-1][0] == "record_task_usage"
+
+    history = client.get(path)
+    assert history.status_code == 200
+    assert store.calls[-1][0] == "task_usage_history"
+
+    event_id = str(uuid.uuid4())
+    resolution = {
+        "operation_id": "reconcile-1", "quantity": "0",
+        "evidence_ref": "receipt:no-charge", "evidence_sha256": "b" * 64,
+        "reason": "Provider evidence confirms no usage",
+    }
+    resolved = client.post(path + "/" + event_id + "/resolve", json=resolution)
+    assert resolved.status_code == 201
+    assert store.calls[-1][0] == "resolve_task_usage"
