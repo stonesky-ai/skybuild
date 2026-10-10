@@ -70,13 +70,26 @@ class Claims:
                     self._require_no_effect_exposure(connection, project_id, task_id)
                     if before and before['fence'] == 2**63 - 1:
                         raise DomainError('claim_conflict', 'Ownership fence exhausted', 409)
+                    claim_task_revision = expected_revision
+                    if self._petri(task):
+                        from .workflow import Place
+                        token = self.workflow_token(task)
+                        if token.place != Place.READY or token.pending_action is not None:
+                            raise DomainError('workflow_conflict', 'Petri task is not ready for work', 409)
+                        context = self._workflow_context(connection, principal, task)
+                        context.update(admission_permitted=True, claim_live=True,
+                                       attempt_id=uuid4().hex, claim_fence=before['fence'] + 1 if before else 1,
+                                       responsible=principal.principal_id)
+                        task = self._apply_workflow_event(connection, principal, task,
+                            {'event': 'claim', 'operation_id': key, 'expected_revision': expected_revision}, context)
+                        claim_task_revision = task['revision']
                     connection.execute('INSERT INTO task_claims (project_id, task_id, fence, holder, task_revision, lease_until) '
                                        "VALUES (%s, %s, 1, %s, %s, clock_timestamp() + %s * interval '1 second') "
                                        'ON CONFLICT (project_id, task_id) DO UPDATE SET fence = task_claims.fence + 1, '
                                        'claim_revision = task_claims.claim_revision + 1, '
                                        'holder = EXCLUDED.holder, task_revision = EXCLUDED.task_revision, '
                                        'lease_until = EXCLUDED.lease_until, held = true',
-                                       (project_id, task_id, principal.principal_id, expected_revision, lease_seconds))
+                                       (project_id, task_id, principal.principal_id, claim_task_revision, lease_seconds))
                 else:
                     if not before or not before['held'] or before['fence'] != fence:
                         raise DomainError('claim_conflict', 'Ownership fence is not current', 409)
@@ -84,6 +97,15 @@ class Claims:
                         raise DomainError('claim_conflict', 'Ownership holder or lease is not current', 409)
                     if action != 'renew':
                         self._require_no_external_exposure(connection, project_id, task_id)
+                        if self._petri(task):
+                            from .workflow import Place
+                            token = self.workflow_token(task)
+                            if token.place == Place.WORKING:
+                                context = self._workflow_context(connection, principal, task)
+                                context['control_authorized'] = True
+                                self._apply_workflow_event(connection, principal, task,
+                                    {'event': 'work_failure', 'operation_id': key,
+                                     'expected_revision': expected_revision, 'reason': reason}, context)
                         connection.execute('UPDATE task_claims SET held = false, claim_revision = claim_revision + 1 '
                                            'WHERE project_id = %s AND task_id = %s',
                                            (project_id, task_id))
