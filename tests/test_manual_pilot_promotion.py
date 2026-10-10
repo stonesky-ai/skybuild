@@ -19,8 +19,8 @@ import manual_pilot_tls as tls  # noqa: E402
 assert Path(skybuild.__file__).resolve().parents[2] == Path(__file__).resolve().parents[1]
 
 
-@pytest.fixture
-def promotion(tmp_path, monkeypatch):
+@pytest.fixture(params=["011-to-012", "012-to-013"])
+def promotion(tmp_path, monkeypatch, request):
     state = tmp_path / 'private-state'
     provisioner.init_secrets(state)
     password = (state / 'secrets/runtime-password').read_text().strip()
@@ -29,10 +29,12 @@ def promotion(tmp_path, monkeypatch):
     provisioner._write_new(state / 'runtime.env', env, 0o600)
     (state / 'tls').mkdir(mode=0o700)
     (state / 'tls/ca.crt').write_bytes(b'retained fixture CA')
-    current = {f'migrations/{i:03}_migration.sql': hashlib.sha256(str(i).encode()).hexdigest() for i in range(1, 12)}
+    current_version, candidate_version, migration = controller.SCHEMA_TRANSITIONS[request.param]
+    current = {f'migrations/{i:03}_migration.sql': hashlib.sha256(str(i).encode()).hexdigest()
+               for i in range(1, current_version + 1)}
     current.update({f'static/workbench.{suffix}': hashlib.sha256(suffix.encode()).hexdigest()
                     for suffix in ('css', 'html', 'js')})
-    candidate = dict(current, **{'migrations/012_api_task_authority.sql': 'f' * 64})
+    candidate = dict(current, **{migration: 'f' * 64})
     api_id, db_id, image = '1' * 64, '2' * 64, 'sha256:' + '3' * 64
     ip, hostname = '100.100.1.2', 'controller.tail.ts.net'
     ports = {'8000/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '8000'}, {'HostIp': ip, 'HostPort': '8443'}]}
@@ -48,10 +50,11 @@ def promotion(tmp_path, monkeypatch):
     data = {'current': current, 'candidate': candidate, 'installed': current.copy(), 'api': api,
             'db': {'Id': db_id}, 'cluster': '123456', 'ready': {'status': 'ready'},
             'findings': [], 'controller_kwargs': {},
-            'serve': {}, 'statements': [], 'calls': []}
-    data['applied'] = [(i, current[f'migrations/{i:03}_migration.sql']) for i in range(1, 12)]
+            'serve': {}, 'statements': [], 'calls': [], 'current_version': current_version,
+            'candidate_version': candidate_version, 'published_ref': 'refs/heads/dev-004'}
+    data['applied'] = [(i, current[f'migrations/{i:03}_migration.sql']) for i in range(1, current_version + 1)]
     arguments = dict(checkout=tmp_path / 'checkout', expected_sha='b' * 40,
-                     published_ref='refs/heads/dev-002', current_sha='a' * 40,
+                     published_ref=data['published_ref'], schema_transition=request.param, current_sha='a' * 40,
                      state_dir=state, hostname=hostname, tailnet_ip=ip,
                      api_container=api_id, db_container=db_id, api_image=image, system_id='123456',
                      ca_pem_sha256=hashlib.sha256(b'retained fixture CA').hexdigest())
@@ -59,7 +62,7 @@ def promotion(tmp_path, monkeypatch):
     def command(*args):
         data['calls'].append(args)
         if args[0] == 'git' and 'ls-remote' in args:
-            return 'b' * 40 + '\trefs/heads/dev-002'
+            return 'b' * 40 + '\t' + data['published_ref']
         if args[0] == 'git' and 'merge-base' in args:
             return ''
         if args[:2] == ('tailscale', 'serve'):
@@ -110,8 +113,11 @@ def test_promotion_checks_are_read_only_and_refuse_binary_rollback(promotion):
     assert report['no_changes_made'] is True
     assert report['binary_rollback_after_migration'] is False
     assert report['candidate_role_audit_required'] is True
-    assert (report['current_schema'], report['candidate_schema']) == (11, 12)
+    assert (report['current_schema'], report['candidate_schema']) == (data['current_version'], data['candidate_version'])
+    assert report['schema_transition'] == arguments['schema_transition']
+    assert report['published_ref'] == arguments['published_ref']
     assert data['controller_kwargs']['expected_api_image'] == arguments['api_image']
+    assert data['controller_kwargs']['published_ref'] == arguments['published_ref']
     assert all(statement.startswith(('SELECT ', 'SET TRANSACTION ')) for statement in data['statements'])
     assert not any(any(word in args for word in ('stop', 'start', 'build', 'up', 'restart', 'migrate')) for args in data['calls'])
     assert 'password' not in json.dumps(report)
@@ -133,7 +139,7 @@ def test_promotion_refuses_changed_boundary(promotion, boundary):
     elif boundary == 'changed-prefix': data['candidate']['migrations/001_migration.sql'] = 'changed'
     elif boundary == 'extra-migration': data['candidate']['migrations/012_other.sql'] = 'changed'
     elif boundary == 'applied-digest': data['applied'][0] = (1, 'changed')
-    elif boundary == 'already-migrated': data['applied'].append((12, 'f' * 64))
+    elif boundary == 'already-migrated': data['applied'].append((data['candidate_version'], 'f' * 64))
     elif boundary == 'cluster': data['cluster'] = '999999'
     elif boundary == 'runtime-env': (arguments['state_dir'] / 'runtime.env').write_text('SKYBUILD_DSN=foreign')
     elif boundary == 'admin-env': data['api']['Config']['Env'].append('SKYBUILD_ROLE_ADMIN_DSN=secret')
@@ -163,6 +169,29 @@ def test_promotion_resource_and_identity_guards(promotion, monkeypatch, boundary
         controller.promotion_preflight(**arguments)
 
 
+@pytest.mark.parametrize('boundary', [
+    'last-prefix-digest', 'missing-next', 'wrong-next-name', 'noncontiguous-prefix',
+    'extra-next', 'wrong-selected-ref', 'task-ref', 'unreviewed-transition',
+])
+def test_promotion_rejects_unreviewed_schema_or_publication(promotion, boundary):
+    arguments, data = promotion
+    migration = controller.SCHEMA_TRANSITIONS[arguments['schema_transition']][2]
+    prefix = f"migrations/{data['current_version']:03}_migration.sql"
+    if boundary == 'last-prefix-digest': data['candidate'][prefix] = 'changed'
+    elif boundary == 'missing-next': del data['candidate'][migration]
+    elif boundary == 'wrong-next-name':
+        data['candidate'][migration.replace('.sql', '_other.sql')] = data['candidate'].pop(migration)
+    elif boundary == 'noncontiguous-prefix':
+        del data['current'][prefix]
+        del data['candidate'][prefix]
+    elif boundary == 'extra-next': data['candidate']['migrations/014_unreviewed.sql'] = 'f' * 64
+    elif boundary == 'wrong-selected-ref': data['published_ref'] = 'refs/heads/main'
+    elif boundary == 'task-ref': arguments['published_ref'] = 'refs/heads/task/candidate'
+    elif boundary == 'unreviewed-transition': arguments['schema_transition'] = '012-to-014'
+    with pytest.raises(ValueError):
+        controller.promotion_preflight(**arguments)
+
+
 def test_promotion_cli_hides_arbitrary_driver_errors(promotion, monkeypatch, capsys):
     arguments, _ = promotion
     monkeypatch.setattr(controller, 'promotion_preflight', lambda *args, **kwargs: (_ for _ in ()).throw(psycopg.OperationalError('SECRET DSN')))
@@ -171,7 +200,8 @@ def test_promotion_cli_hides_arbitrary_driver_errors(promotion, monkeypatch, cap
              '--state-dir', str(arguments['state_dir']), '--hostname', arguments['hostname'],
              '--tailnet-ip', arguments['tailnet_ip'], '--api-container-id', arguments['api_container'],
              '--db-container-id', arguments['db_container'], '--api-image-id', arguments['api_image'],
-             '--database-system-id', arguments['system_id'], '--ca-pem-sha256', arguments['ca_pem_sha256']]
+             '--database-system-id', arguments['system_id'], '--ca-pem-sha256', arguments['ca_pem_sha256'],
+             '--schema-transition', arguments['schema_transition']]
     assert controller.main(flags) == 2
     output = capsys.readouterr().out
     assert 'SECRET' not in output
