@@ -104,7 +104,11 @@ def test_reservation_pins_current_cas_and_immutable_claim_revision(store, actors
     token = Store.workflow_token(current)
     store.configure_cpu_pool(people["owner"], project, 1, True, 0, "pool", reason="Test pool")
     store.set_cpu_local_control(people["owner"], project, True, 1, "local", reason="Test controls")
-    result = store.reserve_cpu(people["worker"], project, task["task_id"], uuid4().hex, token.attempt_id, 1,
+    action_id = uuid4().hex
+    explained = store.explain_cpu(people["worker"], project, task["task_id"], action_id, token.attempt_id, 1,
+                                  current["revision"], token.input_generation, claim["fence"], 1, 2)
+    assert explained['eligible'] is True
+    result = store.reserve_cpu(people["worker"], project, task["task_id"], action_id, token.attempt_id, 1,
                                current["revision"], token.input_generation, claim["fence"], 1, 2)
     assert result["task_revision"] == current["revision"]
     assert result["claim_task_revision"] == claim["task_revision"]
@@ -147,3 +151,93 @@ def test_attempt_binding_never_accepts_revision_ordering_shortcut():
     pending = deepcopy(task)
     pending["metadata"]["_skybuild_workflow"]["petri"]["token"]["pending_action"] = "hold"
     assert not store._cpu_task_binding(pending, claim, 7, "attempt")
+
+
+def author_receipt(token):
+    return {"source_head": "a" * 40, "target_base": "b" * 40, "source_branch": "refs/heads/task/proposal",
+            "attempt_id": token.attempt_id, "claim_fence": token.claim_fence,
+            "input_generation": token.input_generation, "definition_revision": token.definition_revision,
+            "policy_version": token.policy_version}
+
+
+def test_submission_binds_author_output_without_rewriting_claim_inputs(store, actors):
+    project, people = actors
+    task = enrolled(store, people, project)
+    claim = store.claim_task(people["worker"], project, task["task_id"], task["revision"], "claim")
+    working = store.get_task(people["owner"], project, task["task_id"])
+    token = Store.workflow_token(working)
+    receipt = author_receipt(token)
+    view = store.workflow_transition(people["worker"], project, task["task_id"], "submit", receipt,
+                                     working["revision"], "submit")
+    assert view["token"]["place"] == "validating"
+    assert view["token"]["source_head"] == receipt["source_head"]
+    assert view["token"]["input_generation"] == token.input_generation + 1
+    binding = view["task"]["metadata"]["_skybuild_workflow"]["petri"]["attempt_binding"]
+    assert binding["task_revision"] == claim["task_revision"]
+    assert binding["input_generation"] == token.input_generation
+    assert store.workflow_transition(people["worker"], project, task["task_id"], "submit", receipt,
+                                      working["revision"], "submit") == view
+    with store._connection() as connection:
+        unchanged = connection.execute("SELECT task_revision FROM task_claims WHERE project_id = %s AND task_id = %s",
+                                       (project, task["task_id"])).fetchone()
+        events = connection.execute("SELECT event_facts FROM task_journal WHERE project_id = %s AND task_id = %s AND operation = 'workflow.submit'",
+                                    (project, task["task_id"])).fetchall()
+    assert unchanged["task_revision"] == claim["task_revision"]
+    assert len(events) == 1 and events[0]["event_facts"]["author_output_receipt"] == receipt
+    with pytest.raises(DomainError) as caught:
+        store.workflow_transition(people["worker"], project, task["task_id"], "submit",
+                                  {**receipt, "source_head": "c" * 40}, working["revision"], "submit")
+    assert caught.value.code == "idempotency_conflict"
+
+
+def test_submission_rejects_stale_former_worker_and_forged_snapshot(store, actors):
+    project, people = actors
+    task = enrolled(store, people, project)
+    store.claim_task(people["worker"], project, task["task_id"], task["revision"], "claim")
+    working = store.get_task(people["owner"], project, task["task_id"])
+    receipt = author_receipt(Store.workflow_token(working))
+    for principal, change in ((people["peer"], {}), (people["worker"], {"claim_fence": 2}),
+                              (people["worker"], {"input_generation": receipt["input_generation"] + 1})):
+        with pytest.raises(DomainError):
+            store.workflow_transition(principal, project, task["task_id"], "submit", {**receipt, **change},
+                                      working["revision"], uuid4().hex)
+    assert store.get_task(people["owner"], project, task["task_id"]) == working
+
+
+def test_verified_adapter_rejects_nonadmin_and_input_fact_replacement(store, actors):
+    project, people = actors
+    task = enrolled(store, people, project)
+    for principal, facts in ((people["worker"], {}), (people["owner"], {"effects_resolved": True})):
+        with pytest.raises(DomainError):
+            store.verified_workflow_transition(principal, project, task["task_id"], "freeze", {}, task["revision"],
+                                               uuid4().hex, evidence={"receipt": "ref"},
+                                               verifier=lambda *args: facts)
+    assert store.get_task(people["owner"], project, task["task_id"]) == task
+
+
+def test_full_failed_result_survives_compact_token_journal(store, actors):
+    from skybuild.workflow import TRANSITIONS
+    if not any(spec.event == "validation_result" for spec in TRANSITIONS):
+        pytest.skip("Run on the composed Task03/04 candidate")
+    project, people = actors
+    task = enrolled(store, people, project)
+    store.claim_task(people["worker"], project, task["task_id"], task["revision"], "claim")
+    working = store.get_task(people["owner"], project, task["task_id"])
+    submitted = store.workflow_transition(people["worker"], project, task["task_id"], "submit",
+        author_receipt(Store.workflow_token(working)), working["revision"], "submit")
+    token = Store.workflow_token(submitted["task"])
+    result = ValidationResult(project, task["task_id"], ValidationStage.UNIT_TESTS, ResultState.FAILED,
+        attempt_id=token.attempt_id, source_head=token.source_head, target_base=token.target_base,
+        input_generation=token.input_generation, definition_revision=token.definition_revision,
+        policy_version=token.policy_version, claim_fence=token.claim_fence, producer=people["worker"].principal_id,
+        check_id="unit", findings=("Fault " + "x" * 3500,), artifacts=("artifact/failure",))
+    body = {"result": result.to_dict()}
+    failed = store.workflow_transition(people["worker"], project, task["task_id"], "validation_result", body,
+                                       token.revision, "failed-result")
+    assert failed["token"]["place"] == "ready"
+    with store._connection() as connection:
+        event = connection.execute("SELECT event_facts FROM task_journal WHERE project_id = %s AND task_id = %s AND operation = 'workflow.validation_result'",
+                                   (project, task["task_id"])).fetchone()
+    assert event["event_facts"]["result"] == result.to_dict()
+    assert store.workflow_transition(people["worker"], project, task["task_id"], "validation_result", body,
+                                      token.revision, "failed-result") == failed

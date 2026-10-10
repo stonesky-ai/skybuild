@@ -184,9 +184,13 @@ class CPUAdmission:
             try:
                 prior = self._cpu_eligibility(connection, principal, project_id, request,
                                               self._cpu_digest(principal, project_id, request), observed, lock=False)
-                if prior is None and not connection.execute(_CURRENT_CPU_CLAIM,
-                        (project_id, task_id, principal.principal_id, claim_fence)).fetchone():
-                    raise DomainError('claim_conflict', 'Ownership lease expired before CPU reservation', 409)
+                if prior is None:
+                    claim_revision = connection.execute(
+                        'SELECT task_revision FROM task_claims WHERE project_id = %s AND task_id = %s',
+                        (project_id, task_id)).fetchone()['task_revision']
+                    if not connection.execute(_CURRENT_CPU_CLAIM,
+                            (project_id, task_id, principal.principal_id, claim_fence, claim_revision)).fetchone():
+                        raise DomainError('claim_conflict', 'Ownership lease expired before CPU reservation', 409)
             except DomainError as error:
                 if error.code not in {'control_conflict', 'stale_revision', 'claim_conflict', 'workflow_conflict',
                                       'effect_conflict', 'capacity_conflict', 'idempotency_conflict', 'not_found'}:
