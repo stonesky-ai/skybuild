@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Control the exact existing SkyBuild services in an explicit host inventory."""
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -10,7 +11,9 @@ import socket
 import ssl
 import subprocess
 import sys
+import time
 import urllib.request
+import urllib.error
 
 
 class ServiceError(ValueError):
@@ -54,8 +57,24 @@ def readiness(item):
         raise ServiceError("Readiness requires HTTPS")
     context = ssl.create_default_context(cafile=item["ca_file"])
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context))
-    with opener.open(url, timeout=5) as response:
-        return response.status == 200 and json.load(response) == {"status": "ready"}
+    try:
+        with opener.open(url, timeout=5) as response:
+            return response.status == 200 and json.load(response) == {"status": "ready"}
+    except (urllib.error.URLError, json.JSONDecodeError):
+        return False
+
+
+def check_watch(item):
+    path = item.get("hostwatch_file")
+    if not path:
+        raise ServiceError("A fresh same-host watch is required before start")
+    data = json.loads(Path(path).read_text())
+    sampled = datetime.fromisoformat(data["sampled_at"].replace("Z", "+00:00"))
+    age = (datetime.now(timezone.utc) - sampled).total_seconds()
+    if data.get("status") != "ok" or not 0 <= age <= 90:
+        raise ServiceError("Host watch is stale or blocked")
+    if data.get("available_bytes", 0) - item["memory_max_bytes"] < 8 * 1024**3:
+        raise ServiceError("Host watch reserve blocks start")
 
 
 def local(item, action):
@@ -63,6 +82,8 @@ def local(item, action):
     if socket.gethostname().lower() != item["host"].lower():
         raise ServiceError("Execution host does not match inventory")
     if item["kind"] == "capability":
+        if action == "stop":
+            return {"state": "capability", "ok": True, "managed": False, "skipped": True}
         checkout = Path(item["checkout"])
         missing = [f for f in item.get("required_files", []) if not (checkout / f).is_file()]
         head = command(["git", "-C", str(checkout), "rev-parse", "HEAD"]).strip() if checkout.is_dir() else None
@@ -81,15 +102,19 @@ def local(item, action):
         data = dict(line.split("=", 1) for line in unit("show", item["name"], "--property=Id,FragmentPath,Transient,ActiveState,SubState").splitlines())
         if data.get("Id") != item["name"] or data.get("FragmentPath") != item["fragment"]:
             raise ServiceError("User service identity does not match")
-        running = data.get("ActiveState") == "active" and data.get("SubState") == "running"
+        running = data.get("ActiveState") == "active" and (data.get("SubState") == "running" or (item.get("oneshot") is True and data.get("SubState") == "exited"))
+        if item.get("observation_only") is True or data.get("Transient") == "yes":
+            return {"state": data.get("SubState", "unknown"), "ok": running if action == "status" else True, "managed": False, "skipped": action != "status", "observation_only": True}
         if action != "status":
-            if data.get("Transient") == "yes":
-                raise ServiceError("Transient jobs are observation-only; use their original controller")
             if action == "stop":
                 unit("stop", item["name"])
             elif not running:
                 unit("start", item["name"])
-            return local(item, "status")
+            result = local(item, "status")
+            result["desired_state"] = "stopped" if action == "stop" else "running"
+            if action == "stop":
+                result["ok"] = not running_unit(item, env)
+            return result
         return {"state": data.get("SubState", "unknown"), "ok": running, "managed": True}
     daemon = command(["docker", "info", "--format", "{{.Name}}"]).strip()
     if daemon.lower() != item["host"].lower():
@@ -109,17 +134,31 @@ def local(item, action):
     running = row["State"]["Running"]
     if action == "stop" and running:
         command(["docker", "stop", "--time", "10", item["id"]])
-        return local(item, "status")
+        result = local(item, "status")
+        result.update(desired_state="stopped", ok=result["state"] == "stopped")
+        return result
     if action in {"start", "ensure-running"} and not running:
+        check_watch(item)
         available = int(next(x for x in Path("/proc/meminfo").read_text().splitlines() if x.startswith("MemAvailable:")).split()[1]) * 1024
         if available - item["memory_max_bytes"] < 8 * 1024**3:
             raise ServiceError("Host memory reserve blocks start")
         command(["docker", "start", item["id"]])
-        return local(item, "status")
+        deadline = time.monotonic() + 20
+        while True:
+            result = local(item, "status")
+            result["desired_state"] = "running"
+            if result["ok"] or time.monotonic() >= deadline:
+                return result
+            time.sleep(1)
     ready = readiness(item) if running else False
     healthy = row["State"].get("Health", {}).get("Status")
     ok = running and healthy not in {"starting", "unhealthy"} and ready is not False
     return {"state": "running" if running else "stopped", "ready": ready, "health": healthy, "ok": ok, "managed": True}
+
+
+def running_unit(item, env):
+    state = command(["systemctl", "--user", "show", item["name"], "--property=ActiveState", "--value"], env=env).strip()
+    return state in {"active", "activating", "deactivating", "reloading"}
 
 
 def operate(item, action, script):
@@ -129,7 +168,7 @@ def operate(item, action, script):
     payload = '__name__ = "_skybuild_service_host"\n' + Path(script).read_text() + "\n"
     # Data travels on stdin. The remote shell receives only fixed arguments.
     payload += "\ntry:\n print(json.dumps(local(" + repr(item) + ", " + repr(action) + ")))\nexcept Exception:\n print(json.dumps({'state':'error','ok':False,'error':'Host service check failed'}))\n"
-    result = subprocess.run(["ssh", "-F", str(Path.home() / ".ssh/config"), "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", item["host"], shlex.join(argv)], input=payload, text=True, capture_output=True, timeout=40)
+    result = subprocess.run(["ssh", "-F", str(Path.home() / ".ssh/config"), "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", item["host"], shlex.join(argv)], input=payload, text=True, capture_output=True, timeout=90)
     if result.returncode:
         raise ServiceError("Host is unavailable; private SSH output was suppressed")
     return json.loads(result.stdout)
@@ -166,7 +205,7 @@ def main(argv=None):
                 if later["host"] == item["host"]:
                     later["blocked"] = True
     print(json.dumps({"action": args.action, "services": results}, sort_keys=True))
-    return 0 if results and all(r["ok"] or (args.action == "stop" and r["state"] in {"stopped", "dead"}) for r in results) else 1
+    return 0 if results and all(r["ok"] for r in results) else 1
 
 
 if __name__ == "__main__":

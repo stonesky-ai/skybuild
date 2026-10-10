@@ -9,7 +9,9 @@
       "image": "sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54",
       "project": "skybuild-pilot",
       "service": "db",
-      "memory_max_bytes": 805306368
+      "memory_max_bytes": 805306368,
+      "management": "persistent",
+      "hostwatch_file": "/home/kevin/my_code/skybuild-gate-tmp/resume-20261010-host-watch-002.json"
     },
     {
       "host": "jeltz",
@@ -21,7 +23,9 @@
       "service": "api",
       "memory_max_bytes": 536870912,
       "readiness_url": "https://jeltz.tail991ac1.ts.net:8443/health/ready",
-      "ca_file": "/home/kevin/my_code/skybuild-pilot-state/tls/ca.crt"
+      "ca_file": "/home/kevin/my_code/skybuild-pilot-state/tls/ca.crt",
+      "management": "persistent",
+      "hostwatch_file": "/home/kevin/my_code/skybuild-gate-tmp/resume-20261010-host-watch-002.json"
     },
     {
       "host": "jeltz",
@@ -31,13 +35,17 @@
       "image": "sha256:5d18fb39c8ec5fc6e58dfc4a95f61dcb03ad4e16fda79ae5d16c28f32579a81e",
       "project": "skybuild-pilot",
       "service": "workbench",
-      "memory_max_bytes": 268435456
+      "memory_max_bytes": 268435456,
+      "management": "persistent",
+      "hostwatch_file": "/home/kevin/my_code/skybuild-gate-tmp/resume-20261010-host-watch-002.json"
     },
     {
       "host": "wonko",
       "kind": "unit",
       "name": "skybuild-host-watch-gate-6a3b123.service",
-      "fragment": "/run/user/1000/systemd/transient/skybuild-host-watch-gate-6a3b123.service"
+      "fragment": "/run/user/1000/systemd/transient/skybuild-host-watch-gate-6a3b123.service",
+      "management": "observation",
+      "observation_only": true
     },
     {
       "host": "wonko",
@@ -48,7 +56,8 @@
       "required_files": [
         "scripts/managed_session.py",
         "scripts/managed_session_cleanup.py"
-      ]
+      ],
+      "management": "capability"
     },
     {
       "host": "wowbagger",
@@ -59,7 +68,8 @@
       "required_files": [
         "scripts/managed_session.py",
         "scripts/managed_session_cleanup.py"
-      ]
+      ],
+      "management": "capability"
     }
   ]
 }
