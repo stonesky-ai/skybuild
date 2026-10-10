@@ -29,7 +29,11 @@ FIREWALL_ALIASES = {
     "iptables": "iptables-nft", "ip6tables": "ip6tables-nft",
     "iptables-save": "iptables-nft-save", "ip6tables-save": "ip6tables-nft-save",
 }
-FIREWALL_PLUGINS = ("libxt_conntrack.so",)
+FIREWALL_PLUGINS = ("libxt_conntrack.so", "libxt_tcp.so")
+BASE_GLIBC_LIBRARIES = frozenset({
+    "libc.so.6", "libm.so.6", "libpthread.so.0", "libdl.so.2", "librt.so.1",
+    "libresolv.so.2", "ld-linux-x86-64.so.2",
+})
 GIT_PACKAGE_MANIFEST = Path(__file__).with_name("gate_images") / "trusted_git_packages.json"
 class BuildError(RuntimeError):
     """Local helper image inputs are incomplete or do not match the reviewed gate."""
@@ -75,19 +79,25 @@ def _copy_file(source: Path, root: Path) -> None:
     shutil.copymode(source, destination)
 
 
-def _needed_libraries(binary: Path) -> set[Path]:
+def _needed_libraries(binary: Path) -> dict[Path, set[str]]:
     result = _run(["ldd", str(binary)], timeout=10)
-    libraries: set[Path] = set()
+    libraries: dict[Path, set[str]] = {}
     for line in result.stdout.splitlines():
-        match = re.search(r"(?:=>\s+)?(/[^\s]+)\s+\(", line)
-        if not match:
+        if "=> not found" in line:
+            raise BuildError("firewall dependency inspection found an unresolved library")
+        match = re.search(r"^\s*([^\s]+)\s+=>\s+(/[^\s]+)\s+\(", line)
+        if match is None:
             continue
-        path = Path(match[1]).resolve(strict=True)
+        soname = match[1]
+        if soname in BASE_GLIBC_LIBRARIES:
+            # The image is pinned to a Debian base that supplies these exact
+            # glibc runtime names. The in-image smoke verifies that contract.
+            continue
+        path = Path(match[2]).resolve(strict=True)
         if str(path).startswith("/usr/lib/"):
-            libraries.add(path)
+            libraries.setdefault(path, set()).add(soname)
         elif str(path).startswith(("/lib/", "/lib64/")):
-            # The exact Debian Python base supplies its own compatible glibc.
-            continue
+            raise BuildError("firewall dependency is outside the pinned base-library allowlist")
         else:
             raise BuildError("firewall binary needs an unapproved host library location")
     if not libraries:
@@ -111,12 +121,30 @@ def stage_firewall_payload(root: Path) -> dict:
     plugins = [plugin_dir / name for name in FIREWALL_PLUGINS]
     if any(not path.is_file() for path in plugins):
         raise BuildError("required conntrack firewall plugin is unavailable")
-    libraries: set[Path] = set()
+    libraries: dict[Path, set[str]] = {}
     for binary in (*binary_targets, *plugins):
-        libraries.update(_needed_libraries(binary))
+        for library, sonames in _needed_libraries(binary).items():
+            libraries.setdefault(library, set()).update(sonames)
         _copy_file(binary, root)
-    for library in libraries:
+    library_aliases: dict[str, str] = {}
+    for library, sonames in libraries.items():
         _copy_file(library, root)
+        destination = root / library.relative_to("/")
+        for soname in sorted(sonames):
+            if not re.fullmatch(r"[A-Za-z0-9_.+-]+", soname):
+                raise BuildError("firewall dependency has an unsafe library name")
+            if soname == library.name:
+                continue
+            alias = destination.parent / soname
+            source_alias = library.parent / soname
+            if source_alias.resolve(strict=True) != library:
+                raise BuildError("firewall soname does not resolve to its inspected library")
+            if alias.exists() or alias.is_symlink():
+                if not alias.is_symlink() or os.readlink(alias) != library.name:
+                    raise BuildError("firewall library alias conflicts with another staged file")
+            else:
+                alias.symlink_to(library.name)
+            library_aliases[str(alias.relative_to(root))] = library.name
     for plugin in plugins:
         _copy_file(plugin, root)
     sbin = root / "usr/sbin"
@@ -131,12 +159,46 @@ def stage_firewall_payload(root: Path) -> dict:
         "base_image_id": PYTHON_BASE_ID,
         "executables": {str(path.relative_to(root)): _digest(path)
                         for path in sorted(root.rglob("*")) if path.is_file() and not path.is_symlink()},
+        "library_aliases": dict(sorted(library_aliases.items())),
         "aliases": FIREWALL_ALIASES,
     }
     (root / "firewall-payload.json").write_text(
         json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8"
     )
     return manifest
+
+
+def _smoke_firewall_image(image_id: str) -> dict:
+    """Exercise the exact nft-backed v4/v6 commands offline in a disposable netns."""
+    script = "\n".join((
+        "set -eu",
+        "iptables -V", "ip6tables -V", "iptables-save --version", "ip6tables-save --version",
+        "iptables -w -F INPUT; iptables -w -F OUTPUT; iptables -w -F FORWARD",
+        "iptables -w -P INPUT DROP; iptables -w -P OUTPUT DROP; iptables -w -P FORWARD DROP",
+        "iptables -w -A INPUT -i lo -j ACCEPT",
+        "iptables -w -A INPUT -s 198.18.0.3/32 -p tcp --dport 5432 -j ACCEPT",
+        "iptables -w -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+        "iptables -w -A OUTPUT -d 127.0.0.11/32 -j DROP",
+        "iptables -w -A OUTPUT -d 198.18.0.2/32 -p tcp --dport 5432 -j ACCEPT",
+        "iptables -w -A OUTPUT -o lo -j ACCEPT",
+        "iptables -w -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+        "ip6tables -w -F INPUT; ip6tables -w -F OUTPUT; ip6tables -w -F FORWARD",
+        "ip6tables -w -P INPUT DROP; ip6tables -w -P OUTPUT DROP; ip6tables -w -P FORWARD DROP",
+        "ip6tables -w -A INPUT -i lo -j ACCEPT",
+        "ip6tables -w -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+        "ip6tables -w -A OUTPUT -o lo -j ACCEPT",
+        "ip6tables -w -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+        "iptables-save -t filter >/dev/null", "ip6tables-save -t filter >/dev/null",
+    ))
+    smoke_name = "skybuild-firewall-smoke-" + uuid4().hex[:12]
+    _run(["docker", "run", "--rm", "--name", smoke_name, "--network", "none",
+          "--memory=128m", "--memory-swap=128m",
+          "--cpus=0.25", "--pids-limit=32", "--read-only", "--tmpfs", "/run:rw,noexec,nosuid,size=4m",
+          "--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--security-opt=no-new-privileges",
+          "--label", "skybuild.isolated.firewall-smoke=true", "--entrypoint", "/bin/sh",
+          image_id, "-ceu", script], timeout=30)
+    return {"status": "passed", "network": "none", "capabilities": ["NET_ADMIN"],
+            "commands": ["iptables", "ip6tables", "iptables-save", "ip6tables-save", "conntrack matcher"]}
 
 
 def _copy_pinned_package(source: Path, destination: Path, expected_sha256: str) -> Path:
@@ -371,6 +433,7 @@ def build(checkout: Path, output: Path, *, gate_policy_sha256: str, uv_binary: P
         manifest = stage_firewall_payload(rootfs)
         firewall_id = _build_image(context, "Dockerfile.firewall", firewall_tag, PYTHON_BASE_ID,
                                     {"FIREWALL_POLICY_SHA256": gate.FIREWALL_POLICY_SHA256})
+        firewall_smoke = _smoke_firewall_image(firewall_id)
     return {
         "schema": "skybuild.isolated-gate-local-images.v1",
         "runner_image_id": runner_id,
@@ -378,6 +441,7 @@ def build(checkout: Path, output: Path, *, gate_policy_sha256: str, uv_binary: P
         "postgres_image_id": POSTGRES_BASE_ID,
         "python_base_image_id": PYTHON_BASE_ID,
         "firewall_payload": manifest,
+        "firewall_smoke": firewall_smoke,
         "runner_environment": runner_environment,
         "git_payload": git_manifest,
         "runner_build": runner_args,
@@ -387,6 +451,56 @@ def build(checkout: Path, output: Path, *, gate_policy_sha256: str, uv_binary: P
     }
 
 
+def build_firewall_only(checkout: Path, output: Path, *, gate_policy_sha256: str,
+                        firewall_tag: str, prior_receipt: Path) -> dict:
+    """Replace only the firewall image while preserving verified runner/PG pins."""
+    if not re.fullmatch(r"[0-9a-f]{64}", gate_policy_sha256):
+        raise BuildError("gate policy hash must be a full SHA-256 value from the frozen policy")
+    try:
+        fd = os.open(prior_receipt, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError as error:
+        raise BuildError("prior image receipt cannot be opened safely") from error
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or not 1 <= info.st_size <= 2_000_000:
+            raise BuildError("prior image receipt is not a bounded regular file")
+        raw = os.read(fd, 2_000_001)
+    finally:
+        os.close(fd)
+    try:
+        prior = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise BuildError("prior image receipt is invalid JSON") from error
+    runner_build = prior.get("runner_build") if isinstance(prior, dict) else None
+    if (not isinstance(prior, dict) or prior.get("schema") != "skybuild.isolated-gate-local-images.v1"
+            or prior.get("postgres_image_id") != POSTGRES_BASE_ID
+            or prior.get("python_base_image_id") != PYTHON_BASE_ID
+            or prior.get("network") != "none" or prior.get("candidate_installation") is not False
+            or prior.get("uv_offline") is not True or not isinstance(runner_build, dict)
+            or runner_build.get("GATE_POLICY_SHA256") != gate_policy_sha256
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", str(prior.get("runner_image_id", "")))):
+        raise BuildError("prior runner receipt does not match this frozen gate and pinned bases")
+    checkout = checkout.resolve(strict=True)
+    if output.exists():
+        raise BuildError("firewall-only output path already exists")
+    output.mkdir(mode=0o700, parents=True, exist_ok=False)
+    _inspect_local_image(PYTHON_BASE_ID)
+    with tempfile.TemporaryDirectory(prefix="skybuild-firewall-image-") as name:
+        context = Path(name)
+        shutil.copy2(checkout / "scripts/gate_images/Dockerfile.firewall", context)
+        rootfs = context / "firewall-rootfs"
+        manifest = stage_firewall_payload(rootfs)
+        firewall_id = _build_image(context, "Dockerfile.firewall", firewall_tag, PYTHON_BASE_ID,
+                                    {"FIREWALL_POLICY_SHA256": gate.FIREWALL_POLICY_SHA256})
+        firewall_smoke = _smoke_firewall_image(firewall_id)
+    result = {**prior, "firewall_image_id": firewall_id, "firewall_payload": manifest,
+              "firewall_smoke": firewall_smoke, "firewall_build_scope": "firewall-only"}
+    (output / "image-build-result.json").write_text(
+        json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkout", type=Path, required=True)
@@ -394,21 +508,36 @@ def main() -> int:
     parser.add_argument("--gate-policy-sha256", required=True)
     parser.add_argument("--uv-binary", type=Path, default=Path.home() / ".local/bin/uv")
     parser.add_argument("--uv-cache", type=Path, default=Path.home() / ".cache/uv")
-    parser.add_argument("--git-package-dir", type=Path, required=True)
-    parser.add_argument("--runner-tag", required=True)
+    parser.add_argument("--git-package-dir", type=Path)
+    parser.add_argument("--runner-tag")
     parser.add_argument("--firewall-tag", required=True)
+    parser.add_argument("--firewall-only", action="store_true",
+                         help="reuse verified runner/PostgreSQL pins and rebuild only the firewall image")
+    parser.add_argument("--reuse-runner-receipt", type=Path,
+                        help="prior exact builder receipt required with --firewall-only")
     parser.add_argument("--build", action="store_true",
                          help="perform bounded offline local Docker builds (explicit side effect)")
     args = parser.parse_args()
     if not args.build:
         parser.error("pass --build only after independent source review and owner build approval")
-    result = build(args.checkout, args.output, gate_policy_sha256=args.gate_policy_sha256,
-                   uv_binary=args.uv_binary.resolve(strict=True), uv_cache=args.uv_cache.resolve(strict=True),
-                   git_package_dir=args.git_package_dir.resolve(strict=True),
-                   runner_tag=args.runner_tag, firewall_tag=args.firewall_tag)
-    (args.output / "image-build-result.json").write_text(
-        json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8"
-    )
+    if args.firewall_only:
+        if args.reuse_runner_receipt is None:
+            parser.error("--firewall-only requires --reuse-runner-receipt")
+        result = build_firewall_only(args.checkout, args.output, gate_policy_sha256=args.gate_policy_sha256,
+                                     firewall_tag=args.firewall_tag,
+                                     prior_receipt=args.reuse_runner_receipt)
+    else:
+        if args.reuse_runner_receipt is not None:
+            parser.error("--reuse-runner-receipt requires --firewall-only")
+        if args.uv_binary is None or args.uv_cache is None or args.git_package_dir is None or args.runner_tag is None:
+            parser.error("full image builds require --uv-binary, --uv-cache, --git-package-dir, and --runner-tag")
+        result = build(args.checkout, args.output, gate_policy_sha256=args.gate_policy_sha256,
+                       uv_binary=args.uv_binary.resolve(strict=True), uv_cache=args.uv_cache.resolve(strict=True),
+                       git_package_dir=args.git_package_dir.resolve(strict=True),
+                       runner_tag=args.runner_tag, firewall_tag=args.firewall_tag)
+        (args.output / "image-build-result.json").write_text(
+            json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+        )
     print(json.dumps(result, sort_keys=True))
     return 0
 
