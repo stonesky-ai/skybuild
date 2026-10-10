@@ -178,6 +178,24 @@ def test_candidate_gate_cleanup_and_ref_checks(tmp_path, monkeypatch, change):
     assert any(argv[:3] == ["gh", "pr", "merge"] for argv in calls) is (change == "default_gate_publish")
 
 
+def test_gate_environment_selects_candidate_not_author(monkeypatch, tmp_path):
+    module = load('integrate_reviewed_pr')
+    monkeypatch.setenv('UV_PROJECT_ENVIRONMENT', '/author/.venv')
+    monkeypatch.setenv('PYTHONPATH', '/author/src')
+    monkeypatch.setenv('UV_NO_SYNC', '1')
+    calls = []
+    def run(argv, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(returncode=0, stdout='{"ok":true}', stderr='')
+    monkeypatch.setattr(module.subprocess, 'run', run)
+    assert module.run_gate(['gate'], tmp_path) == {'ok': True}
+    assert 'env' in calls[0], 'Nested gate inherited the author environment'
+    env = calls[0]['env']
+    assert env['UV_PROJECT_ENVIRONMENT'] == str(tmp_path / '.venv')
+    assert env['PYTHONPATH'] == str(tmp_path / 'src') + ':' + str(tmp_path / 'scripts')
+    assert env['PYTHONSAFEPATH'] == '1' and 'UV_NO_SYNC' not in env
+
+
 def test_failed_gate_retains_log_without_test_output(monkeypatch, tmp_path):
     module = load("integrate_reviewed_pr")
     monkeypatch.setattr(module.subprocess, "run", lambda *a, **kw: SimpleNamespace(
