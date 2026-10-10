@@ -313,6 +313,24 @@ def promotion_preflight(checkout: Path, expected_sha: str, published_ref: str, *
                 or labels.get("com.docker.compose.service") != "workbench"
                 or labels.get("com.docker.compose.project.working_dir") != str(gateway_compose_owner_path)):
             raise ValueError("Workbench ownership labels changed")
+        expected_gateway_env = {
+            "PATH": "/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONUNBUFFERED": "1",
+        }
+        env_rows = gateway.get("Config", {}).get("Env", [])
+        observed_gateway_env = {}
+        if not isinstance(env_rows, list):
+            raise ValueError("Workbench environment boundary changed")
+        for item in env_rows:
+            if not isinstance(item, str) or "=" not in item:
+                raise ValueError("Workbench environment boundary changed")
+            key, value = item.split("=", 1)
+            if key in observed_gateway_env:
+                raise ValueError("Workbench environment boundary changed")
+            observed_gateway_env[key] = value
+        if observed_gateway_env != expected_gateway_env or gateway_host.get("Tmpfs") not in (None, {}):
+            raise ValueError("Workbench environment or temporary filesystem boundary changed")
         gateway_command = gateway.get("Config", {}).get("Cmd", [])
         expected_gateway_command = [
             "--ui-checkout", "/runtime-ui/ui", "--api-checkout", "/app",

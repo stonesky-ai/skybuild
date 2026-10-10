@@ -168,13 +168,17 @@ def _enable_gateway(arguments, data):
     data['gateway'] = {
         'Id': '5' * 64, 'Image': 'sha256:' + '6' * 64,
         'State': {'Running': True},
-        'Config': {'User': str(os.getuid()), 'Entrypoint': ['python', '/runtime-ui/runtime_ui.py'],
+        'Config': {'User': str(os.getuid()), 'Env': [
+                       'PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+                       'PYTHONDONTWRITEBYTECODE=1', 'PYTHONUNBUFFERED=1'],
+                   'Entrypoint': ['python', '/runtime-ui/runtime_ui.py'],
                    'Cmd': args, 'Labels': {'com.docker.compose.project': 'skybuild-pilot',
                                            'com.docker.compose.service': 'workbench',
                                            'com.docker.compose.project.working_dir': str(gateway_owner)}},
         'HostConfig': {'PortBindings': gateway_ports, 'Memory': 256 * 1024**2, 'PidsLimit': 64,
                        'RestartPolicy': {'Name': 'unless-stopped'}, 'Privileged': False,
-                       'CapAdd': None, 'NetworkMode': 'skybuild-pilot_default', 'ReadonlyRootfs': True},
+                       'CapAdd': None, 'NetworkMode': 'skybuild-pilot_default', 'ReadonlyRootfs': True,
+                       'Tmpfs': {}},
         'NetworkSettings': {'Ports': gateway_ports,
                             'Networks': {'skybuild-pilot_default': {'NetworkID': '4' * 64}}},
         'Mounts': [{'Source': str(source), 'Destination': destination, 'RW': False}
@@ -204,6 +208,7 @@ def test_gateway_topology_checks_exact_compose_owner_and_split_bindings(promotio
     'gateway-username', 'gateway-extra-argument', 'gateway-argument', 'argument-without-value',
     'duplicate-argument', 'gateway-mount', 'writable-secret', 'gateway-memory', 'gateway-user',
     'writable-rootfs', 'gateway-owner-symlink',
+    'gateway-env', 'gateway-tmpfs',
     'gateway-not-ready', 'compose-owner-symlink', 'partial-gateway-pins',
 ])
 def test_gateway_topology_rejects_identity_and_boundary_changes(promotion, boundary):
@@ -239,6 +244,8 @@ def test_gateway_topology_rejects_identity_and_boundary_changes(promotion, bound
     elif boundary == 'writable-secret': data['gateway']['Mounts'][0]['RW'] = True
     elif boundary == 'gateway-memory': data['gateway']['HostConfig']['Memory'] = 0
     elif boundary == 'writable-rootfs': data['gateway']['HostConfig']['ReadonlyRootfs'] = False
+    elif boundary == 'gateway-env': data['gateway']['Config']['Env'].append('PYTHONPATH=/tmp/foreign')
+    elif boundary == 'gateway-tmpfs': data['gateway']['HostConfig']['Tmpfs'] = {'/tmp': 'rw'}
     elif boundary == 'gateway-user': data['gateway']['Config']['User'] = '0' if os.getuid() else '999'
     elif boundary == 'gateway-not-ready': data['ready']['status'] = 'unavailable'
     elif boundary == 'compose-owner-symlink':
