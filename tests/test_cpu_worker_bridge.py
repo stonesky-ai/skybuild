@@ -2,7 +2,8 @@ import pytest
 from types import SimpleNamespace
 
 import skybuild.cpu_worker_bridge as bridge
-from skybuild.cpu_worker_bridge import CPUWorkerBridgeError, _controller_pin, _file_bytes
+from skybuild.cpu_worker_bridge import (CPUWorkerBridgeError, _attempt_log_path,
+                                        _controller_pin, _file_bytes)
 
 
 def test_empty_stdin_is_allowed_only_when_explicit(tmp_path):
@@ -23,6 +24,10 @@ def test_controller_pin_rejects_a_different_worker_import_checkout(tmp_path):
 
     with pytest.raises(CPUWorkerBridgeError, match="exact controller source root"):
         _controller_pin(plan, "a" * 64)
+
+
+def test_worker_log_paths_are_attempt_scoped(tmp_path):
+    assert _attempt_log_path(tmp_path, 'attempt-1') != _attempt_log_path(tmp_path, 'attempt-2')
 
 
 def test_terminal_observation_retries_settlement_without_new_observation(monkeypatch):
