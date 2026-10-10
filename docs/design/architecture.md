@@ -188,7 +188,23 @@ Initially, task assignment is a coordination hint for one manually selected exec
 
 ### Task workflow, append-only journal and control page
 
-Owner-confirmed on 2026-10-09: **Petri** is the task-workflow project, at **priority 5**. Use exactly seven places: Ready, Working, Validating, Integrating, Done, Deferred, Hold. The normal path is Ready, Working, Validating, Integrating, Done. Unit tests, scans, long tests, code review and needs rebase are validation substages carried by the task token, not extra places. Confirmed validation or integration failures return to Ready with the fault and next action. Every unfinished task has a next action or named blocker and a responsible party. Code completion alone is not accepted completion. [Task workflow](task_workflow.md) and the [compact Petri design](petri_workflow.md) define transitions, token evidence, dependencies and the seven-column workbench. [ADR 0031](../adr/tasks.md#adr-0031) retains the journal requirements. The owner requests design and simplicity analysis first; runtime mechanics and rollout remain proposed. Generation dependencies follow accepted interface boundaries: kernel behavior and persistence may proceed in parallel, then independent adapters and board work may proceed together after the guarded API contract. The Petri plan pins shared ownership and joins all branches before end-to-end acceptance; parallel generation does not change runtime task transition ordering or launch authority.
+Owner-confirmed on 2026-10-09: the project name is **Petri**, at **priority 5**.
+Use exactly seven places: Ready, Working, Validating, Integrating, Done, Deferred and Hold.
+The normal path is Ready, Working, Validating, Integrating, Done.
+Unit tests, scans, long tests, code review and needs rebase are validation stages carried by the token.
+Confirmed validation and integration failures return the task to Ready with the fault and next action.
+Each unfinished task needs a next action or named blocker and a responsible party.
+Code completion alone does not mean accepted completion.
+
+[Task workflow](task_workflow.md) and the [Petri plan](petri_workflow.md) define transitions, evidence, dependencies and the workbench.
+[ADR 0031](../adr/tasks.md#adr-0031) retains the journal requirements.
+The owner requests design and simplicity analysis before implementation.
+The implementation and rollout remain proposed.
+
+Kernel behavior and persistence can generate in parallel after their shared interface is accepted.
+Independent adapters and board work can then generate together after the guarded API contract is accepted.
+The Petri plan assigns shared ownership and joins all branches before final acceptance.
+Parallel generation does not change runtime transition order or launch authority.
 
 The core control page lists outstanding tasks, status/phase, next action, blocker, owner, evidence freshness and bundle/attempt. It supports editing description, scope, definition of done and considerations; requesting rework or reassessment; splitting/merging tasks; changing dependencies; and deferring until a date or major milestone. Show the current definition and journal together, with affected reviews/tests/readiness made stale when their inputs change. A bounded model planning scan may propose considerations, missing requirements, decomposition, dependencies and estimates; it cannot silently adopt a new definition, spend authority or dependency graph. Model scanning requires the same qualified profile/budget controls as other inference; basic task management remains usable without it.
 

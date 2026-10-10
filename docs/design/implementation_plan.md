@@ -10,9 +10,33 @@ The selected [bootstrap brief](implementation/bootstrap.md) fixes the first API/
 
 ## Petri workflow project (priority 5)
 
-Parent task: `SKYBUILD-PETRI`. [Compact design and simplicity review](petri_workflow.md), derived from architecture section 5. The owner requested design first. Exactly seven places replace the earlier many-phase proposal; validation substages travel as token evidence and confirmed Validating/Integrating failures return to Ready. Preserve existing API task authority, journal, dependency, claim and effect contracts.
+Parent task: `SKYBUILD-PETRI`. Architecture section 5 governs the [Petri plan](petri_workflow.md).
+The owner requested design and simplicity analysis before implementation.
+Use seven places and carry validation results on the task token.
+Confirmed validation or integration failures return the task to Ready.
+Preserve the existing task API, journal, dependencies, claims and effect controls.
 
-Proposed sequence: four small domain classes and one guarded transition table; transactional Store and compatible API; existing worker/check/review/rebase/bundle wiring; seven-column workbench; transition and recovery acceptance. Twelve approximately 30-minute implementation slices are API tasks, all priority 5. Each lists a Sol/Luna author recommendation, a separate Sol/Grok reviewer recommendation and a code-generation range. Initial generation totals 3 hours 50 minutes to 6 hours; the serial build budget including review, targeted tests, corrections and one combined gate is about 8.5–14.5 hours. These are uncalibrated planning estimates; slot waits, missing components and production promotion are excluded. The dependency graph permits 03/04 in parallel, followed after 05 by 06/07/08/09/10 in parallel; 11 waits for 09 and 10, and 12 joins all implementation branches. Ideal generation-only critical path is 2 hours 10 minutes to 3 hours 25 minutes with sufficient slots; this excludes review, tests, corrections and integration. No SNAKES runtime dependency is needed initially; retain it as the best-fit optional colored-net modeling library. Do not add a scheduler, database or event bus. Delivering this design does not implement or deploy it. Other accepted components keep their existing task identity and ownership; Petri adapts their seams rather than reimplementing their scope.
+Implement four small classes and one transition table in the existing Store/API interfaces.
+Then connect existing producers and add the seven-column workbench.
+Keep SNAKES optional. Do not add another database, event bus or scheduler.
+
+The API contains 12 implementation tasks at priority 5.
+Each task lists its author model, reviewer model and estimated generation time.
+Generation requires 3 hours 50 minutes to 6 hours of total model work.
+The serial build budget is approximately 8.5–14.5 hours, including review, tests, corrections and one combined gate.
+Slot waits, missing components and production promotion are additional.
+These estimates need calibration from actual results.
+
+Tasks 03 and 04 can generate in parallel after task 02.
+Tasks 06, 07, 08, 09 and 10 can generate in parallel after task 05.
+Task 11 waits for tasks 09 and 10.
+Task 12 joins all implementation branches.
+The ideal generation-only critical path is 2 hours 10 minutes to 3 hours 25 minutes.
+This range excludes review, tests, corrections and integration.
+
+This plan does not implement or deploy the software.
+Existing components keep their task identity and ownership.
+Petri changes their interfaces where necessary instead of repeating their scope.
 
 ## MVP delivery target
 

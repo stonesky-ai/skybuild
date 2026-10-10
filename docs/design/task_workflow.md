@@ -1,13 +1,45 @@
 # SkyBuild task workflow
 
-Derived from architecture revision A42, 2026-10-09. [Architecture section 5](architecture.md#5-bootstrap-rest-and-task-contract) governs. The owner names this project **Petri**, priority **5**, and requests design plus simplicity analysis first.
+This document derives from architecture A42, dated 2026-10-09.
+[Architecture section 5](architecture.md#5-bootstrap-rest-and-task-contract) governs the workflow.
+The project name is **Petri**. Its priority is **5**.
+The owner requested design and simplicity analysis before implementation.
 
-The [compact Petri design](petri_workflow.md) is the current workflow specification. It replaces the earlier proposed many-phase diagram with exactly seven places: Ready, Working, Validating, Integrating, Done, Deferred, Hold. The normal delivery path is Ready, Working, Validating, Integrating, Done. Unit tests, scans, long tests, code review and needs rebase travel as validation substages on the task token. Confirmed validation/integration failures return to Ready with the specific fault. Holds and deferrals resume through Ready after reassessment. All additional movements, guards and rejected movements are specified in its transition catalogue.
+The [Petri plan](petri_workflow.md) defines the current proposed workflow.
+It replaces the earlier proposal that used many phases.
+Use exactly seven places: Ready, Working, Validating, Integrating, Done, Deferred and Hold.
+The normal path is Ready, Working, Validating, Integrating, Done.
 
-Keep one stable task identity and one current token per task. PostgreSQL through the authenticated API remains authoritative. Commit state, append-only journal and invalidation together. Expected revisions, idempotency, current evidence, claim fences and unresolved effects govern transitions; a label or UI action cannot bypass them. Late results retain historical attribution and cannot restore current readiness. Corrections append history rather than editing it. Split/merge preserves task identity, lineage, dependency mapping and consumed/uncertain usage. Supersession is a historical disposition, not accepted completion or another place.
+Unit tests, scans, long tests, code review and needs rebase are validation stages.
+The token carries their results. The stages are not additional places.
+Confirmed validation and integration failures return the task to Ready with the fault.
+Hold and Deferred return to Ready after release and reassessment.
+The transition table defines all other permitted movements and guards.
 
-Every unfinished task names its next action or awaited event, responsible party and blocker. Dependencies may disable a Ready token without inventing another place. Deferred tasks retain offset-aware date/milestone triggers; catch-up reassesses without renewing execution authority. Hold/defer requests against live or unknown effects remain visibly pending until safe. Unknown publication stays Integrating until its actual outcome is reconciled.
+Each task keeps one identity and one current token.
+PostgreSQL through the authenticated API remains authoritative.
+Commit the state change, journal event and invalidation together.
+Check revisions, repeated operation IDs, current evidence, claim fences and unresolved effects.
+A UI label cannot bypass these checks.
 
-The workbench presents seven columns, validation badges, evidence freshness, faults, dependency blockers and explained work-next ordering. Basic management does not require inference. Independent review remains required for code; dedicated complexity gates and multi-person approval chains retain their existing deferred scope.
+Keep late results against their original inputs. Do not let late results advance the current task.
+Append corrections to history. Do not edit old journal events.
+Split and merge preserve identity, lineage, dependency mapping and consumed or uncertain usage.
+Supersession records replaced scope. It does not mean accepted completion or another place.
 
-This is a design, not evidence that the deployed service enforces the new workflow. The Petri plan provides 12 bounded implementation slices and the required transition, concurrency, migration and two-project acceptance evidence. Existing [reassessment model](models/Reassessment.md), [review policy](review_policy.md), publication qualification and operational controls continue to govern their respective boundaries.
+Each unfinished task names its next action, responsible party and blocker.
+Dependencies can prevent work while the task remains in Ready.
+Deferral triggers use dates with time-zone offsets or stable milestone references.
+A missed trigger causes reassessment. It does not renew execution approval.
+Hold and deferral requests remain pending while effects are unresolved.
+Unknown publication remains Integrating until the actual outcome is known.
+
+The workbench shows seven columns, validation results, freshness, faults and dependencies.
+It explains the next-work order.
+Basic task management does not require inference.
+Code tasks still need independent review.
+Dedicated complexity gates and multi-person approval chains keep their existing deferred scope.
+
+The design does not prove that the live service enforces the new workflow.
+The Petri plan defines 12 tasks and their acceptance checks.
+Existing [reassessment models](models/Reassessment.md), [review policy](review_policy.md) and publication controls remain applicable.
