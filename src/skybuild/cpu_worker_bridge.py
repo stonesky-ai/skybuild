@@ -41,7 +41,7 @@ WORKER_SOURCE = {
     'src/skybuild/client.py': '9a6ab69f0b3294e429375ada334d263d9df1b26878f11f928b98a5f024c9679e',
     'src/skybuild/fleet_preflight.py': 'f2ec5d39b6b1bc0c0a71354a7be89837bd153b5812a9be55f8a951a15fc9424c',
     'src/skybuild/auto_patch_worker.py': 'bf16d653051d9a4da12585b5291449144c402930c62477146f20999096e5318f',
-    'src/skybuild/auto_patch_permit.py': '5e7c5de5f3d29cd6ed1aa55d61d9ec1b2a6530163f71f06a68f99396294f7ad1',
+    'src/skybuild/auto_patch_permit.py': 'de6cf3cbc6ca88f90c68bb397959cbf1c040feba1d355dd199bb142959f45eea',
     'src/skybuild/manual_assignment.py': '349dc9f367ba63e0bf6c2f3e2d63b7d45c6e5dadcb715f6b67295ad86b65daf7',
     'src/skybuild/manual_cord.py': '3cf3b393a18c39aa5c13dd19975211caba88171fd7be19025c24d47d9d59ca90',
     'src/skybuild/manual_dispatch.py': '7baad50262ad315c4d1d48cf6edb27c592b5369b23c3fb81004994a966a667cc',

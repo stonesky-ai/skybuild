@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 from types import SimpleNamespace
@@ -6,6 +7,12 @@ from types import SimpleNamespace
 import skybuild.cpu_worker_bridge as bridge
 from skybuild.cpu_worker_bridge import (CPUWorkerBridgeError, _attempt_log_path,
                                         _controller_pin, _file_bytes)
+
+
+def test_worker_source_profile_matches_checkout_bytes():
+    checkout = Path(bridge.__file__).resolve().parents[2]
+    for relative, expected in bridge.WORKER_SOURCE.items():
+        assert bridge._digest((checkout / relative).read_bytes()) == expected, relative
 
 
 def test_empty_stdin_is_allowed_only_when_explicit(tmp_path):
