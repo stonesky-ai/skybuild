@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import errno
 import json
+import select
 import socket
 import sys
+import time
 
 
 BLOCKED_ERRORS = {errno.ETIMEDOUT, errno.ENETUNREACH, errno.EHOSTUNREACH, errno.EHOSTDOWN}
 
 
-def _connect(host: str, port: int, family: int = socket.AF_INET) -> tuple[bool, str]:
+def _connect(host: str, port: int, family: int = socket.AF_INET) -> tuple[bool | None, str]:
     sock = socket.socket(family, socket.SOCK_STREAM)
     sock.settimeout(1.0)
+    deadline = time.monotonic() + 1.0
     try:
         if family == socket.AF_INET6:
             result = sock.connect_ex((host, port, 0, 0))
@@ -23,7 +26,27 @@ def _connect(host: str, port: int, family: int = socket.AF_INET) -> tuple[bool, 
             return True, "connected"
         if result in BLOCKED_ERRORS:
             return False, "blocked"
-        return True, errno.errorcode.get(result, "reachable")
+        if result in {errno.EINPROGRESS, errno.EALREADY, errno.EWOULDBLOCK, errno.EAGAIN}:
+            remaining = max(0.0, deadline - time.monotonic())
+            _readable, writable, exceptional = select.select([], [sock], [sock], remaining)
+            if not writable and not exceptional:
+                # A pending connect that did not finish inside the bounded
+                # probe interval did not establish external connectivity.
+                return False, "timeout"
+            completion_error = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            if writable and completion_error == 0:
+                return True, "connected"
+            if completion_error in BLOCKED_ERRORS:
+                return False, "blocked"
+            # Unknown completion errors stay indeterminate. The caller treats
+            # this as a failed check, not as proof of blocking or connectivity.
+            status = errno.errorcode.get(completion_error, "unknown")
+            if not writable and completion_error == 0:
+                status = "exceptional"
+            return None, status
+        # Unknown connect_ex results are indeterminate. The caller requires an
+        # explicit boolean result for both allowed and blocked connections.
+        return None, errno.errorcode.get(result, "unknown")
     finally:
         sock.close()
 
@@ -43,7 +66,11 @@ def _dns_blocked() -> bool:
             return True
         return False
     except OSError as error:
-        return error.errno in BLOCKED_ERRORS or isinstance(error, TimeoutError)
+        # Linux reports an iptables OUTPUT DROP to a local UDP destination as
+        # EPERM on sendto. Keep this exception local to the DNS send check;
+        # other unclassified errors must fail the isolation check.
+        return (error.errno in BLOCKED_ERRORS or error.errno == errno.EPERM
+                or isinstance(error, TimeoutError))
     finally:
         sock.close()
 
@@ -63,14 +90,14 @@ def main(argv: list[str]) -> int:
     external6_ok, external6_status = _connect("2001:4860:4860::8888", 443, socket.AF_INET6)
     dns_ok = _dns_blocked()
     result = {
-        "postgres_tcp_allowed": pg_ok,
+        "postgres_tcp_allowed": pg_ok is True,
         "postgres_status": pg_status,
         "dns_blocked": dns_ok,
-        "external_ipv4_blocked": not external4_ok,
+        "external_ipv4_blocked": external4_ok is False,
         "external_ipv4_status": external4_status,
-        "external_ipv6_blocked": not external6_ok,
+        "external_ipv6_blocked": external6_ok is False,
         "external_ipv6_status": external6_status,
-        "host_gateway_listener_blocked": not host_ok,
+        "host_gateway_listener_blocked": host_ok is False,
         "host_listener_status": host_status,
         "host_listener_port": listener_port,
         "namespace": mode,
