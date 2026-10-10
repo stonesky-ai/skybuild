@@ -42,6 +42,7 @@ class JobSpec:
     memory_max_bytes: int
     runtime_seconds: int
     environment: Mapping[str, str] = field(default_factory=dict)
+    launch_nonce: str | None = None
 
     def unit(self) -> str:
         identity = json.dumps([self.task_id, self.attempt_id], separators=(",", ":"))
@@ -65,6 +66,8 @@ class JobSpec:
             raise JobUnitError("MemoryHigh must be positive and below MemoryMax")
         if type(self.runtime_seconds) is not int or not 0 < self.runtime_seconds <= MAX_RUNTIME_SECONDS:
             raise JobUnitError("runtime must be between 1 second and 8 hours")
+        if self.launch_nonce is not None and not re.fullmatch(r"[0-9a-f]{32}", self.launch_nonce):
+            raise JobUnitError("launch_nonce must be a pinned 32-character lowercase hex value")
         if set(self.environment) - ENVIRONMENT or not all(isinstance(value, str) and "\x00" not in value for value in self.environment.values()):
             raise JobUnitError("environment contains unsupported keys or values")
 
@@ -81,6 +84,8 @@ class JobUnitState:
     memory_current_bytes: int | None
     memory_peak_bytes: int | None
     memory_max_bytes: int
+    invocation_id: str | None = None
+    launch_nonce: str | None = None
 
 
 def _counter(value: str | None) -> int | None:
@@ -192,7 +197,7 @@ class JobUnitManager:
             "worktree": str(spec.worktree), "phase": "launch_intent",
             "memory_max_bytes": spec.memory_max_bytes, "memory_current_bytes": None,
             "memory_peak_bytes": None, "control_group": None, "observed_at": None,
-            "launch_nonce": uuid4().hex, "invocation_id": None,
+            "launch_nonce": spec.launch_nonce or uuid4().hex, "invocation_id": None,
         }
         path = self._manifest_path(unit)
         try:
@@ -262,7 +267,8 @@ class JobUnitManager:
             self._write_manifest(unit, manifest)
         return JobUnitState(unit, phase, loaded, active, props.get("Result") or None,
                             _counter(props.get("ExecMainStatus")), group, current, peak,
-                            manifest["memory_max_bytes"])
+                            manifest["memory_max_bytes"], manifest.get("invocation_id"),
+                            manifest.get("launch_nonce"))
 
     def stop(self, unit: str) -> None:
         """Refuse name-based stops until an invocation-bound effect is qualified."""
