@@ -1,6 +1,7 @@
 """Policy and real Git behavior for the bounded automatic CPU patch route."""
 
 import hashlib
+import os
 from pathlib import Path
 import subprocess
 
@@ -121,3 +122,18 @@ def test_worker_refuses_changed_patch_and_unapproved_task(tmp_path):
         worker._approved_task(task("SKYBUILD-CPU-1", "CPU-1", "a" * 64, approved=False),
                               {"task_id": "SKYBUILD-CPU-1", "task_revision": 2,
                                "assignment_id": "CPU-1"}, "a" * 64)
+
+
+def test_private_git_askpass_uses_token_file_without_embedding_secret(tmp_path):
+    token = tmp_path / "token"
+    token.write_text("example-secret\n")
+    token.chmod(0o600)
+    helper = worker._askpass(tmp_path, token)
+    assert "example-secret" not in helper.read_text()
+    environment = {"SKYBUILD_GIT_TOKEN_FILE": str(token), "PATH": os.environ["PATH"]}
+    username = subprocess.run([str(helper), "Username for HTTPS"], env=environment,
+                              check=True, capture_output=True).stdout
+    password = subprocess.run([str(helper), "Password for HTTPS"], env=environment,
+                              check=True, capture_output=True).stdout
+    assert username == b"x-access-token\n"
+    assert password == b"example-secret\n"

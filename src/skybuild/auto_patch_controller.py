@@ -45,6 +45,9 @@ def _read_manifest(path: Path) -> list[dict]:
                 or not isinstance(item["token_file"], str)
                 or not isinstance(item["git_token_file"], str)):
             raise AutoControllerError("Candidate entry is invalid")
+        if any(not Path(item[name]).is_absolute() or "\n" in item[name]
+               for name in ("patch", "token_file", "git_token_file")):
+            raise AutoControllerError("Candidate credential and patch paths must be absolute")
     return data["candidates"]
 
 
