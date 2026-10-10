@@ -19,9 +19,12 @@ from .admission import CPUAdmission
 from .observations import Observations
 from .execution_status import ExecutionStatus
 from .board import BoardQueries
+from .task_usage import TaskUsageHistory
 
 
-OPERATIONS = frozenset({'tasks:read', 'tasks:write', 'tasks:claim', 'cord:send', 'cord:read', 'cord:handle'})
+OPERATIONS = frozenset({'tasks:read', 'tasks:write', 'tasks:claim', 'tasks:usage-record',
+                        'tasks:usage-resolve', 'integration:attest', 'cord:send',
+                        'cord:read', 'cord:handle'})
 TASK_FIELDS = frozenset({
     'title', 'description', 'status', 'priority', 'dependencies', 'acceptance_criteria',
     'architecture_refs', 'assignee', 'phase', 'next_action', 'blocker', 'responsible', 'metadata',
@@ -133,7 +136,7 @@ def _public(value):
     return value
 
 
-class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
+class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries, TaskUsageHistory):
     def __init__(self, dsn: str, expected_database: str, expected_system_identifier: str | None = None):
         self.dsn = dsn
         self.expected_database = _text(expected_database, 'expected_database', 63)
@@ -1005,6 +1008,8 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
             self._require_no_effect_exposure(connection, project_id, task['task_id'])
         elif task['status'] != 'proposed' or self._has_started_history(connection, project_id, task['task_id']):
             raise DomainError('workflow_conflict', 'Structural changes require a proposed task with no execution history', 409)
+        else:
+            self._require_no_effect_exposure(connection, project_id, task['task_id'])
 
     def _require_current_dependencies(self, connection, project_id, task):
         """The caller holds the graph lock throughout evaluation and publication."""
@@ -1090,7 +1095,7 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
                                                {'task_id': snapshot['task_id'], 'revision': snapshot['revision'],
                                                 'trigger_check': True}, mutation)
                 except DomainError as error:
-                    if error.code not in {'claim_conflict', 'capacity_conflict', 'effect_conflict'}:
+                    if error.code not in {'claim_conflict', 'capacity_conflict', 'effect_conflict', 'usage_conflict'}:
                         raise
                     # Existing ownership remains visible. The next sweep can retry.
                     continue
@@ -1375,6 +1380,13 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
             'SELECT 1 FROM task_effects WHERE project_id = %s AND task_id = %s '
             'AND exposure_held LIMIT 1', (project_id, task_id)).fetchone():
             raise DomainError('effect_conflict', 'Task has unresolved effect exposure', 409)
+        if connection.execute(
+            "SELECT 1 FROM task_usage_events u WHERE u.project_id = %s AND u.task_id = %s "
+            "AND u.event_kind = 'uncertain' AND NOT EXISTS ("
+            "SELECT 1 FROM task_usage_events r WHERE r.resolves_event_id = u.event_id) LIMIT 1",
+            (project_id, task_id),
+        ).fetchone():
+            raise DomainError('usage_conflict', 'Task has unresolved usage exposure', 409)
 
     def create_effect_intent(self, principal, project_id, task_id, body, expected_revision, idempotency_key, *, claim_fence=None):
         """Persist intent only. Caller-supplied references never grant launch authority."""
