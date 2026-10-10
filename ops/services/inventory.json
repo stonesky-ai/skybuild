@@ -1,0 +1,65 @@
+{
+  "schema": "skybuild.services.v1",
+  "services": [
+    {
+      "host": "jeltz",
+      "name": "skybuild-pilot-pg",
+      "kind": "container",
+      "id": "072a77f1cc5e35a07296ab60fe9c9962ee358285f5dad7bbcc8dff966c0a0fcf",
+      "image": "sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54",
+      "project": "skybuild-pilot",
+      "service": "db",
+      "memory_max_bytes": 805306368
+    },
+    {
+      "host": "jeltz",
+      "name": "skybuild-pilot-api",
+      "kind": "container",
+      "id": "d2804b7230eb55723a7f53099dbf22bf2b02e97df88fd184a35ae788b5177a54",
+      "image": "sha256:77bc01222c9c018d44968198e26d0be4618825b35ba07bb8c993002bce4f51c5",
+      "project": "skybuild-pilot",
+      "service": "api",
+      "memory_max_bytes": 536870912,
+      "readiness_url": "https://jeltz.tail991ac1.ts.net:8443/health/ready",
+      "ca_file": "/home/kevin/my_code/skybuild-pilot-state/tls/ca.crt"
+    },
+    {
+      "host": "jeltz",
+      "name": "skybuild-workbench",
+      "kind": "container",
+      "id": "988b4c4ddda1addb353b5257b6ac35cb3a3035eb99de432fb5a24b05735dd2f5",
+      "image": "sha256:5d18fb39c8ec5fc6e58dfc4a95f61dcb03ad4e16fda79ae5d16c28f32579a81e",
+      "project": "skybuild-pilot",
+      "service": "workbench",
+      "memory_max_bytes": 268435456
+    },
+    {
+      "host": "wonko",
+      "kind": "unit",
+      "name": "skybuild-host-watch-gate-6a3b123.service",
+      "fragment": "/run/user/1000/systemd/transient/skybuild-host-watch-gate-6a3b123.service"
+    },
+    {
+      "host": "wonko",
+      "kind": "capability",
+      "name": "skybuild-managed-runtime",
+      "checkout": "/home/kevin/my_code/skybuild-managed-runtime-20261010",
+      "head": "1ce0afa7959acffb7e1a5663c3605f455e7b63c5",
+      "required_files": [
+        "scripts/managed_session.py",
+        "scripts/managed_session_cleanup.py"
+      ]
+    },
+    {
+      "host": "wowbagger",
+      "kind": "capability",
+      "name": "skybuild-managed-runtime",
+      "checkout": "/home/kevin/my_code/skybuild-managed-runtime-20261010",
+      "head": "1ce0afa7959acffb7e1a5663c3605f455e7b63c5",
+      "required_files": [
+        "scripts/managed_session.py",
+        "scripts/managed_session_cleanup.py"
+      ]
+    }
+  ]
+}
