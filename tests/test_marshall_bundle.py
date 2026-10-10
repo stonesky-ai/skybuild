@@ -215,3 +215,25 @@ def test_gate_requires_durable_artifact_for_exact_candidate(catalog):
         return result
     with pytest.raises(BundlePlanningError, match="artifact"):
         invoke(inputs, gate_next=True, gate_runner=gate)
+
+
+@pytest.mark.parametrize("valid", [True, False])
+def test_petri_selection_requires_current_validation(catalog, valid):
+    from test_integration_workflow import task
+    inputs = catalog(["one"])
+    values = json.loads(inputs[1].read_text())
+    snapshot = task()
+    snapshot.update(project_id="skybuild", task_id="one")
+    token = snapshot["metadata"]["_skybuild_workflow"]["petri"]["token"]
+    for value in [token, *token["evidence"]]:
+        value.update(project_id="skybuild", task_id="one", source_head=values["members"][0]["head_sha"],
+                     target_base=values["base_sha"])
+    if not valid:
+        token["evidence"] = []
+    inputs[3].tasks["one"] = snapshot
+    report = invoke(inputs)
+    assert bool(report["bundles"]) is valid
+    assert bool(report["skipped"]) is not valid
+    assert report["published"] is False
+    assert report["prepared"] is None
+    assert inputs[3].tasks["one"]["revision"] == 1

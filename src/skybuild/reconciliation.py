@@ -47,7 +47,8 @@ def synchronize_token(before, values, *, operation, reason):
         changes.update(evidence=tuple(replace(item, state=ResultState.STALE) for item in token.evidence))
         if operation == "updated":
             changes["definition_revision"] = before["revision"] + 1
-    if place in {Place.HOLD, Place.DEFERRED} and not superseded:
+    if (place in {Place.HOLD, Place.DEFERRED} and not superseded
+            and operation not in {"defer", "update_control"}):
         # A definition or dependency edit cannot silently release owner control.
         values.update(status=STATUS_BY_PLACE[place], phase=place.value,
                       blocker=token.hold_reason or before["blocker"], next_action=before["next_action"])

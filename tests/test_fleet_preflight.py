@@ -60,6 +60,16 @@ def test_private_ready_project_scoped_worker_can_read_inbox(token_file):
     assert TOKEN not in json.dumps(result)
 
 
+def test_petri_worker_profile_requires_explicit_selection_and_exact_grants(token_file):
+    grants = {"skybuild": ["tasks:read", "tasks:claim", "tasks:write", "cord:read", "cord:send", "cord:handle"]}
+    with pytest.raises(PreflightError):
+        checked_probe(URL, "skybuild", token_file, "wonko-worker", transport=transport_for(identity(grants=grants)))
+    assert checked_probe(URL, "skybuild", token_file, "wonko-worker", workflow=True,
+                         transport=transport_for(identity(grants=grants)))["ready"] is True
+    with pytest.raises(PreflightError):
+        checked_probe(URL, "skybuild", token_file, "wonko-worker", workflow=True, transport=transport_for(identity()))
+
+
 @pytest.mark.parametrize("overrides", [
     {"principal_id": "another-worker"},
     {"is_admin": True},

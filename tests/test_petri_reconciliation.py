@@ -79,3 +79,11 @@ def test_legacy_task_does_not_get_an_implicit_token():
     values["metadata"]["_skybuild_workflow"].pop("petri")
     synchronize_token(before, values, operation="updated", reason="Edit legacy task")
     assert "petri" not in values["metadata"]["_skybuild_workflow"]
+
+
+def test_explicit_deferral_keeps_new_owner_next_action():
+    before, values = state(Place.DEFERRED)
+    values["next_action"] = "Check the new milestone"
+    synchronize_token(before, values, operation="defer", reason="New owner decision")
+    token = TaskToken.from_dict(values["metadata"]["_skybuild_workflow"]["petri"]["token"])
+    assert token.next_action == "Check the new milestone"
