@@ -899,6 +899,14 @@ def _candidate_mounts(archive_root: Path, fixture_path: Path, probe_path: Path,
     ]
 
 
+def _tmpfs_matches_options(configuration: object, destination: str,
+                           expected: set[str]) -> bool:
+    if not isinstance(configuration, dict):
+        return False
+    value = configuration.get(destination)
+    return isinstance(value, str) and expected == set(value.split(","))
+
+
 def _check_candidate_inspect(row: dict, *, name: str, run_id: str, container_id: str,
                              image_id: str, archive_root: Path, fixture_path: Path,
                              probe_path: Path,
@@ -926,6 +934,7 @@ def _check_candidate_inspect(row: dict, *, name: str, run_id: str, container_id:
     if actual_env != env or sorted(actual_env) != sorted(ENV_ALLOWLIST):
         raise GateError("Candidate environment is not the exact allowlist")
     actual_mounts = []
+    scratch_mount_seen = False
     for mount in row.get("Mounts", []):
         destination = mount.get("Destination")
         if destination == "/candidate":
@@ -933,9 +942,9 @@ def _check_candidate_inspect(row: dict, *, name: str, run_id: str, container_id:
                                   "kind": mount.get("Type"), "source_class": "candidate_archive",
                                   "source": mount.get("Source")})
         elif destination == "/scratch":
-            actual_mounts.append({"target": destination, "mode": "rw" if mount.get("RW") is True else "ro",
-                                  "kind": mount.get("Type"), "source_class": "scratch",
-                                  "source": "tmpfs"})
+            if scratch_mount_seen or mount.get("Type") != "tmpfs" or mount.get("RW") is not True:
+                raise GateError("Candidate scratch tmpfs inspect data is inconsistent")
+            scratch_mount_seen = True
         elif destination == "/runner/entrypoint.py":
             actual_mounts.append({"target": destination, "mode": "ro" if mount.get("RW") is False else "rw",
                                   "kind": mount.get("Type"), "source_class": "trusted_runner_fixture",
@@ -946,6 +955,8 @@ def _check_candidate_inspect(row: dict, *, name: str, run_id: str, container_id:
                                   "source": mount.get("Source")})
         else:
             raise GateError("Candidate has an unapproved mount")
+    actual_mounts.append({"target": "/scratch", "mode": "rw", "kind": "tmpfs",
+                          "source_class": "scratch", "source": "tmpfs"})
     if sorted(actual_mounts, key=lambda row: row["target"]) != sorted(
             _candidate_mounts(archive_root, fixture_path, probe_path, archive_sha256,
                               fixture_sha256, probe_sha256),
@@ -963,12 +974,10 @@ def _check_candidate_inspect(row: dict, *, name: str, run_id: str, container_id:
             or host.get("CapAdd") not in ([], None)
             or "ALL" not in host.get("CapDrop", [])
             or not _has_no_new_privileges(host.get("SecurityOpt"))
-            or host.get("Tmpfs") is None
-            or set(host["Tmpfs"]) != {"/scratch"}
-            or not {"size=2147483648", "uid=10001", "gid=10001", "mode=448"}
-            <= set(host["Tmpfs"]["/scratch"].split(","))
-            or not {"rw", "exec", "nosuid", "nodev"} <= set(host["Tmpfs"]["/scratch"].split(","))
-            or "noexec" in host["Tmpfs"]["/scratch"].split(",")
+            or set(host.get("Tmpfs") or {}) != {"/scratch"}
+            or not _tmpfs_matches_options(host.get("Tmpfs"), "/scratch",
+                                      {"rw", "exec", "nosuid", "nodev", "size=2147483648",
+                                       "uid=10001", "gid=10001", "mode=0700"})
             or host.get("ExtraHosts") != ["db:" + postgres_ip]):
         raise GateError("Candidate container lacks reviewed isolation/resource settings")
     networks = (row.get("NetworkSettings", {}).get("Networks") or {})
@@ -1052,11 +1061,15 @@ def _check_postgres_inspect(row: dict, *, name: str, run_id: str, container_id: 
             or (mounts and (len(mounts) != 3 or actual_tmpfs != expected_tmpfs
                             or any(mount.get("Type") != "tmpfs" or mount.get("RW") is not True
                                    for mount in mounts)))
-            or "/var/lib/postgresql/data" not in tmpfs
-            or "size=1073741824" not in tmpfs["/var/lib/postgresql/data"]
-            or "/var/run/postgresql" not in tmpfs
-            or "size=16777216" not in tmpfs["/var/run/postgresql"]
-            or "/tmp" not in tmpfs or "size=134217728" not in tmpfs["/tmp"]):
+            or not _tmpfs_matches_options(tmpfs, "/var/lib/postgresql/data",
+                                      {"rw", "nosuid", "nodev", "noexec", "size=1073741824",
+                                       "uid=999", "gid=999", "mode=0700"})
+            or not _tmpfs_matches_options(tmpfs, "/var/run/postgresql",
+                                      {"rw", "nosuid", "nodev", "noexec", "size=16777216",
+                                       "uid=999", "gid=999", "mode=3775"})
+            or not _tmpfs_matches_options(tmpfs, "/tmp",
+                                      {"rw", "nosuid", "nodev", "noexec", "size=134217728",
+                                       "uid=999", "gid=999", "mode=1777"})):
         raise GateError("Disposable PostgreSQL resource/network/mount limits differ from plan")
 
 
@@ -1072,12 +1085,15 @@ def _check_firewall_inspect(row: dict, *, name: str, run_id: str, container_id: 
     if (host.get("NetworkMode") != "container:" + namespace_id
             or host.get("CapAdd") != ["NET_ADMIN"] or "ALL" not in host.get("CapDrop", [])
             or host.get("Privileged") is not False or host.get("ReadonlyRootfs") is not True
-            or host.get("Tmpfs") != {"/run": "rw,nosuid,nodev,size=1048576,mode=493"}
+            or not _tmpfs_matches_options(host.get("Tmpfs"), "/run",
+                                      {"rw", "nosuid", "nodev", "size=1048576", "mode=0755"})
+            or set(host.get("Tmpfs") or {}) != {"/run"}
             or host.get("Memory") != 128 * 1024**2 or host.get("MemorySwap") != 128 * 1024**2
             or host.get("NanoCpus") != 250_000_000 or host.get("PidsLimit") != 32
-            or host.get("PortBindings") not in ({}, None) or len(mounts) != 1
-            or mounts[0].get("Type") != "tmpfs" or mounts[0].get("Destination") != "/run"
-            or mounts[0].get("RW") is not True
+            or host.get("PortBindings") not in ({}, None)
+            or not _has_no_new_privileges(host.get("SecurityOpt"))
+            or (mounts and (len(mounts) != 1 or mounts[0].get("Type") != "tmpfs"
+                            or mounts[0].get("Destination") != "/run" or mounts[0].get("RW") is not True))
             or log_config.get("Type") != "local"
             or log_config.get("Config") != {"max-size": "4m", "max-file": "2"}
             or row.get("Config", {}).get("Cmd") != [
@@ -1113,6 +1129,7 @@ def _check_probe_inspect(row: dict, *, name: str, run_id: str, container_id: str
     if (host.get("NetworkMode") != "container:" + candidate_id
             or host.get("CapAdd") not in ([], None) or "ALL" not in host.get("CapDrop", [])
             or host.get("Privileged") is not False or host.get("ReadonlyRootfs") is not True
+            or not _has_no_new_privileges(host.get("SecurityOpt"))
             or host.get("Memory") != 128 * 1024**2 or host.get("MemorySwap") != 128 * 1024**2
             or host.get("NanoCpus") != 250_000_000 or host.get("PidsLimit") != 32
             or host.get("PortBindings") not in ({}, None) or actual != expected
