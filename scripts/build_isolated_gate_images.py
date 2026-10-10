@@ -29,7 +29,7 @@ FIREWALL_ALIASES = {
     "iptables": "iptables-nft", "ip6tables": "ip6tables-nft",
     "iptables-save": "iptables-nft-save", "ip6tables-save": "ip6tables-nft-save",
 }
-FIREWALL_PLUGINS = ("libxt_conntrack.so", "libxt_tcp.so")
+FIREWALL_PLUGINS = ("libxt_conntrack.so", "libxt_standard.so", "libxt_tcp.so")
 BASE_GLIBC_LIBRARIES = frozenset({
     "libc.so.6", "libm.so.6", "libpthread.so.0", "libdl.so.2", "librt.so.1",
     "libresolv.so.2", "ld-linux-x86-64.so.2",
@@ -106,7 +106,7 @@ def _needed_libraries(binary: Path) -> dict[Path, set[str]]:
 
 
 def stage_firewall_payload(root: Path) -> dict:
-    """Stage only nftables iptables, its conntrack matcher and non-glibc libraries."""
+    """Stage nftables iptables, required match/target plugins, and runtime libraries."""
     if platform.machine() != "x86_64":
         raise BuildError("the pinned local firewall payload is reviewed only for x86_64")
     root.mkdir(mode=0o700, parents=True, exist_ok=False)
