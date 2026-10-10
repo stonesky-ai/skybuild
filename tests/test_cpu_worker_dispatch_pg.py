@@ -43,11 +43,12 @@ def _headers(token):
     return {"Authorization": "Bearer " + token}
 
 
-def _make_reservation(runtime, people, project, task_id="cpu-dispatch-task"):
+def _make_reservation(runtime, people, project, task_id="cpu-dispatch-task", *, lease_seconds=60):
     task = ready(runtime, people, project, task_id)
     initialized = runtime.initialize_workflow(
         people["owner"], project, task_id, task["revision"], "initialize-" + task_id)["task"]
-    claim = runtime.claim_task(people["worker"], project, task_id, initialized["revision"], "claim-" + task_id)
+    claim = runtime.claim_task(people["worker"], project, task_id, initialized["revision"],
+                               "claim-" + task_id, lease_seconds=lease_seconds)
     working = runtime.get_task(people["owner"], project, task_id)
     token = Store.workflow_token(working)
     with runtime._connection() as connection:
@@ -123,7 +124,7 @@ def test_migration_014_digest_and_append_only_dispatch_guards(cpu_dispatch):
     admin, runtime, client, project, people, tokens = cpu_dispatch
     with admin._connection() as connection:
         applied = connection.execute("SELECT digest FROM schema_migrations WHERE version = 14").fetchone()
-    assert applied["digest"] == "3e23398a3e4aac182549301c41819e64894dc12e7fcf9c9aaba9ba63620f0ab4"
+    assert applied["digest"] == "498059578f825d951f0c2d2cd4e3ed6ef56ecfc03dd34fb9656dffb91e5f09fe"
 
     request, _, _ = _make_reservation(runtime, people, project)
     pins = _pins(request["action_id"], "operation-" + uuid4().hex)
@@ -207,7 +208,7 @@ def test_begin_fails_closed_without_shared_usage_guard(monkeypatch):
 
     original_import = builtins.__import__
     def deny_usage_import(name, *args, **kwargs):
-        if name == "skybuild.task_usage":
+        if name in {"skybuild.task_usage", "task_usage"}:
             raise ModuleNotFoundError(name)
         return original_import(name, *args, **kwargs)
 
@@ -238,10 +239,9 @@ def test_late_unresolved_usage_blocks_one_shot_launch(cpu_dispatch, monkeypatch)
 
 def test_prepare_requires_live_exact_claim_fence_and_rolls_back(cpu_dispatch):
     admin, runtime, client, project, people, tokens = cpu_dispatch
-    request, _, _ = _make_reservation(runtime, people, project)
+    request, _, _ = _make_reservation(runtime, people, project, lease_seconds=1)
     with runtime._connection() as connection:
-        connection.execute("UPDATE task_claims SET lease_until = clock_timestamp() - interval '1 second' "
-                           "WHERE project_id = %s AND task_id = %s", (project, request["task_id"]))
+        connection.execute("SELECT pg_sleep(1.1)")
     pins = _pins(request["action_id"], "operation-" + uuid4().hex)
     response = _prepare(client, project, tokens["owner"], pins)
     assert response.status_code == 409 and response.json()["error"]["code"] == "claim_conflict"
@@ -260,7 +260,8 @@ def test_concurrent_competing_prepare_has_one_dispatch_and_one_effect(cpu_dispat
         barrier.wait()
         try:
             return CPUWorkerDispatch(runtime).prepare(people["owner"], project, pins["action_id"], pins["operation_id"],
-                **{key: value for key, value in pins.items() if key not in {"action_id", "operation_id"}})
+                **{key: datetime.fromisoformat(value) if key == "approved_until" else value
+                   for key, value in pins.items() if key not in {"action_id", "operation_id"}})
         except DomainError as error:
             return error
 
