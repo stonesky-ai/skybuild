@@ -191,8 +191,25 @@ def _claim_assignment(client, project, assignment, task, destination, worker):
 
 
 
+def result_message(assignment: dict, result: dict, *, relay_worker: str | None = None) -> tuple[dict, str]:
+    """Build the exact Cord body and idempotency key used for result delivery."""
+    body = json.dumps(result, sort_keys=True, ensure_ascii=False)
+    if len(body.encode("utf-8")) > 32768:
+        raise ManualCordError("Result exceeds Cord message limit")
+    subject = "Manual work result"
+    if relay_worker is not None:
+        if not isinstance(relay_worker, str) or not relay_worker:
+            raise ManualCordError("Trusted relay needs the original worker identity")
+        subject += " (trusted owner relay for " + relay_worker + ")"
+    message = {"recipient": assignment["dispatcher"], "subject": subject,
+               "body": body, "category": "manual-work"}
+    key = "manual-result-" + hashlib.sha256((assignment["assignment_id"] + body).encode()).hexdigest()
+    return message, key
+
+
 def send_result(client: Client, project: str, checkout: Path, worktree: Path, *, worker: str,
-                assignment: dict, result: dict, workflow_state: Path | None = None) -> dict:
+                assignment: dict, result: dict, workflow_state: Path | None = None,
+                relay_worker: str | None = None) -> dict:
     """Send a result tied to a clean owned branch and exact local Git head."""
     snapshot = verify_assignment(assignment, checkout, worker=worker)
     required = {"schema", "assignment_id", "phase", "branch", "head_sha", "checks",
@@ -228,12 +245,7 @@ def send_result(client: Client, project: str, checkout: Path, worktree: Path, *,
             not any(path == owned or path.startswith(owned + "/") for owned in snapshot["owned_paths"])
             for path in paths):
         raise ManualCordError("Result changed paths differ from assigned scope")
-    body = json.dumps(result, sort_keys=True, ensure_ascii=False)
-    if len(body.encode("utf-8")) > 32768:
-        raise ManualCordError("Result exceeds Cord message limit")
-    message = {"recipient": assignment["dispatcher"], "subject": "Manual work result",
-               "body": body, "category": "manual-work"}
-    key = "manual-result-" + hashlib.sha256((snapshot["assignment_id"] + body).encode()).hexdigest()
+    message, key = result_message(assignment, result, relay_worker=relay_worker)
     if workflow_state is not None:
         _submit_result(client, project, assignment, result, worker, workflow_state, key)
     elif _petri_token(client.get_task(project, assignment["task_id"])) is not None:

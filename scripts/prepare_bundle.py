@@ -14,6 +14,7 @@ import subprocess
 from _repo_guard import RepoGuardError, verify_skybuild
 from disposable_pg_gate import available_memory_bytes
 from _worktree_capacity import MAX_WORKTREES, WorktreeCapacityError, reserve_worktree_slots
+from skybuild.contracts import valid_identifier
 
 
 class PreparationError(RuntimeError):
@@ -93,6 +94,22 @@ def frozen_inputs(root: Path, manifest: Path) -> dict:
             raise PreparationError("Duplicate member/target ref")
         item.update(task_id=task_id, reviewer=review["reviewer"],
                     review=_evidence(review["evidence"], manifest.parent, item["sha"]))
+        workflow = member.get("workflow")
+        if workflow is not None:
+            fields = {"project_id", "attempt_id", "claim_fence", "input_generation",
+                      "definition_revision", "policy_version", "target_base"}
+            if not isinstance(workflow, dict) or set(workflow) != fields:
+                raise PreparationError("Workflow binding has missing or unknown fields")
+            if (not valid_identifier(workflow["project_id"])
+                    or not valid_identifier(workflow["attempt_id"])
+                    or not valid_identifier(workflow["policy_version"])
+                    or any(type(workflow[key]) is not int or workflow[key] <= 0
+                           for key in ("claim_fence", "input_generation", "definition_revision"))
+                    or not isinstance(workflow["target_base"], str)
+                    or not re.fullmatch(r"[0-9a-f]{40}", workflow["target_base"])
+                    or workflow["target_base"] != result["target"]["sha"]):
+                raise PreparationError("Workflow binding must match the frozen bundle base")
+            item["workflow"] = dict(workflow)
         result["members"].append(item)
         seen_tasks.add(task_id)
         seen_refs.add(item["ref"])

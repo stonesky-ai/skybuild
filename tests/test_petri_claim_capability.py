@@ -1,5 +1,6 @@
 """Claim capability uses the real ownership guards without allocating work."""
 from uuid import uuid4
+import re
 
 import pytest
 from fastapi.testclient import TestClient
@@ -35,6 +36,12 @@ class PreviewConnection:
         return self.row
 
 
+def assert_read_only(statements):
+    for query in statements:
+        assert query.startswith(('SELECT', 'WITH RECURSIVE'))
+        assert not re.search(r'\b(INSERT|UPDATE|DELETE|MERGE|TRUNCATE|CREATE|ALTER|DROP)\b', query, re.I)
+
+
 def preview_inputs():
     token = TaskToken('project', 'task', Place.READY)
     task = token_task(token)
@@ -52,7 +59,7 @@ def test_preview_enables_claim_without_allocating_attempt_or_ownership():
     preview = Store('unused', 'unused')._claim_preview_context(connection, principal, task, context)
     assert 'claim' in TaskWorkflow().enabled(Store.workflow_token(task), preview)
     assert 'attempt_id' not in context and 'admission_permitted' not in context
-    assert all(query.startswith('SELECT') for query in connection.statements)
+    assert_read_only(connection.statements)
     assert task['metadata']['_skybuild_workflow']['petri']['token']['attempt_id'] is None
 
 
@@ -81,7 +88,7 @@ def test_preview_rejects_each_real_claim_blocker(case):
     connection = PreviewConnection(**options)
     preview = Store('unused', 'unused')._claim_preview_context(connection, principal, task, context)
     assert 'claim' not in TaskWorkflow().enabled(Store.workflow_token(task), preview)
-    assert all(query.startswith('SELECT') for query in connection.statements)
+    assert_read_only(connection.statements)
 
 
 def test_actual_store_and_api_offer_claim_only_to_eligible_principal(store, actors):

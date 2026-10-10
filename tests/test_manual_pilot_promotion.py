@@ -19,7 +19,7 @@ import manual_pilot_tls as tls  # noqa: E402
 assert Path(skybuild.__file__).resolve().parents[2] == Path(__file__).resolve().parents[1]
 
 
-@pytest.fixture(params=["011-to-012", "012-to-013"])
+@pytest.fixture(params=["011-to-012", "012-to-013", "013-to-016"])
 def promotion(tmp_path, monkeypatch, request):
     state = tmp_path / 'private-state'
     provisioner.init_secrets(state)
@@ -29,12 +29,12 @@ def promotion(tmp_path, monkeypatch, request):
     provisioner._write_new(state / 'runtime.env', env, 0o600)
     (state / 'tls').mkdir(mode=0o700)
     (state / 'tls/ca.crt').write_bytes(b'retained fixture CA')
-    current_version, candidate_version, migration = controller.SCHEMA_TRANSITIONS[request.param]
+    current_version, candidate_version, migrations = controller.SCHEMA_TRANSITIONS[request.param]
     current = {f'migrations/{i:03}_migration.sql': hashlib.sha256(str(i).encode()).hexdigest()
                for i in range(1, current_version + 1)}
     current.update({f'static/workbench.{suffix}': hashlib.sha256(suffix.encode()).hexdigest()
                     for suffix in ('css', 'html', 'js')})
-    candidate = dict(current, **{migration: 'f' * 64})
+    candidate = dict(current, **{migration: 'f' * 64 for migration in migrations})
     api_id, db_id, image = '1' * 64, '2' * 64, 'sha256:' + '3' * 64
     ip, hostname = '100.100.1.2', 'controller.tail.ts.net'
     ports = {'8000/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '8000'}, {'HostIp': ip, 'HostPort': '8443'}]}
@@ -175,11 +175,12 @@ def test_promotion_resource_and_identity_guards(promotion, monkeypatch, boundary
 ])
 def test_promotion_rejects_unreviewed_schema_or_publication(promotion, boundary):
     arguments, data = promotion
-    migration = controller.SCHEMA_TRANSITIONS[arguments['schema_transition']][2]
+    migrations = controller.SCHEMA_TRANSITIONS[arguments['schema_transition']][2]
     prefix = f"migrations/{data['current_version']:03}_migration.sql"
     if boundary == 'last-prefix-digest': data['candidate'][prefix] = 'changed'
-    elif boundary == 'missing-next': del data['candidate'][migration]
+    elif boundary == 'missing-next': del data['candidate'][migrations[0]]
     elif boundary == 'wrong-next-name':
+        migration = migrations[0]
         data['candidate'][migration.replace('.sql', '_other.sql')] = data['candidate'].pop(migration)
     elif boundary == 'noncontiguous-prefix':
         del data['current'][prefix]
@@ -240,6 +241,7 @@ def test_installed_probe_includes_assets_and_unexpected_files(promotion, tmp_pat
     assert inspect()['static/workbench.js'] != first['static/workbench.js']
     asset.unlink()
     (package / 'unexpected.txt').write_text('foreign')
+    (package / '__pycache__').mkdir(exist_ok=True)
     (package / '__pycache__/unexpected.txt').write_text('foreign cache-directory file')
     final = inspect()
     assert 'static/workbench.js' not in final and 'unexpected.txt' in final
@@ -343,16 +345,18 @@ def test_schema_010_role_audit_and_atomic_candidate_requalification(monkeypatch)
                 connection.execute(path.read_text())
                 connection.execute('INSERT INTO schema_migrations VALUES (%s, %s)',
                                    (int(path.name.split('_', 1)[0]), hashlib.sha256(path.read_bytes()).hexdigest()))
-        # The schema010 policy differs only by its two absent simulator tables.
-        fake_tables = {'cpu_fake_dispatches', 'cpu_fake_receipts'}
+        # Model only tables that existed in schema 010.
+        absent_tables = {'cpu_fake_dispatches', 'cpu_fake_receipts', 'cpu_worker_dispatches',
+                         'cpu_worker_observations', 'task_usage_events'}
         with monkeypatch.context() as patch:
-            patch.setattr(runtime_role, 'TABLES', runtime_role.TABLES - fake_tables)
-            patch.setattr(runtime_role, 'MUTABLE', runtime_role.MUTABLE - fake_tables)
+            patch.setattr(runtime_role, 'TABLES', runtime_role.TABLES - absent_tables)
+            patch.setattr(runtime_role, 'MUTABLE', runtime_role.MUTABLE - absent_tables)
+            patch.setattr(runtime_role, 'APPEND_ONLY', runtime_role.APPEND_ONLY - absent_tables)
             with psycopg.connect(dsn) as connection:
                 assert runtime_role.provision_runtime_role(connection, target, role)['ok'] is True
         with psycopg.connect(dsn) as connection:
             assert runtime_role.audit_runtime_role(connection, target, role)['findings'] == [
-                'missing table: cpu_fake_dispatches', 'missing table: cpu_fake_receipts']
+                'missing table: ' + name for name in sorted(absent_tables)]
 
         def upgrade(connection):
             connection.execute('SET LOCAL search_path TO skybuild, pg_catalog')
@@ -455,7 +459,7 @@ def test_schema_010_role_audit_and_atomic_candidate_requalification(monkeypatch)
             assert connection.execute('SELECT max(version) FROM skybuild.schema_migrations').fetchone()[0] == 10
             assert connection.execute("SELECT to_regclass('skybuild.cpu_fake_dispatches')").fetchone()[0] is None
             assert runtime_role.audit_runtime_role(connection, target, role)['findings'] == [
-                'missing table: cpu_fake_dispatches', 'missing table: cpu_fake_receipts']
+                'missing table: ' + name for name in sorted(absent_tables)]
         with psycopg.connect(dsn) as connection:
             upgrade(connection)
         assert store.readiness() == {'ready': True, 'schema_version': candidate_version}

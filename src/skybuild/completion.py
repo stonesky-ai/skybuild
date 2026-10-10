@@ -32,7 +32,7 @@ def generation(task):
     return value
 
 
-def completion_change(task, body, actor):
+def completion_change(task, body, actor, *, kind='owner_attestation'):
     """Validate a trusted owner's statement; never claim an external verification."""
     _object(body, ("reason", "generation", "source_head", "author", "policy_ref", "acceptance", "checks", "review", "publication"))
     for field in ("reason", "author", "policy_ref"):
@@ -83,7 +83,9 @@ def completion_change(task, body, actor):
     if publication["source_head"] != head or publication["result"] != "confirmed":
         raise DomainError("workflow_conflict", "Publication must confirm exact task inclusion", 409)
     petri_inputs = _publication_token_binding(task, body)
-    evidence = {"schema_version": 1, "kind": "owner_attestation", "actor": actor,
+    if kind not in {'owner_attestation', 'trusted_publisher'}:
+        raise DomainError('validation', 'Unsupported completion authority', 422)
+    evidence = {"schema_version": 1, "kind": kind, "actor": actor,
                 "input_revision": task["revision"], "definition": definition(task), **deepcopy(body)}
     if petri_inputs is not None:
         evidence["petri_inputs"] = petri_inputs
@@ -235,7 +237,7 @@ def current_completion(task):
     try:
         return (task["status"] == "done" and isinstance(evidence, dict)
                 and evidence.get("schema_version") == 1
-                and (evidence.get("kind") == "owner_attestation"
+                and (evidence.get("kind") in {"owner_attestation", "trusted_publisher"}
                      and (not _has_petri(task) or _publication_token_binding(task, evidence, current=True) is not None)
                      or evidence.get("kind") == "without_publication" and _current_without_publication(task, evidence))
                 and evidence.get("definition") == definition(task)

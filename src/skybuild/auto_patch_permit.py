@@ -135,9 +135,10 @@ def load(path: Path, expected_sha256: str, *, checkout: Path, selected: list[dic
         raise PermitError("Approved permit bytes changed")
     permit = json.loads(raw)
     fields = {"schema", "project_id", "profile", "source_head", "base_ref", "host_id", "slots",
-              "approved_until", "weekly_usage_sha256", "hostwatch_reserve_bytes",
+              "approved_until", "hostwatch_reserve_bytes",
               "memory_high_bytes", "memory_max_bytes", "runtime_seconds", "workers"}
-    if not isinstance(permit, dict) or set(permit) != fields:
+    if (not isinstance(permit, dict)
+            or set(permit) not in (fields | {"usage"}, fields | {"weekly_usage_sha256"})):
         raise PermitError("Approved permit contract is invalid")
     if (permit["schema"] != "skybuild.auto-cpu-patch-permit.v1"
             or permit["profile"] != "bounded-trusted-cpu-patch-v1"
@@ -170,19 +171,47 @@ def load(path: Path, expected_sha256: str, *, checkout: Path, selected: list[dic
 
 def check_weekly_usage(usage: Path, permit: dict) -> dict:
     """Recheck the exact approved observation before each external effect."""
+    pin = permit.get("usage")
+    revised = False
+    if pin is not None:
+        if (not isinstance(pin, dict)
+                or set(pin) not in ({"path", "sha256", "valid_until"},
+                                    {"path", "sha256", "valid_until", "owner_policy"})
+                or pin.get("path") != str(usage)):
+            raise PermitError("Weekly usage pin is invalid or names another path")
+        revised = "owner_policy" in pin
+        if revised:
+            owner_pin = pin["owner_policy"]
+            if (not isinstance(owner_pin, dict) or set(owner_pin) != {"path", "sha256"}
+                    or not isinstance(owner_pin["path"], str)):
+                raise PermitError("Owner policy pin is invalid")
+            owner_raw = _private_bytes(Path(owner_pin["path"]), 16384)
+            owner = json.loads(owner_raw)
+            if (hashlib.sha256(owner_raw).hexdigest() != owner_pin["sha256"]
+                    or not isinstance(owner, dict)
+                    or owner.get("schema") != "skybuild.usage-policy-owner-revision.v1"
+                    or owner.get("production_allowed") is not True
+                    or "weekly_production_stop_percent" not in owner
+                    or owner["weekly_production_stop_percent"] is not None):
+                raise PermitError("Pinned owner revision does not remove the weekly cutoff")
     usage_raw = _private_bytes(usage, 16384)
-    if hashlib.sha256(usage_raw).hexdigest() != permit["weekly_usage_sha256"]:
+    expected = pin["sha256"] if pin is not None else permit.get("weekly_usage_sha256")
+    if hashlib.sha256(usage_raw).hexdigest() != expected:
         raise PermitError("Weekly usage observation differs from approved bytes")
     observation = json.loads(usage_raw)
     now = datetime.now(timezone.utc)
-    if (not isinstance(observation, dict) or observation.get("production_must_drain") is not False
-            or observation.get("stop_production_percent") != 50
+    if (not isinstance(observation, dict)
             or type(observation.get("weekly_used_percent")) not in (int, float)
-            or not 0 <= observation["weekly_used_percent"] < 50
+            or not 0 <= observation["weekly_used_percent"] <= 100
+            or (pin is not None and observation.get("valid_until") != pin["valid_until"])
             or _when(observation.get("confirmed_at")) > now
             or _when(observation.get("valid_until")) <= now
             or _when(permit["approved_until"]) > _when(observation["valid_until"])):
-        raise PermitError("Weekly usage is stale or at the stop threshold")
+        raise PermitError("Weekly usage is stale or invalid")
+    if not revised and (observation.get("production_must_drain") is not False
+                        or observation.get("stop_production_percent") != 50
+                        or not observation["weekly_used_percent"] < 50):
+        raise PermitError("Legacy weekly usage requires production to drain")
     return observation
 
 

@@ -1,6 +1,8 @@
-"""Exact 012-to-013 rehearsal; never connects to an accepted runtime."""
+"""Exact 012-to-current rehearsal; never connects to an accepted runtime."""
 
 import hashlib
+from contextlib import contextmanager
+from unittest.mock import patch
 import os
 from pathlib import Path
 from uuid import uuid4
@@ -13,8 +15,19 @@ from psycopg.types.json import Jsonb
 import pytest
 
 from skybuild.api import create_app
+import skybuild.runtime_role as runtime_role
 from skybuild.runtime_role import audit_runtime_role, provision_runtime_role
 from skybuild.store import Store
+
+
+@contextmanager
+def schema_012_role_policy():
+    # Model only tables that existed before migrations 014 and 016.
+    absent = {"cpu_worker_dispatches", "cpu_worker_observations", "task_usage_events"}
+    with patch.multiple(runtime_role, TABLES=runtime_role.TABLES - absent,
+                        MUTABLE=runtime_role.MUTABLE - absent,
+                        APPEND_ONLY=runtime_role.APPEND_ONLY - absent):
+        yield
 
 
 @pytest.fixture
@@ -47,7 +60,8 @@ def schema_012_database():
             for path, (version, digest) in zip(prefix, expected, strict=True):
                 connection.execute(path.read_text())
                 connection.execute("INSERT INTO schema_migrations VALUES (%s, %s)", (version, digest))
-            assert provision_runtime_role(connection, database, role)["ok"]
+            with schema_012_role_policy():
+                assert provision_runtime_role(connection, database, role)["ok"]
         yield admin, runtime, database, role, expected
     finally:
         with psycopg.connect(base, autocommit=True) as connection:
@@ -114,8 +128,10 @@ def test_schema_012_atomic_upgrade_preserves_history_and_recovers(schema_012_dat
                 "SELECT to_jsonb(j) - 'event_facts' FROM skybuild.task_journal j ORDER BY event_id",
                 "SELECT to_jsonb(m) FROM skybuild.messages m ORDER BY message_id"))
 
-    migration = Path(__file__).parents[1] / "src/skybuild/migrations/013_petri_workflow.sql"
-    digest = hashlib.sha256(migration.read_bytes()).hexdigest()
+    migrations = sorted((Path(__file__).parents[1] / "src/skybuild/migrations").glob("*.sql"))
+    expansions = [path for path in migrations if int(path.name.split("_", 1)[0]) > 12]
+    assert [int(path.name.split("_", 1)[0]) for path in expansions] == [13, 14, 15, 16]
+    digest = hashlib.sha256(expansions[0].read_bytes()).hexdigest()
 
     def upgrade(*, bad_privilege=False):
         with psycopg.connect(admin) as connection:
@@ -127,8 +143,11 @@ def test_schema_012_atomic_upgrade_preserves_history_and_recovers(schema_012_dat
             assert connection.execute("SELECT version, digest FROM schema_migrations ORDER BY version").fetchall() == prefix
             assert connection.execute("SELECT count(*) FROM pg_stat_activity WHERE datname = %s AND usename = %s",
                                       (database, role)).fetchone()[0] == 0
-            connection.execute(migration.read_text())
-            connection.execute("INSERT INTO schema_migrations VALUES (13, %s)", (digest,))
+            for migration in expansions:
+                version = int(migration.name.split("_", 1)[0])
+                connection.execute(migration.read_text())
+                connection.execute("INSERT INTO schema_migrations VALUES (%s, %s)",
+                                   (version, hashlib.sha256(migration.read_bytes()).hexdigest()))
             assert provision_runtime_role(connection, database, role)["ok"]
             if bad_privilege:
                 connection.execute(sql.SQL("GRANT UPDATE ON task_journal TO {}").format(sql.Identifier(role)))
@@ -160,7 +179,7 @@ def test_schema_012_atomic_upgrade_preserves_history_and_recovers(schema_012_dat
         retained = snapshot()
         inbox = client.get(api + "/cord/inbox", headers=headers(worker_token)).json()
         assert len(inbox) == 1
-        with psycopg.connect(admin) as connection:
+        with psycopg.connect(admin) as connection, schema_012_role_policy():
             assert audit_runtime_role(connection, database, role)["ok"]
         assert accepted.readiness() == {"ready": True, "schema_version": 12}
         assert len(digest) == 64
@@ -175,7 +194,8 @@ def test_schema_012_atomic_upgrade_preserves_history_and_recovers(schema_012_dat
             assert connection.execute("SELECT count(*) FROM information_schema.columns WHERE table_schema = 'skybuild' "
                                       "AND ((table_name = 'task_journal' AND column_name = 'event_facts') OR "
                                       "(table_name = 'cpu_reservations' AND column_name = 'claim_task_revision'))").fetchone()[0] == 0
-            assert audit_runtime_role(connection, database, role)["ok"]
+            with schema_012_role_policy():
+                assert audit_runtime_role(connection, database, role)["ok"]
         assert client.get("/health/ready").json() == {"status": "ready"}
         assert client.get(api + "/cord/inbox", headers=headers(worker_token)).json() == inbox
         assert snapshot() == retained
@@ -184,7 +204,7 @@ def test_schema_012_atomic_upgrade_preserves_history_and_recovers(schema_012_dat
     upgrade()
     with pytest.raises(RuntimeError, match="incompatible schema"):
         accepted.readiness()
-    assert registry.readiness() == {"ready": True, "schema_version": 13}
+    assert registry.readiness() == {"ready": True, "schema_version": 16}
     assert snapshot() == retained
     with psycopg.connect(admin) as connection:
         assert audit_runtime_role(connection, database, role)["ok"]

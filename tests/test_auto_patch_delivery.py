@@ -200,7 +200,8 @@ def test_private_git_askpass_uses_token_file_without_embedding_secret(tmp_path):
     assert password == b"example-secret\n"
 
 
-def test_exact_one_shot_permit_requires_valid_usage_and_resource_headroom(tmp_path, monkeypatch):
+@pytest.mark.parametrize("revised", [False, True])
+def test_exact_one_shot_permit_requires_valid_usage_and_resource_headroom(tmp_path, monkeypatch, revised):
     monkeypatch.setattr(permit, "check_source", lambda *_args: None)
     checkout = tmp_path / "checkout"
     checkout.mkdir()
@@ -239,6 +240,17 @@ def test_exact_one_shot_permit_requires_valid_usage_and_resource_headroom(tmp_pa
                                             "brief_sha256", "branch", "base_sha", "revision", "patch_sha256")},
              "envelope_sha256": permit.envelope_sha256(item["envelope"])} for item in selected]}
     approved_file = tmp_path / "permit.json"
+    if revised:
+        weekly.write_text(json.dumps({"production_must_drain": True,
+            "stop_production_percent": 50, "weekly_used_percent": 56,
+            "confirmed_at": now.isoformat(), "valid_until": future}))
+        owner = tmp_path / "owner.json"
+        owner.write_text(json.dumps({"schema": "skybuild.usage-policy-owner-revision.v1",
+            "production_allowed": True, "weekly_production_stop_percent": None}))
+        del approved["weekly_usage_sha256"]
+        approved["usage"] = {"path": str(weekly),
+            "sha256": hashlib.sha256(weekly.read_bytes()).hexdigest(), "valid_until": future,
+            "owner_policy": {"path": str(owner), "sha256": hashlib.sha256(owner.read_bytes()).hexdigest()}}
     approved_file.write_text(json.dumps(approved))
     digest = hashlib.sha256(approved_file.read_bytes()).hexdigest()
     assert permit.load(approved_file, digest, checkout=checkout, selected=selected,
@@ -249,6 +261,8 @@ def test_exact_one_shot_permit_requires_valid_usage_and_resource_headroom(tmp_pa
         permit.load(approved_file, digest, checkout=checkout, selected=selected,
                     project="skybuild", base_ref="refs/heads/dev-006",
                     hostwatch=host, usage=weekly)
+
+
     selected[0]["base_sha"] = head
     selected[0]["brief_sha256"] = "e" * 64
     with pytest.raises(permit.PermitError, match="Selected task"):
@@ -262,3 +276,71 @@ def test_exact_one_shot_permit_requires_valid_usage_and_resource_headroom(tmp_pa
         permit.load(approved_file, digest, checkout=checkout, selected=selected,
                     project="skybuild", base_ref="refs/heads/dev-006",
                     hostwatch=host, usage=weekly)
+
+
+@pytest.fixture
+def revised_usage(tmp_path):
+    now = datetime.now(timezone.utc)
+    future = (now + timedelta(minutes=10)).isoformat()
+    observation = {"production_must_drain": True, "stop_production_percent": 50,
+        "weekly_used_percent": 56, "confirmed_at": now.isoformat(), "valid_until": future}
+    owner = {"schema": "skybuild.usage-policy-owner-revision.v1",
+        "production_allowed": True, "weekly_production_stop_percent": None}
+    usage_path, owner_path = tmp_path / "usage.json", tmp_path / "owner.json"
+    usage_path.write_text(json.dumps(observation))
+    owner_path.write_text(json.dumps(owner))
+    approved = {"approved_until": future, "usage": {"path": str(usage_path),
+        "sha256": hashlib.sha256(usage_path.read_bytes()).hexdigest(), "valid_until": future,
+        "owner_policy": {"path": str(owner_path), "sha256": hashlib.sha256(owner_path.read_bytes()).hexdigest()}}}
+    return usage_path, owner_path, observation, owner, approved
+
+
+@pytest.mark.parametrize("change", ["digest", "schema", "stopped", "threshold", "missing_threshold", "symlink"])
+def test_revised_usage_rechecks_pinned_owner_authority(revised_usage, change):
+    usage_path, owner_path, _, owner, approved = revised_usage
+    assert permit.check_weekly_usage(usage_path, approved)["weekly_used_percent"] == 56
+    if change == "schema":
+        owner["schema"] = "unknown"
+    elif change == "stopped":
+        owner["production_allowed"] = False
+    elif change == "threshold":
+        owner["weekly_production_stop_percent"] = 50
+    elif change == "missing_threshold":
+        del owner["weekly_production_stop_percent"]
+    if change == "symlink":
+        target = owner_path.with_suffix(".target")
+        owner_path.rename(target)
+        owner_path.symlink_to(target)
+    else:
+        owner_path.write_text(json.dumps(owner) + "\n")
+        if change != "digest":
+            approved["usage"]["owner_policy"]["sha256"] = hashlib.sha256(owner_path.read_bytes()).hexdigest()
+    with pytest.raises(permit.PermitError):
+        permit.check_weekly_usage(usage_path, approved)
+
+
+@pytest.mark.parametrize("change", ["expired", "future", "window", "expiry_pin", "digest",
+                                     "path", "boolean", "nan", "over_100", "no_revision"])
+def test_revised_usage_preserves_freshness_and_observation_binding(revised_usage, change):
+    usage_path, _, observation, _, approved = revised_usage
+    now = datetime.now(timezone.utc)
+    if change == "expired":
+        observation["valid_until"] = (now - timedelta(seconds=1)).isoformat()
+        approved["usage"]["valid_until"] = observation["valid_until"]
+    elif change == "future":
+        observation["confirmed_at"] = (now + timedelta(minutes=1)).isoformat()
+    elif change == "window":
+        approved["approved_until"] = (now + timedelta(minutes=11)).isoformat()
+    elif change == "expiry_pin":
+        approved["usage"]["valid_until"] = (now + timedelta(minutes=12)).isoformat()
+    elif change == "path":
+        approved["usage"]["path"] += ".other"
+    elif change in {"boolean", "nan", "over_100"}:
+        observation["weekly_used_percent"] = {"boolean": True, "nan": float("nan"), "over_100": 101}[change]
+    elif change == "no_revision":
+        del approved["usage"]["owner_policy"]
+    usage_path.write_text(json.dumps(observation) + "\n")
+    if change != "digest":
+        approved["usage"]["sha256"] = hashlib.sha256(usage_path.read_bytes()).hexdigest()
+    with pytest.raises(permit.PermitError):
+        permit.check_weekly_usage(usage_path, approved)

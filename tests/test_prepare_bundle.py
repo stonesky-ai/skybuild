@@ -84,6 +84,25 @@ def test_two_heads_included_without_shared_ref_changes_and_rerun(repository):
     assert bundle.prepare(root, manifest, output) == result
 
 
+def test_optional_workflow_binding_is_validated_and_fingerprinted(repository):
+    root, manifest, output, values, member, save = repository
+    member("one")
+    workflow = {"project_id": "skybuild", "attempt_id": "attempt-1",
+                "claim_fence": 2, "input_generation": 3, "definition_revision": 4,
+                "policy_version": "policy-1", "target_base": values["base_sha"]}
+    values["members"][0]["workflow"] = workflow
+    save()
+    prepared = bundle.prepare(root, manifest, output)
+    stored = json.loads((output / "inputs.json").read_text())["inputs"]
+    assert prepared["ok"] is True
+    assert stored["members"][0]["workflow"] == workflow
+
+    values["members"][0]["workflow"] = workflow | {"unexpected": True}
+    save()
+    with pytest.raises(bundle.PreparationError, match="missing or unknown fields"):
+        bundle.prepare(root, manifest, output)
+
+
 @pytest.mark.parametrize("which", ["member", "base"])
 def test_remote_movement_refused_without_replacing_candidate(repository, which):
     root, manifest, output, values, member, _ = repository

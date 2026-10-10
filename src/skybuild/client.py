@@ -143,6 +143,35 @@ class Client:
                             body={"enabled": enabled, "expected_generation": expected_generation, "reason": reason},
                             idempotency_key=idempotency_key)
 
+    def explain_cpu(self, project_id: str, request: dict) -> dict:
+        return self.request("POST", self._path(project_id, "cpu-reservations/explain"), body=request)
+
+    def reserve_cpu(self, project_id: str, request: dict) -> dict:
+        return self.request("POST", self._path(project_id, "cpu-reservations"), body=request)
+
+    def cancel_cpu_reservation(self, project_id: str, action_id: str, *, reason: str) -> dict:
+        return self.request("POST", self._path(project_id, f"cpu-reservations/{action_id}/cancel"),
+                            body={"reason": reason})
+
+    def prepare_cpu_worker_dispatch(self, project_id: str, request: dict) -> dict:
+        return self.request("POST", self._path(project_id, "cpu-worker-dispatches/prepare"), body=request)
+
+    def begin_cpu_worker_dispatch(self, project_id: str, operation_id: str) -> dict:
+        return self.request("POST", self._path(project_id, f"cpu-worker-dispatches/{operation_id}/begin"), body={})
+
+    def get_cpu_worker_dispatch(self, project_id: str, operation_id: str) -> dict:
+        return self.request("GET", self._path(project_id, f"cpu-worker-dispatches/{operation_id}"))
+
+    def record_cpu_worker_invocation(self, project_id: str, operation_id: str, request: dict) -> dict:
+        return self.request("POST", self._path(project_id, f"cpu-worker-dispatches/{operation_id}/invocation"), body=request)
+
+    def observe_cpu_worker_dispatch(self, project_id: str, operation_id: str, request: dict) -> dict:
+        return self.request("POST", self._path(project_id, f"cpu-worker-dispatches/{operation_id}/observations"), body=request)
+
+    def settle_cpu_worker_dispatch(self, project_id: str, operation_id: str, *, observation_id: str) -> dict:
+        return self.request("POST", self._path(project_id, f"cpu-worker-dispatches/{operation_id}/settle"),
+                            body={"observation_id": observation_id})
+
     def create_task(self, project_id: str, body: dict, *, idempotency_key: str | None = None) -> dict:
         return self.request("POST", self._path(project_id, "tasks"), body=body, idempotency_key=idempotency_key)
 
@@ -195,6 +224,15 @@ class Client:
         if event not in {"freeze", "accept", "integration_progress"}:
             raise ValueError("Unsupported manual integration event")
         return self.request("POST", self._path(project_id, f"tasks/{self._segment(task_id)}/manual-integration"),
+                            body={"event": event, "evidence": evidence}, revision=expected_revision,
+                            idempotency_key=idempotency_key)
+
+    def trusted_integration(self, project_id: str, task_id: str, event: str, evidence: dict, *,
+                            expected_revision: int, idempotency_key: str) -> dict:
+        """Submit one signed trusted-host statement to the configured verifier."""
+        if event not in {"freeze", "accept"}:
+            raise ValueError("Unsupported trusted integration event")
+        return self.request("POST", self._path(project_id, f"tasks/{self._segment(task_id)}/trusted-integration"),
                             body={"event": event, "evidence": evidence}, revision=expected_revision,
                             idempotency_key=idempotency_key)
 

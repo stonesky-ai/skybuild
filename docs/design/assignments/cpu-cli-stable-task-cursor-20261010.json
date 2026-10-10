@@ -1,0 +1,22 @@
+{
+  "schema": "manual-work-brief-v1",
+  "assignment_id": "MVP-CLI-STABLE-CURSOR-20261010-001",
+  "task_id": "SKYBUILD-MVP-CLI-STABLE-TASK-CURSOR",
+  "worker": "wonko_cpu_patch_20261010_a",
+  "dispatcher": "pilot_dispatcher",
+  "branch": "task/mvp-cli-stable-task-cursor-20261010",
+  "owned_paths": [
+    "src/skybuild/__main__.py",
+    "tests/test_client.py"
+  ],
+  "checks": [
+    "Apply only the approved hash-pinned patch to the two owned paths. It exposes the existing task API stable-ID cursor through the read-only tasks CLI.",
+    "Use --by-id for each cursor page, pass --after-task-id only with --by-id, and reject nonzero offset before making a request.",
+    "Do not change task authority, API request semantics, existing task records, or any other path.",
+    "Do not execute candidate code, project tests, hooks, or configuration. Do not call models, providers, paid APIs, services, or create tasks.",
+    "Check AST syntax, git diff --check, exact tree parent, regular file modes, owned paths, and target-base lineage. Stop on any drift.",
+    "Parent runs tests/test_client.py and required trusted validation after worker result; do not claim test or review completion."
+  ],
+  "model_limit": "One bounded CPU-only hash-pinned patch; no model, paid API, candidate execution, service daemon, or additional task launch.",
+  "next_action": "Apply the approved patch, commit and push only the owned paths, then preserve exact head and checks for parent result relay and independent review."
+}

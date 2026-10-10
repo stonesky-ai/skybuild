@@ -17,6 +17,9 @@ from skybuild.contracts import DomainError, Principal
 from skybuild.store import OPERATIONS, Store
 
 
+TEST_WORKER_OPERATIONS = OPERATIONS - {'tasks:usage-record', 'tasks:usage-resolve'}
+
+
 @pytest.fixture(scope='module')
 def store():
     dsn = os.environ.get('SKYBUILD_TEST_DSN')
@@ -37,7 +40,8 @@ def actors(store):
     identities = {}
     for name in ('owner', 'worker', 'peer', 'outsider'):
         principal_id, token = name + '-' + uuid4().hex, secrets.token_urlsafe(32)
-        store.provision_principal(principal_id, token, is_admin=name == 'owner', grants={project: OPERATIONS} if name != 'outsider' else {})
+        grants = {project: TEST_WORKER_OPERATIONS} if name != 'outsider' else {}
+        store.provision_principal(principal_id, token, is_admin=name == 'owner', grants=grants)
         identities[name] = store.authenticate(token)
         identities[name + '_token'] = token
     return project, identities
@@ -386,7 +390,7 @@ def test_identity_guard_and_readiness(store):
     assert error('database_identity', wrong.migrate).status_code == 503
     error('database_identity', wrong.readiness)
     store.migrate()
-    assert store.readiness() == {'ready': True, 'schema_version': 13}
+    assert store.readiness() == {'ready': True, 'schema_version': 16}
 
 
 def test_store_can_bind_operations_to_postgres_system_identifier(store):
@@ -420,7 +424,7 @@ def test_upgrade_001_to_002_preserves_existing_records_and_is_repeatable(store):
         error('schema_mismatch', upgraded.readiness)
         upgraded.migrate()
         upgraded.migrate()
-        assert upgraded.readiness() == {'ready': True, 'schema_version': 13}
+        assert upgraded.readiness() == {'ready': True, 'schema_version': 16}
         with upgraded._connection() as connection:
             assert connection.execute('SELECT * FROM tasks').fetchone() == task_before
             assert connection.execute('SELECT * FROM messages').fetchone() == message_before
@@ -435,7 +439,7 @@ def test_credential_replacement_preserves_identity_history_and_verifier(store, a
     worker = people['worker']
     task = create(store, worker, project)
     replacement = secrets.token_urlsafe(32)
-    store.provision_principal(worker.principal_id, replacement, grants={project: OPERATIONS})
+    store.provision_principal(worker.principal_id, replacement, grants={project: worker.grants[project]})
     error('authentication', lambda: store.authenticate(people['worker_token']))
     current = store.authenticate(replacement)
     assert current == worker
@@ -551,13 +555,13 @@ def test_concurrent_same_idempotency_key_creates_one_outcome(store, actors):
 @pytest.mark.parametrize('statement', [
     "UPDATE skybuild.task_journal SET reason = 'rewritten' WHERE project_id = %s",
     'DELETE FROM skybuild.task_journal WHERE project_id = %s',
-    'TRUNCATE skybuild.task_journal',
+    'TRUNCATE skybuild.task_journal, skybuild.task_usage_events',
 ])
 def test_journal_mutation_is_blocked_in_database(store, actors, statement):
     project, people = actors
     create(store, people['worker'], project)
     with psycopg.connect(store.dsn) as connection:
-        with pytest.raises(psycopg.errors.RaiseException, match='append-only'):
+        with pytest.raises(psycopg.errors.RaiseException, match='^Task journal is append-only'):
             connection.execute(statement, (project,) if '%s' in statement else None)
         connection.rollback()
     assert len(store.task_history(people['worker'], project, 'T1')) == 1

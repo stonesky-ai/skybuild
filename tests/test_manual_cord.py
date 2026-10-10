@@ -175,6 +175,20 @@ def test_result_sends_exact_clean_head_and_owned_paths(pinned, tmp_path):
     assert len(client.sent) == 1
 
 
+def test_owner_relay_preserves_result_key_and_names_original_worker(pinned):
+    _, envelope = pinned
+    result = {"schema": "manual-work-v1", "assignment_id": envelope["assignment_id"],
+              "phase": "ready-for-review", "branch": envelope["branch"], "head_sha": "a" * 40,
+              "checks": ["focused tests passed"], "changed_paths": ["src/skybuild/client.py"],
+              "risks": [], "next_action": "Independent review"}
+    worker_message, worker_key = manual_cord.result_message(envelope, result)
+    relay_message, relay_key = manual_cord.result_message(envelope, result, relay_worker="wonko")
+    assert relay_key == worker_key
+    assert relay_message["body"] == worker_message["body"]
+    assert relay_message["subject"] == "Manual work result (trusted owner relay for wonko)"
+    assert relay_message["recipient"] == worker_message["recipient"]
+
+
 def test_result_refuses_changed_path_outside_scope(pinned, tmp_path):
     repo, envelope = pinned
     worktree = tmp_path / "worker"

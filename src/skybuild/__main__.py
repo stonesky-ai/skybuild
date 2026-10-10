@@ -342,7 +342,15 @@ def main(argv: list[str] | None = None) -> int:
             from .api import create_app
             import uvicorn
 
-            uvicorn.run(create_app(store), host=args.host, port=args.port,
+            trusted_names = ("SKYBUILD_TRUSTED_INTEGRATION_PRODUCER",
+                             "SKYBUILD_TRUSTED_INTEGRATION_KEY_ID",
+                             "SKYBUILD_TRUSTED_INTEGRATION_KEY_PATH")
+            supplied = [os.environ.get(name) for name in trusted_names]
+            if any(supplied) and not all(supplied):
+                raise ValueError("Trusted integration configuration is incomplete")
+            trusted = ({"producer_id": supplied[0], "key_id": supplied[1],
+                        "key_path": Path(supplied[2])} if all(supplied) else None)
+            uvicorn.run(create_app(store, trusted_integration=trusted), host=args.host, port=args.port,
                         **({"ssl_certfile": str(args.ssl_certfile), "ssl_keyfile": str(args.ssl_keyfile)}
                            if args.ssl_certfile else {}))
         return 0
