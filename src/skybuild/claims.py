@@ -21,7 +21,7 @@ class Claims:
         """Shared ownership predicates; caller owns authorization and locking."""
         if claim and claim['held']:
             raise DomainError('claim_conflict', 'Ownership remains held, including after lease expiry', 409)
-        if task['status'] != 'ready':
+        if task['status'] != 'ready' and not self._petri(task):
             raise DomainError('workflow_conflict', 'Only ready tasks may be claimed', 409)
         self._require_current_dependencies(connection, project_id, task)
         self._require_no_effect_exposure(connection, project_id, task['task_id'])
