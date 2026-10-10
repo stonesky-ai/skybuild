@@ -31,7 +31,8 @@ from . import client as _client_module
 PROFILE = 'bounded-trusted-cpu-patch-v1'
 WORKER_SOURCE = {
     'src/skybuild/__init__.py': '6dc62b0e7d135b949d66c97b99c12155a4ffa60d822b994b9a5d109b1ebe9af1',
-    'src/skybuild/client.py': '41d465c78aa2507fc1dcf190be3638ab86725bc6183ee8a014acbd02e2c4db1d',
+    # Auto-worker client from 3bb plus this branch's CPU dispatch endpoints.
+    'src/skybuild/client.py': '9a6ab69f0b3294e429375ada334d263d9df1b26878f11f928b98a5f024c9679e',
     'src/skybuild/fleet_preflight.py': 'f2ec5d39b6b1bc0c0a71354a7be89837bd153b5812a9be55f8a951a15fc9424c',
     'src/skybuild/auto_patch_worker.py': 'b25b365ecd4da328fe8be7ef8618ce4a73eb68cd87c50cddf8dd41b4043726fc',
     'src/skybuild/auto_patch_permit.py': '5e7c5de5f3d29cd6ed1aa55d61d9ec1b2a6530163f71f06a68f99396294f7ad1',
@@ -167,6 +168,8 @@ def _source_head(checkout: Path) -> str:
 def _controller_pin(plan: CPUWorkerPlan, interpreter_digest: str) -> tuple[str, str, str]:
     """Compare loaded authority modules to an owner-configured exact profile."""
     root = Path(__file__).resolve().parents[2]
+    if plan.checkout.resolve(strict=True) != root:
+        raise CPUWorkerBridgeError('Worker import checkout must be the exact controller source root')
     if plan.controller_profile_file.is_symlink():
         raise CPUWorkerBridgeError('Trusted controller profile cannot be a symlink')
     profile_path = plan.controller_profile_file.resolve(strict=True)
@@ -315,6 +318,8 @@ def prepare_worker(client: Any, plan: CPUWorkerPlan, *, action_id: str, operatio
     checkout = plan.checkout.resolve(strict=True)
     if not checkout.is_dir():
         raise CPUWorkerBridgeError('Trusted checkout must be a real directory')
+    if checkout != Path(__file__).resolve().parents[2]:
+        raise CPUWorkerBridgeError('Worker import checkout must be the exact controller source root')
     source_head = _source_head(checkout)
     assignment, preclaim, _, assignment_digest = _read_assignment(plan)
     patch = _file_bytes(plan.patch_file, limit=65536, private=True)
@@ -406,6 +411,8 @@ def prepare_worker(client: Any, plan: CPUWorkerPlan, *, action_id: str, operatio
 
 def launch_worker(client: Any, manager: JobUnitManager, prepared: PreparedCPUWorker) -> dict:
     def verify_pins() -> None:
+        if prepared.plan.checkout.resolve(strict=True) != Path(__file__).resolve().parents[2]:
+            raise CPUWorkerBridgeError('Worker import checkout differs from the controller source root')
         if _source_head(prepared.plan.checkout) != prepared.source_head:
             raise CPUWorkerBridgeError('Trusted source checkout changed after preparation')
         interpreter = Path(prepared.spec.argv[0])
