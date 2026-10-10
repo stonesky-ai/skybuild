@@ -30,9 +30,11 @@ def test_worker_log_paths_are_attempt_scoped(tmp_path):
     assert _attempt_log_path(tmp_path, 'attempt-1') != _attempt_log_path(tmp_path, 'attempt-2')
 
 
-def test_terminal_observation_retries_settlement_without_new_observation(monkeypatch):
+def test_terminal_observation_retries_settlement_without_new_observation(tmp_path, monkeypatch):
     operation_id, observation_id = "operation-1", "11111111-1111-4111-8111-111111111111"
-    plan = SimpleNamespace(project_id="project-1")
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(mode=0o700)
+    plan = SimpleNamespace(project_id="project-1", external_state_dir=state_dir)
     prepared = SimpleNamespace(plan=plan, operation_id=operation_id,
                                controller_head="a" * 40, controller_source_digest="b" * 64,
                                controller_profile_digest="c" * 64, interpreter_digest="0" * 64,
@@ -64,5 +66,6 @@ def test_terminal_observation_retries_settlement_without_new_observation(monkeyp
                         lambda _plan, _digest: (prepared.controller_head,
                                                 prepared.controller_source_digest,
                                                 prepared.controller_profile_digest))
-    result = bridge.reconcile_worker(Client(), Manager(), prepared)
+    monkeypatch.setattr(bridge, '_unit_manager', lambda _path: Manager())
+    result = bridge.reconcile_worker(Client(), prepared)
     assert result == {'observed': True, 'settled': True, 'state': 'settled'}
