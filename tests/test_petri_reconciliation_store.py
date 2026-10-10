@@ -58,7 +58,11 @@ def test_milestone_done_label_without_current_completion_cannot_resume(store, ac
     task = store.initialize_workflow(owner, project, "waiting", task["revision"], "initialize")["task"]
     persisted = store.get_task(owner, project, "waiting")
     projection = Store.workflow_projection(persisted)
-    assert {key: task[key] for key in projection} == projection
+    # Pure projections cannot assert actor permissions. Compare those separately.
+    projected_fields = set(projection) - {"enabled_actions"}
+    assert {key: task[key] for key in projected_fields} == {key: projection[key] for key in projected_fields}
+    trusted_view = store.task_workflow(owner, project, "waiting")
+    assert task["enabled_actions"] == trusted_view["available_actions"]
     generation = Store.workflow_token(persisted).input_generation
     history = store.task_history(owner, project, "waiting")
     with store._connection() as connection:

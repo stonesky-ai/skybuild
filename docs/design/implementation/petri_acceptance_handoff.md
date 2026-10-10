@@ -87,3 +87,15 @@ A new HTTP regression requires worker rejection with 403 and owner rejection wit
 
 The correction batch's scoped checks pass: 64 tests passed and 150 PostgreSQL cases skipped.
 These checks do not rerun the failed PostgreSQL cases. A new frozen-head independent review and combined PostgreSQL gate are required.
+
+
+## Second combined gate and projection correction
+
+The second combined PostgreSQL gate failed with one failed test, 1837 passed tests and one skipped test in 213.08 seconds.
+The only failure compared actor-specific enabled actions with a pure projection that intentionally has no permissions.
+The corrected assertion compares the other display fields with the pure projection.
+It compares enabled actions with the trusted owner workflow view.
+The test retains its rejected milestone resume, unchanged stored task, unchanged generation and unchanged journal assertions.
+No production code changes are required for this correction.
+Scoped reconciliation and transition checks pass: 44 tests passed and 12 PostgreSQL cases skipped.
+A fresh exact-head review and combined PostgreSQL gate are still required.
