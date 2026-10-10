@@ -1376,6 +1376,8 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries, T
         if connection.execute("SELECT 1 FROM cpu_reservations WHERE project_id = %s AND task_id = %s AND state = 'reserved' LIMIT 1",
                               (project_id, task_id)).fetchone():
             raise DomainError('capacity_conflict', 'Task has a held CPU reservation', 409)
+        if unresolved_usage_exists(connection, project_id, task_id):
+            raise DomainError('usage_conflict', 'Task or its source lineage has unresolved usage exposure', 409)
         if connection.execute('SELECT 1 FROM task_claims WHERE project_id = %s AND task_id = %s AND held',
                               (project_id, task_id)).fetchone():
             raise DomainError('claim_conflict', 'Task ownership must be reconciled before mutation', 409)
@@ -1383,8 +1385,6 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries, T
             'SELECT 1 FROM task_effects WHERE project_id = %s AND task_id = %s '
             'AND exposure_held LIMIT 1', (project_id, task_id)).fetchone():
             raise DomainError('effect_conflict', 'Task has unresolved effect exposure', 409)
-        if unresolved_usage_exists(connection, project_id, task_id):
-            raise DomainError('usage_conflict', 'Task or its source lineage has unresolved usage exposure', 409)
 
     def create_effect_intent(self, principal, project_id, task_id, body, expected_revision, idempotency_key, *, claim_fence=None):
         """Persist intent only. Caller-supplied references never grant launch authority."""
