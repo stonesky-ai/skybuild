@@ -259,3 +259,44 @@ def test_legacy_completion_route_cannot_bypass_petri_acceptance(store, actors, p
         store.complete_task(people["owner"], project, before["task_id"], publication_evidence(),
                             before["revision"], "bypass")
     assert store.get_task(people["owner"], project, before["task_id"])["revision"] == before["revision"]
+
+
+def publication_body():
+    from test_completion import evidence as legacy_evidence
+    body = legacy_evidence()
+    body.update(source_head="a" * 40, policy_ref="policy@1",
+                acceptance=[{"criterion": "Complete research", "evidence_ref": "research/report@1"}])
+    body["checks"][0]["source_head"] = body["source_head"]
+    body["review"]["source_head"] = body["source_head"]
+    body["publication"].update(source_head=body["source_head"], base_commit="b" * 40)
+    return body
+
+
+@pytest.mark.parametrize("mismatch", ["head", "base", "policy"])
+def test_publication_acceptance_rejects_internally_consistent_wrong_petri_inputs(mismatch):
+    before = task(Place.INTEGRATING)
+    body = publication_body()
+    if mismatch == "head":
+        body["source_head"] = "c" * 40
+        body["checks"][0]["source_head"] = "c" * 40
+        body["review"]["source_head"] = "c" * 40
+        body["publication"]["source_head"] = "c" * 40
+    elif mismatch == "base":
+        body["publication"]["base_commit"] = "c" * 40
+    else:
+        body["policy_ref"] = "other@1"
+    with pytest.raises(DomainError, match="current Petri inputs"):
+        completion_change(before, body, "admin")
+
+
+@pytest.mark.parametrize("field,value", [
+    ("source_head", "d" * 40), ("target_base", "d" * 40), ("policy_version", "other@1"),
+    ("input_generation", 1), ("definition_revision", 1), ("attempt_id", "new-attempt"), ("claim_fence", 2),
+])
+def test_publication_completion_becomes_stale_when_petri_inputs_change(field, value):
+    before = task(Place.INTEGRATING)
+    after = {**before, **completion_change(before, publication_body(), "admin")}
+    after["metadata"]["_skybuild_workflow"]["petri"]["token"]["place"] = "done"
+    assert current_completion(after)
+    after["metadata"]["_skybuild_workflow"]["petri"]["token"][field] = value
+    assert not current_completion(after)
