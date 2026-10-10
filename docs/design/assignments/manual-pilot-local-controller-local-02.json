@@ -19,5 +19,5 @@
     "Commit and push only the owned document. Return exact pushed head and evidence through validated Cord result; no task PR, merge, completion attestation or bundle mutation. Require separate qualified exact-head review and verified frozen-bundle inclusion before acceptance."
   ],
   "model_limit": "One manually started sol or luna worker using authorized subscription allowance only. No paid API, Brodson, subagents, daemon, automatic model launch or service start. Retain host memory reserve.",
-  "next_action": "Await SKYBUILD-BOOTSTRAP and scoped manual dispatch for the two-local stage on disjoint tasks. Receive a current API-bound manual-work-v2 envelope from pilot_dispatcher and create the owned worktree only after validation. Perform only this document task, run its checks, commit and push, and report exact head/evidence for independent review and bundled integration. No automatic worker launch is authorized."
+  "next_action": "Later useful documentation followup after substantive concurrent stage-two code tasks SKYBUILD-PILOT-RESULT-FRESHNESS and SKYBUILD-IMPORT-WORKFLOW-FIDELITY pass and prior worker ownership is reconciled. Await SKYBUILD-BOOTSTRAP and scoped fresh API-bound dispatch; update only the owned document, verify command/source fidelity, commit/push and return exact head for independent review and bundled integration."
 }

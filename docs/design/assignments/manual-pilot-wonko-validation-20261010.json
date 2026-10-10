@@ -9,7 +9,7 @@
     "docs/research/manual-pilot-wonko-validation-20261010.md"
   ],
   "checks": [
-    "After both local stages pass and scoped remote qualification succeeds, actually receive and validate the pinned assignment on Wonko, prepare its owned worktree, then write a report of observed evidence only. Do not preclaim remote receipt, coding validation or integration.",
+    "After both concurrent stage-two CODE tasks pass and scoped remote qualification succeeds, actually receive and validate the pinned assignment on Wonko, prepare its owned worktree, then report observed evidence only. Do not preclaim remote receipt, coding validation or integration.",
     "Run bounded offline checks: tests/test_manual_assignment.py, tests/test_manual_cord.py, tests/test_manual_worktree.py and tests/test_manual_result.py. Record exact interpreter, source SHA, skybuild import path, command, pass/fail/skip counts and exit status; do not run full PostgreSQL gate.",
     "Use the correct checkout interpreter; when reusing an environment set PYTHONPATH to this worktree absolute src and verify skybuild.__file__. Record tested source SHA in the report. Send final pushed artifact head through Cord after commit; never embed self-referential final SHA.",
     "Report current scoped preflight outcome and public CA fingerprint without secret or Cord bodies. Record actual tested source SHA in the committed report; report final pushed report commit SHA separately through Cord after commit.",
@@ -22,5 +22,5 @@
     "Commit and push only the owned document. Return exact pushed head and evidence through validated Cord result; no task PR, merge, completion attestation or bundle mutation. Require separate qualified exact-head review and verified frozen-bundle inclusion before acceptance."
   ],
   "model_limit": "One manually started sol or luna worker using authorized subscription allowance only. No paid API, Brodson, subagents, daemon, automatic model launch or service start. Retain host memory reserve.",
-  "next_action": "Await SKYBUILD-BOOTSTRAP and scoped manual dispatch for the one-remote stage after both local stages pass. Receive a current API-bound manual-work-v2 envelope from pilot_dispatcher and create the owned worktree only after validation. Perform only this document task, run its checks, commit and push, and report exact head/evidence for independent review and bundled integration. No automatic worker launch is authorized."
+  "next_action": "Await SKYBUILD-BOOTSTRAP and successful concurrent stage-two code proof: SKYBUILD-PILOT-RESULT-FRESHNESS and SKYBUILD-IMPORT-WORKFLOW-FIDELITY. After review/integration and ownership reconciliation, qualify Wonko and dispatch the substantive remote validation report with fresh API-bound pins. Run actual bounded remote checks; commit/push the report and send final artifact head through Cord after commit. No remote Codex launch is required or inferred."
 }
