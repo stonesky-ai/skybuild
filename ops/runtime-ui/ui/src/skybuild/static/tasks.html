@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tasks · SkyBuild Workbench</title>
+  <link rel="stylesheet" href="/workbench/assets/workbench.css">
+  <link rel="stylesheet" href="/workbench/assets/workbench-shell.css">
+  <link rel="stylesheet" href="/workbench/assets/tasks.css">
+  <script src="/workbench/assets/tasks.js" defer></script>
+</head>
+<body>
+  <!--WORKBENCH_NAV-->
+  <header class="tasks-header">
+    <p class="eyebrow">SkyBuild · Workbench</p>
+    <h1>Tasks</h1>
+    <p>Browse task definitions and their journal. Mutations use guarded SkyBuild task endpoints.</p>
+  </header>
+  <main class="tasks-main">
+    <section class="panel connection-panel" aria-labelledby="connection-title">
+      <div>
+        <h2 id="connection-title">Connect to a project</h2>
+        <label for="project">Project</label>
+        <select id="project" required>
+          <option value="skybuild">SkyBuild repo</option>
+          <option value="skykeep">SkyKeep repo · not configured</option>
+        </select>
+      </div>
+      <div id="preview-session" hidden>
+        <h3 id="preview-title">Signed in for local preview</h3>
+        <p><strong>FAKE ACCOUNT</strong> · Username: <code>user1</code> · Password: <code>abcd1234</code></p>
+        <p class="hint">Fake session and task records only. No database connection or task writes.</p>
+      </div>
+      <form id="connection-form" class="connection-form" autocomplete="off">
+        <label for="token">Bearer token</label>
+        <input id="token" type="password" required maxlength="4096" autocomplete="off" spellcheck="false">
+        <div class="actions"><button id="connect" type="submit">Connect</button><button id="logout" type="button" disabled>Log out</button></div>
+      </form>
+      <p id="notice" role="status" aria-live="polite">Enter project and token to load tasks.</p>
+    </section>
+
+    <nav class="task-tabs" role="tablist" aria-label="Task workspace tabs">
+      <button id="tab-list" type="button" role="tab" aria-selected="true" aria-controls="panel-list" data-tab="list">Task List</button>
+      <button id="tab-history" type="button" role="tab" aria-selected="false" aria-controls="panel-history" data-tab="history">Task History</button>
+      <button id="tab-create" type="button" role="tab" aria-selected="false" aria-controls="panel-create" data-tab="create">Task Create</button>
+      <button id="tab-defer" type="button" role="tab" aria-selected="false" aria-controls="panel-defer" data-tab="defer">Task Defer</button>
+    </nav>
+
+    <section id="panel-list" class="tab-panel panel" role="tabpanel" aria-labelledby="tab-list">
+      <div class="section-heading"><div><h2>Task List</h2><p class="hint">Select a task for its journal. Click headings to sort; Ctrl-click adds a sort level. Filter under any heading; × clears it.</p></div><button id="refresh-tasks" type="button" disabled>Refresh</button></div>
+      <p id="task-count">Not connected</p>
+      <div class="table-scroll"><table class="task-table"><thead id="task-head"></thead><tbody id="task-rows"></tbody></table></div>
+      <div class="actions"><button id="first-tasks" type="button" disabled>First page</button><button id="next-tasks" type="button" disabled>Next page</button></div>
+      <section id="selected-summary" class="selected-summary" aria-live="polite"><h3>Task details</h3><p>Select a task to view all fields.</p></section>
+    </section>
+
+    <section id="panel-history" class="tab-panel panel" role="tabpanel" aria-labelledby="tab-history" hidden>
+      <section class="workflow-panel" aria-labelledby="workflow-title">
+        <div class="workflow-heading"><div><h2 id="workflow-title">Task workflow</h2><p id="workflow-caption" class="hint">Select a task to see its journaled path through the workflow.</p></div>
+          <ul class="workflow-legend" aria-label="Workflow net legend"><li><span class="workflow-swatch place"></span>Place · task state</li><li><span class="workflow-swatch transition"></span>Bar · action</li><li><span class="workflow-swatch done"></span>Visited</li><li><span class="workflow-swatch current"></span>Current marking</li><li><span class="workflow-swatch waiting"></span>Not yet visited</li><li><span class="workflow-swatch failed"></span>Failed path</li></ul>
+        </div>
+        <div id="workflow-chart" class="workflow-chart" role="img" aria-label="Task workflow chart"></div>
+        <p class="workflow-note">Circles are task workflow places (phases). Bars are actions (transitions); actors name who or what may perform each action. Blocked and deferred are wait conditions; the journal may retain the underlying phase. Color records journal history, not permission to act. Creation starts in Planned. Edits, dependency or policy changes, and deferral can originate from more than one phase; the diagram shows representative guarded routes. Planning scans, stale or duplicate messages, and rejected actions can add journal evidence without changing phase. This is the proposed workflow from the architecture, not a live workflow engine.</p>
+        <details class="workflow-definitions"><summary>Show state and action definitions</summary>
+          <div class="table-scroll"><table class="workflow-table"><thead><tr><th>Places · task states</th><th>Meaning</th></tr></thead><tbody id="workflow-place-rows"></tbody></table></div>
+          <div class="table-scroll"><table class="workflow-table"><thead><tr><th>From</th><th>Action / transition</th><th>To</th><th>Responsible actor</th></tr></thead><tbody id="workflow-transition-rows"></tbody></table></div>
+        </details>
+      </section>
+      <div class="section-heading"><div><h2>Task History</h2><p id="history-task" class="hint">Choose a task from Task List.</p></div><button id="refresh-history" type="button" disabled>Refresh journal</button></div>
+      <p class="journal-note">Journal shows recorded revisions and evidence. Commit time, author, box, and review appear when the task record contains them.</p>
+      <ol id="history-list" class="task-journal"></ol>
+      <button id="load-more-history" type="button" disabled>Load older entries</button>
+    </section>
+
+    <section id="panel-create" class="tab-panel panel" role="tabpanel" aria-labelledby="tab-create" hidden>
+      <h2>Task Create</h2>
+      <p class="hint">New tasks start proposed. Creation never authorizes execution.</p>
+      <form id="create-form" class="form-grid">
+        <label for="new-id">Task ID</label><input id="new-id" required maxlength="200" disabled>
+        <label for="new-title">Name</label><input id="new-title" required maxlength="500" disabled>
+        <label for="new-description">Description</label><textarea id="new-description" required maxlength="32768" rows="6" disabled></textarea>
+        <label for="new-priority">Priority</label><input id="new-priority" type="number" min="-1000000" max="1000000" value="0" disabled>
+        <label for="new-responsible">Responsible</label><input id="new-responsible" maxlength="200" value="lead" disabled>
+        <label for="new-next">Next action</label><textarea id="new-next" maxlength="4096" rows="2" disabled>Triage this task</textarea>
+        <button type="submit" disabled>Create task</button>
+      </form>
+    </section>
+
+    <section id="panel-defer" class="tab-panel panel" role="tabpanel" aria-labelledby="tab-defer" hidden>
+      <h2>Task Defer</h2>
+      <p class="hint">Defer a task until an offset-aware time or another task completes. Resume is the undefer action and returns the task to blocked reassessment.</p>
+      <label for="defer-task">Task</label><select id="defer-task" disabled><option value="">Connect and load tasks</option></select>
+      <div class="defer-columns">
+        <form id="defer-form">
+          <h3>Defer</h3>
+          <label for="defer-reason">Reason</label><textarea id="defer-reason" required maxlength="4096" rows="3" disabled></textarea>
+          <label for="defer-until">Until (include timezone offset)</label><input id="defer-until" placeholder="2030-01-01T09:00:00-05:00" disabled>
+          <label for="defer-milestone">Or milestone task ID</label><input id="defer-milestone" maxlength="200" disabled>
+          <button id="submit-defer" type="submit" disabled>Defer task</button>
+        </form>
+        <form id="resume-form">
+          <h3>Undefer / resume</h3>
+          <label for="resume-reason">Reason</label><textarea id="resume-reason" required maxlength="4096" rows="3" disabled></textarea>
+          <button id="submit-resume" type="submit" disabled>Resume task</button>
+        </form>
+      </div>
+      <p id="defer-state" class="hint">Select a deferred task to enable Resume.</p>
+    </section>
+  </main>
+</body>
+</html>

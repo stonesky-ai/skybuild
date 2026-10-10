@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SkyBuild task workbench</title>
+  <link rel="stylesheet" href="/workbench/assets/workbench.css">
+  <script src="/workbench/assets/workbench.js" defer></script>
+</head>
+<body>
+  <header>
+    <p class="eyebrow">SkyBuild · Launch-free bootstrap</p>
+    <h1>Task workbench</h1>
+    <p>The SkyBuild REST API is the task authority. Connect with an authenticated owner or project-scoped worker token; this page does not launch workers or models.</p>
+  </header>
+  <main>
+    <section class="panel" aria-labelledby="connection-title">
+      <h2 id="connection-title">Connect to a project</h2>
+      <form id="connection-form" autocomplete="off">
+        <label for="project">Project ID</label>
+        <input id="project" required maxlength="200" spellcheck="false">
+        <label for="token">Bearer token</label>
+        <input id="token" type="password" required maxlength="4096" autocomplete="off" spellcheck="false">
+        <div class="actions"><button id="connect" type="submit">Connect</button><button id="logout" type="button" disabled>Log out</button></div>
+      </form>
+      <p class="hint">The token stays in page memory. Reloading or logging out clears it.</p>
+      <p id="notice" role="status" aria-live="polite">Enter a project and token to load tasks.</p>
+    </section>
+
+    <section class="panel" aria-labelledby="board-title">
+      <div class="section-heading"><h2 id="board-title">Task workflow</h2>
+        <button id="refresh-board" type="button" disabled>Refresh workflow</button></div>
+      <p class="hint">Normal progress: Ready, Working, Validating, Integrating, Done. Deferred and Hold pause work.</p>
+      <p class="hint">Counts cover the complete project. Cards show one priority page. Dependency completion does not authorize execution.</p>
+      <p id="board-summary" role="status">Not connected</p>
+      <label for="board-view">Workflow view</label>
+      <select id="board-view"><option value="columns">Seven columns</option><option value="list">Simple list</option></select>
+      <div id="workflow-board" class="workflow-board"></div>
+      <div class="actions"><button id="first-board" type="button" disabled>First workflow page</button><button id="next-board" type="button" disabled>Next workflow page</button></div>
+    </section>
+
+    <div class="workspace">
+      <aside>
+        <section class="panel" aria-labelledby="tasks-title">
+          <div class="section-heading"><h2 id="tasks-title">Tasks</h2><button id="refresh-tasks" type="button" disabled>Refresh tasks</button></div>
+          <button id="reconcile-due" type="button" disabled>Reassess due deferrals</button>
+          <p class="hint">Tasks browse by stable ID, 100 per page. History loads 100 events per page.</p>
+          <p id="task-count">Not connected</p>
+          <ul id="task-list" class="task-list"></ul>
+          <div class="actions"><button id="first-tasks" type="button" disabled>First tasks</button><button id="next-tasks" type="button" disabled>Next tasks</button></div>
+        </section>
+        <section class="panel" aria-labelledby="create-title">
+          <h2 id="create-title">Create a task</h2>
+          <form id="create-form">
+            <label for="new-id">Task ID</label><input id="new-id" required maxlength="200" disabled>
+            <label for="new-title">Title</label><input id="new-title" required maxlength="500" disabled>
+            <label for="new-description">Description</label><textarea id="new-description" required maxlength="32768" rows="5" disabled></textarea>
+            <p class="hint">New tasks start as proposed, with manual owner triage. Creation never authorizes execution.</p>
+            <button type="submit" disabled>Create task</button>
+          </form>
+        </section>
+      </aside>
+
+      <section class="panel detail" aria-labelledby="detail-title">
+        <div class="section-heading"><h2 id="detail-title">Selected task</h2><button id="refresh-selected" type="button" disabled>Refresh selected task</button></div>
+        <p id="selection">Select a task to view its definition and history.</p>
+        <details id="full-task"><summary>Full task record and provenance</summary><pre id="full-task-record">No task selected.</pre></details>
+        <section aria-labelledby="workflow-details-title">
+          <h3 id="workflow-details-title">Workflow details</h3>
+          <p id="workflow-state">No task selected.</p>
+          <p id="workflow-condition"></p>
+          <ol id="workflow-path" class="workflow-path" aria-label="Normal task progress"></ol>
+          <details><summary>All workflow transitions</summary><ul id="workflow-transitions"></ul></details>
+          <p class="hint">Confirmed validation or integration failures return to Ready. Hold and Deferred pause work. Release or resume returns to Ready.</p>
+          <h4>Requirements</h4><ul id="workflow-requirements"></ul>
+          <h4>Dependencies</h4><ul id="workflow-dependencies" class="task-list"></ul>
+          <h4>Evidence and links</h4><ul id="workflow-evidence"></ul>
+          <h4>Findings and faults</h4><ul id="workflow-findings"></ul>
+          <h4>Action availability</h4><ul id="workflow-disabled"></ul>
+          <form id="workflow-form">
+            <label for="workflow-event">Permitted action</label><select id="workflow-event" disabled></select>
+            <label for="workflow-reason">Reason</label><textarea id="workflow-reason" maxlength="4096" rows="2" disabled></textarea>
+            <label for="workflow-next">Next action</label><textarea id="workflow-next" maxlength="4096" rows="2" disabled></textarea>
+            <label for="workflow-until">Defer until (date and time with timezone)</label><input id="workflow-until" placeholder="2030-01-01T09:00:00-05:00" disabled>
+            <label for="workflow-milestone">Or milestone task ID</label><input id="workflow-milestone" maxlength="200" disabled>
+            <p class="hint">Use exactly one trigger for Defer. Every control uses the displayed revision. A conflict requires a refresh and a new decision.</p>
+            <p id="workflow-operation" role="status">No pending operation.</p>
+            <button id="workflow-submit" type="submit" disabled>Record workflow action</button>
+            <button id="workflow-retry" type="button" disabled>Retry unchanged operation</button>
+          </form>
+        </section>
+        <form id="edit-form">
+          <label for="edit-title">Title</label><input id="edit-title" required maxlength="500" disabled>
+          <label for="edit-description">Description</label><textarea id="edit-description" required maxlength="32768" rows="8" disabled></textarea>
+          <label for="edit-acceptance">Acceptance criteria (JSON array)</label><textarea id="edit-acceptance" rows="4" spellcheck="false" disabled></textarea>
+          <label for="edit-architecture">Architecture references (JSON array)</label><textarea id="edit-architecture" rows="3" spellcheck="false" disabled></textarea>
+          <div class="field-pair">
+            <div><label for="edit-status">Status</label><select id="edit-status" disabled><option>proposed</option><option>ready</option><option>in-progress</option><option>blocked</option><option>deferred</option><option>done</option></select></div>
+            <div><label for="edit-phase">Phase</label><input id="edit-phase" maxlength="200" disabled></div>
+          </div>
+          <label for="edit-next">Next action</label><textarea id="edit-next" maxlength="4096" rows="2" disabled></textarea>
+          <label for="edit-blocker">Blocker</label><textarea id="edit-blocker" maxlength="4096" rows="2" disabled></textarea>
+          <label for="edit-responsible">Responsible component or person</label><input id="edit-responsible" required maxlength="200" disabled>
+          <label for="edit-dependencies">Dependencies, one task ID per line</label><textarea id="edit-dependencies" rows="4" disabled></textarea>
+          <p class="hint">Unfinished tasks require a next action or blocker and a responsible component or person. Editing a definition after workflow activity sends it for reassessment.</p>
+          <button id="save" type="submit" disabled>Save changes</button>
+        </form>
+        <form id="action-form">
+          <h3>Task action</h3>
+          <label for="action-kind">Action</label><select id="action-kind" disabled><option value="rework">Request rework</option><option value="reassess">Request reassessment</option><option value="defer">Defer</option><option value="resume">Resume deferred task</option><option value="ready">Mark definition ready for work</option></select>
+          <label for="action-reason">Reason</label><textarea id="action-reason" required maxlength="4096" rows="2" disabled></textarea>
+          <label for="action-next">Next action</label><textarea id="action-next" maxlength="4096" rows="2" disabled></textarea>
+          <label for="action-until">Defer until (date and time with timezone)</label><input id="action-until" placeholder="2030-01-01T09:00:00-05:00" disabled>
+          <label for="action-milestone">Or milestone task ID</label><input id="action-milestone" maxlength="200" disabled>
+          <p class="hint">Deferral requires one trigger. Readiness requires acceptance criteria, no dependencies and no started history. No action here authorizes execution.</p>
+          <button id="submit-action" type="submit" disabled>Record action</button>
+        </form>
+        <form id="structure-form">
+          <h3>Split or merge tasks</h3>
+          <p class="hint">Use exact task IDs and allocation arrays. Preview the plan before applying it. Only proposed tasks with no execution history can be replaced.</p>
+          <label for="structure-kind">Operation</label><select id="structure-kind" disabled><option value="split">Split selected task</option><option value="merge">Merge selected task with others</option></select>
+          <label for="structure-plan">Plan (JSON)</label><textarea id="structure-plan" rows="11" maxlength="65536" spellcheck="false" disabled></textarea>
+          <details><summary>Plan fields and example</summary><p>Split: reason, children (2–10 new task definitions), and incoming (each dependent ID mapped to child IDs). Merge: reason, source_task_ids, expected_revisions, one new target definition, and incoming_dependents. Each new task needs title, description, acceptance_criteria, dependencies and any source architecture_refs.</p><pre>{"reason":"Separate scope","children":[{"task_id":"CHILD-A","title":"First scope","description":"Full brief","acceptance_criteria":["Check A"],"architecture_refs":[],"dependencies":[]},{"task_id":"CHILD-B","title":"Second scope","description":"Full brief","acceptance_criteria":["Check B"],"architecture_refs":[],"dependencies":[]}],"incoming":{"DEPENDENT":["CHILD-A","CHILD-B"]}}</pre></details>
+          <div class="actions"><button id="preview-structure" type="button" disabled>Preview mapping</button><button id="apply-structure" type="submit" disabled>Apply reviewed mapping</button></div>
+          <pre id="structure-preview" aria-live="polite">No plan previewed.</pre>
+        </form>
+        <h3>Structural lineage</h3>
+        <ul id="lineage" class="lineage"><li>No task selected.</li></ul>
+        <h3>History</h3>
+        <ol id="history" class="history"></ol>
+        <button id="load-more-history" type="button" disabled>Load more history</button>
+      </section>
+    </div>
+  </main>
+</body>
+</html>
