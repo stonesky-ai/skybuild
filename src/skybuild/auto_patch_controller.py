@@ -437,7 +437,6 @@ def run(*, repo: Path, manifest: Path, project: str, dispatcher: str, url: str,
             results.append(record)
             continue
         try:
-            from scripts.skybuild_job_unit import JobUnitManager
             manager = JobUnitManager(Path(record["assignment_dir"]).parent)
             while datetime.now(timezone.utc) < deadline:
                 unit_state = manager.observe(record["unit"])

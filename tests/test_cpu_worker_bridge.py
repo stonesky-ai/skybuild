@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from types import SimpleNamespace
 
@@ -90,11 +92,10 @@ def test_owner_relay_sends_the_exact_envelope_pinned_by_worker_intent(tmp_path, 
         assignment, result, relay_worker='worker-1')
     intent = {'result': result, 'message': message, 'message_idempotency_key': key,
               'source_branch': 'refs/heads/task/test', 'target_base': assignment['base_sha']}
-    workflow = {'token': {**token, 'source_head': 'a' * 40}}
+    workflow = {'token': token}
     plan = SimpleNamespace(project_id='skybuild', task_id=assignment['task_id'],
                            worker_id='worker-1', assignment_id='assignment-1',
-                           assignment_dir=tmp_path, checkout=tmp_path,
-                           worker_id='worker-1')
+                           assignment_dir=tmp_path, checkout=tmp_path)
     prepared = SimpleNamespace(plan=plan, assignment_digest='d' * 64,
                                task_id=assignment['task_id'], assignment_id='assignment-1',
                                attempt_id='attempt-1', claim_fence=7)
@@ -168,7 +169,7 @@ def test_terminal_observation_retries_settlement_without_new_observation(tmp_pat
                                unit_name="skybuild-job-" + "d" * 24 + ".service",
                                launch_nonce="e" * 32)
     latest = {'phase': 'completed', 'result': 'success', 'exit_status': 0,
-              'worker_result_digest': 'f' * 64, 'host_id': 'test-host',
+              'worker_result_digest': bridge._digest(b'{}'), 'host_id': 'test-host',
               'unit_name': prepared.unit_name, 'launch_nonce': prepared.launch_nonce,
               'invocation_id': '1' * 32, 'observation_id': observation_id}
 
@@ -209,7 +210,8 @@ def test_terminal_observation_retries_settlement_without_new_observation(tmp_pat
     monkeypatch.setattr(bridge, '_unit_manager', lambda _path: Manager())
     monkeypatch.setattr(bridge, '_trusted_client', lambda *_args: Client())
     monkeypatch.setattr(bridge, '_trusted_worker_client', lambda _prepared: WorkerClient())
-    monkeypatch.setattr(bridge, '_read_assignment', lambda _plan: ({'assignment_id': 'assignment-1'},
+    prepared.assignment_digest = '0' * 64
+    monkeypatch.setattr(bridge, '_read_assignment', lambda _plan, **_kwargs: ({'assignment_id': 'assignment-1'},
                         {'attempt_id': 'attempt-1', 'claim_fence': 1}, {'token': {}}, '0' * 64))
     intent = {'result': {'head_sha': 'a' * 40}}
     monkeypatch.setattr(bridge, '_result_intent', lambda *_args: (intent, b'{}'))

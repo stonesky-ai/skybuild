@@ -33,6 +33,7 @@ def _setup(tmp_path, monkeypatch, *, fail_at=None):
     repo = tmp_path / "repo"
     repo.mkdir()
     selected = _items(tmp_path)
+    (tmp_path / "manifest").write_text(json.dumps(selected))
     expiry = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
     permit = {"approved_until": expiry, "memory_high_bytes": 1024**3,
               "memory_max_bytes": 2 * 1024**3, "runtime_seconds": 600}
@@ -97,7 +98,13 @@ def _setup(tmp_path, monkeypatch, *, fail_at=None):
     monkeypatch.setattr(controller, "prepare_worker", lambda plan, *, action_id, operation_id:
         prepared_by_id.setdefault(operation_id, SimpleNamespace(plan=plan, action_id=action_id,
             operation_id=operation_id, unit_name="skybuild-job-" + plan.worker_id[-1] * 24 + ".service",
-            task_id=plan.worker_id)))
+            task_id=plan.worker_id, launch_nonce="nonce-" + plan.worker_id,
+            approved_until=datetime.fromisoformat(expiry), source_head="a" * 40,
+            controller_head="a" * 40,
+            **{name: "d" * 64 for name in ("source_digest", "interpreter_digest",
+                "controller_source_digest", "controller_profile_digest", "ca_digest",
+                "owner_token_digest", "worker_token_digest", "git_token_digest",
+                "assignment_digest", "argv_digest")})))
     launched = set()
     def launch(prepared):
         events.append("launch:" + prepared.task_id)
