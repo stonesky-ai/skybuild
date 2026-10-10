@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import stat
 
@@ -45,6 +46,10 @@ def test_git_package_staging_uses_private_hashed_copy_and_rejects_symlinks(tmp_p
     link.symlink_to(source)
     with pytest.raises(builder.BuildError, match="opened safely"):
         builder._copy_pinned_package(link, tmp_path / "private" / "link.deb", expected)
+    fifo = tmp_path / "race.deb"
+    os.mkfifo(fifo)
+    with pytest.raises(builder.BuildError, match="regular file"):
+        builder._copy_pinned_package(fifo, tmp_path / "private" / "race.deb", expected)
 
 
 def test_runner_environment_metadata_is_static_and_binds_exact_project_lock(tmp_path):

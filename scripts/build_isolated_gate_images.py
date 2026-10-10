@@ -142,7 +142,7 @@ def stage_firewall_payload(root: Path) -> dict:
 def _copy_pinned_package(source: Path, destination: Path, expected_sha256: str) -> Path:
     """Copy through a no-follow descriptor and return only verified private bytes."""
     try:
-        source_fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        source_fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except OSError as error:
         raise BuildError("trusted Git package input cannot be opened safely") from error
     complete = False
