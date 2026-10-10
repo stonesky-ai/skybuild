@@ -239,7 +239,7 @@ def test_legacy_receive_adapter_binds_real_producer_to_cpu_bridge(pinned, tmp_pa
     class FencedClient(FakeClient):
         def get_task(self, project, task_id):
             return super().get_task(project, task_id) | {
-                "metadata": {"_skybuild_workflow": {"petri": {"token": token}}}}
+                "metadata": {"_skybuild_workflow": {"petri": {"schema_version": 1, "token": token}}}}
 
         def claim_task(self, project, task_id, **kwargs):
             assert task_id == envelope["task_id"]
