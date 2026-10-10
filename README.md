@@ -130,3 +130,4 @@ Dunsel state lives in the private `~/.local/state/skybuild/dunsel/` directory, w
 
 A durable pre-launch intent blocks retries when a start has unknown effects, including failures to publish the child identity. If the preview reports an unresolved startup without a readable process record, reconcile the physical process before clearing state; restarting another checkout does not clear that barrier.
 Development cycle dev-004 starts from main commit 50e6dfb4c622114f97b348bf679e8a45191aa2a4.
+Development cycle dev-005 started on 2026-10-09T22:31:06-05:00.
