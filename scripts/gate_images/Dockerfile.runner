@@ -22,4 +22,4 @@ LABEL org.skybuild.full-test.policy-sha256=${GATE_POLICY_SHA256} \
       org.skybuild.full-test.uv-version=${UV_VERSION}
 ENV PATH=/opt/skybuild-venv/bin:/usr/local/bin:/usr/bin:/bin
 COPY uv /usr/local/bin/uv
-COPY runner-environment/ /opt/skybuild-venv/
+COPY runner-environment/skybuild-venv/ /opt/skybuild-venv/
