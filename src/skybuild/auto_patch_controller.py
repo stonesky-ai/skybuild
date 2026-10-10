@@ -225,7 +225,8 @@ def run(*, repo: Path, manifest: Path, project: str, dispatcher: str, url: str,
                          "--token-file", item["token_file"], "--git-token-file", item["git_token_file"],
                          "--ca-file", str(ca_file), "--patch", item["patch"],
                          "--patch-sha256", item["patch_sha256"], "--state-dir", str(worker_dir),
-                         "--approved-until", permit["approved_until"])
+                         "--approved-until", permit["approved_until"],
+                         "--permit", str(permit_path), "--permit-sha256", permit_sha256)
             if datetime.now(timezone.utc) >= expiry:
                 raise AutoControllerError("Approval expired before bounded unit launch")
             check_source(repo, permit)

@@ -86,7 +86,9 @@ The controller selects the two highest-priority eligible tasks from committed
 brief candidates. It records selection, dispatches through the existing
 durable Cord sender, then claims each task with its own worker principal and
 starts two separate bounded systemd user units through `JobUnitManager`. Each
-worker checks its exact task approval and preclaimed fence, renews its
+worker rereads the exact approved permit and checks its own clean loaded source,
+approved task envelope and patch before its first write. It checks its task
+approval and preclaimed fence, renews its
 lease, applies its patch in an independent clone, checks source bytes and Git
 lineage, pushes its own branch, submits the fenced REST result, and sends its
 Cord result. The controller checks owner CPU controls before work, but this

@@ -93,6 +93,8 @@ def _setup(tmp_path, monkeypatch, *, fail_at=None):
         def start(self, spec):
             events.append("launch:" + spec.task_id)
             assert spec.memory_max_bytes == 2 * 1024**3 and spec.runtime_seconds <= 600
+            assert spec.argv[spec.argv.index("--permit-sha256") + 1] == "f" * 64
+            assert spec.argv[spec.argv.index("--permit") + 1] == str(tmp_path / "permit")
             if fail_at == "launch-2" and spec.task_id.endswith("-2"):
                 raise controller.JobUnitError("unknown second launch")
             self.started.add(spec.unit())

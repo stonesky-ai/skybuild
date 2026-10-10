@@ -155,6 +155,34 @@ def test_source_guard_rejects_dirty_checkout_at_approved_head(tmp_path):
         permit.check_source(checkout, {"source_head": head})
 
 
+def test_worker_rechecks_exact_permit_and_assignment_before_work(tmp_path, monkeypatch):
+    checked = []
+    monkeypatch.setattr(permit, "check_source", lambda *_args, **kwargs: checked.append(kwargs))
+    assignment = {"task_id": "SKYBUILD-CPU-1", "assignment_id": "ASSIGN-1",
+                  "brief_path": "docs/design/assignments/a.json", "brief_sha256": "b" * 64,
+                  "branch": "task/cpu-1", "base_sha": "a" * 40, "task_revision": 2}
+    expiry = datetime.now(timezone.utc) + timedelta(minutes=10)
+    entry = {"task_id": assignment["task_id"], "worker": "worker_1",
+             "assignment_id": assignment["assignment_id"], "brief_path": assignment["brief_path"],
+             "brief_sha256": assignment["brief_sha256"], "branch": assignment["branch"],
+             "base_sha": assignment["base_sha"], "revision": 2, "patch_sha256": "c" * 64,
+             "envelope_sha256": permit.envelope_sha256(assignment)}
+    approved = {"schema": "skybuild.auto-cpu-patch-permit.v1",
+                "profile": "bounded-trusted-cpu-patch-v1", "slots": 2,
+                "approved_until": expiry.isoformat(), "source_head": "d" * 40,
+                "workers": [entry, {"different": True}]}
+    path = tmp_path / "approved.json"
+    path.write_text(json.dumps(approved))
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    permit.check_worker_permit(path, digest, checkout=tmp_path, assignment=assignment,
+                               worker="worker_1", patch_sha256="c" * 64, approved_until=expiry)
+    assert checked == [{"require_job_unit": False}]
+    with pytest.raises(permit.PermitError, match="assignment differs"):
+        permit.check_worker_permit(path, digest, checkout=tmp_path, assignment=assignment,
+                                   worker="worker_1", patch_sha256="e" * 64,
+                                   approved_until=expiry)
+
+
 def test_private_git_askpass_uses_token_file_without_embedding_secret(tmp_path):
     token = tmp_path / "token"
     token.write_text("example-secret\n")

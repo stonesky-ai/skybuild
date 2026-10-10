@@ -18,6 +18,7 @@ import subprocess
 import sys
 
 from .client import Client, ClientError, ca_file_sha256
+from .auto_patch_permit import PermitError, check_worker_permit
 from .fleet_preflight import _resolved_addresses, _token_from_file, probe_private_api
 from .manual_assignment import _path, verify_assignment
 from .manual_cord import _current_assignment, renew_assignment, send_result, _workflow_path
@@ -237,7 +238,8 @@ def _clone_and_apply(repo: Path, destination: Path, assignment: dict, patch: byt
 
 def run(client: Client, *, project: str, worker: str, dispatcher: str, checkout: Path,
         message_id: str, patch_path: Path, patch_sha256: str, state_dir: Path,
-        approved_until: datetime, git_token_file: Path) -> dict:
+        approved_until: datetime, git_token_file: Path, permit_path: Path,
+        permit_sha256: str) -> dict:
     """Receive, claim, apply, push and submit one pinned assignment exactly once."""
     checkout = checkout.resolve()
     def require_time() -> None:
@@ -259,6 +261,8 @@ def run(client: Client, *, project: str, worker: str, dispatcher: str, checkout:
             or received.get("assignment_id") != assignment.get("assignment_id")
             or received.get("place") != "working"):
         raise PatchWorkerError("Trusted preclaim identity differs")
+    check_worker_permit(permit_path, permit_sha256, checkout=checkout, assignment=assignment,
+                        worker=worker, patch_sha256=patch_sha256, approved_until=approved_until)
     verify_assignment(assignment, checkout, worker=worker)
     if assignment["dispatcher"] != dispatcher:
         raise PatchWorkerError("Assignment dispatcher differs")
@@ -315,10 +319,10 @@ def run(client: Client, *, project: str, worker: str, dispatcher: str, checkout:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("url", "project", "worker", "dispatcher", "message-id", "patch-sha256"):
+    for name in ("url", "project", "worker", "dispatcher", "message-id", "patch-sha256", "permit-sha256"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--approved-until", required=True)
-    for name in ("checkout", "token-file", "git-token-file", "ca-file", "patch", "state-dir"):
+    for name in ("checkout", "token-file", "git-token-file", "ca-file", "patch", "state-dir", "permit"):
         parser.add_argument("--" + name, type=Path, required=True)
     args = parser.parse_args(argv)
     try:
@@ -335,10 +339,11 @@ def main(argv: list[str] | None = None) -> int:
                          checkout=args.checkout, message_id=args.message_id,
                          patch_path=args.patch, patch_sha256=args.patch_sha256,
                          state_dir=args.state_dir, approved_until=expiry,
-                         git_token_file=args.git_token_file)
+                         git_token_file=args.git_token_file, permit_path=args.permit,
+                         permit_sha256=args.permit_sha256)
         print(json.dumps(output, sort_keys=True))
         return 0
-    except (PatchWorkerError, ClientError, OSError, ValueError, TypeError,
+    except (PatchWorkerError, PermitError, ClientError, OSError, ValueError, TypeError,
             subprocess.SubprocessError):
         print(json.dumps({"submitted": False, "reason": "Worker stopped; preserve private attempt evidence"}), file=sys.stderr)
         return 2

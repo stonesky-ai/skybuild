@@ -44,7 +44,7 @@ def envelope_sha256(envelope: dict) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def check_source(checkout: Path, permit: dict) -> None:
+def check_source(checkout: Path, permit: dict, *, require_job_unit: bool = True) -> None:
     """Bind the executing checkout, loaded modules and clean source bytes."""
     if any(name.startswith("GIT_") and name != "GIT_PAGER" for name in os.environ):
         raise PermitError("Inherited Git configuration can hide source changes")
@@ -70,10 +70,10 @@ def check_source(checkout: Path, permit: dict) -> None:
                          for module in loaded.values()):
         raise PermitError("Loaded SkyBuild module is outside the approved checkout")
     job_unit = sys.modules.get("scripts.skybuild_job_unit")
-    if (job_unit is None or not getattr(job_unit, "__file__", None)
-            or Path(job_unit.__file__).resolve() != checkout / "scripts" / "skybuild_job_unit.py"):
+    if require_job_unit and (job_unit is None or not getattr(job_unit, "__file__", None)
+                             or Path(job_unit.__file__).resolve() != checkout / "scripts" / "skybuild_job_unit.py"):
         raise PermitError("Loaded job unit is outside the approved checkout")
-    for module in (*loaded.values(), job_unit):
+    for module in (*loaded.values(), *((job_unit,) if require_job_unit else ())):
         path = Path(module.__file__)
         relative = path.resolve().relative_to(checkout).as_posix()
         if (path.is_symlink() or not path.is_file() or path.stat().st_size > 2_097_152
@@ -84,9 +84,36 @@ def check_source(checkout: Path, permit: dict) -> None:
         if committed.returncode or committed.stdout != path.read_bytes():
             raise PermitError("Loaded source bytes differ from approved head")
     main = sys.modules.get("__main__")
-    if (getattr(getattr(main, "__spec__", None), "name", None) == "skybuild.auto_patch_controller"
-            and Path(main.__file__).resolve() != checkout / "src" / "skybuild" / "auto_patch_controller.py"):
-        raise PermitError("Executing controller is outside the approved checkout")
+    entry = getattr(getattr(main, "__spec__", None), "name", None)
+    if (entry in {"skybuild.auto_patch_controller", "skybuild.auto_patch_worker"}
+            and Path(main.__file__).resolve() != checkout / "src" / "skybuild" / (entry.rsplit(".", 1)[1] + ".py")):
+        raise PermitError("Executing worker or controller is outside the approved checkout")
+
+
+def check_worker_permit(path: Path, expected_sha256: str, *, checkout: Path,
+                        assignment: dict, worker: str, patch_sha256: str,
+                        approved_until: datetime) -> None:
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise PermitError("Worker permit digest is invalid")
+    raw = _private_bytes(path, 16384)
+    if hashlib.sha256(raw).hexdigest() != expected_sha256:
+        raise PermitError("Worker permit bytes differ from approved controller input")
+    permit = json.loads(raw)
+    if (not isinstance(permit, dict) or permit.get("schema") != "skybuild.auto-cpu-patch-permit.v1"
+            or permit.get("profile") != "bounded-trusted-cpu-patch-v1"
+            or permit.get("slots") != 2 or _when(permit.get("approved_until")) != approved_until
+            or approved_until <= datetime.now(timezone.utc)):
+        raise PermitError("Worker permit scope or interval differs")
+    selected = permit.get("workers")
+    expected = {"task_id": assignment["task_id"], "worker": worker,
+                "assignment_id": assignment["assignment_id"], "brief_path": assignment["brief_path"],
+                "brief_sha256": assignment["brief_sha256"], "branch": assignment["branch"],
+                "base_sha": assignment["base_sha"], "revision": assignment["task_revision"],
+                "patch_sha256": patch_sha256, "envelope_sha256": envelope_sha256(assignment)}
+    if (not isinstance(selected, list) or len(selected) != 2
+            or sum(item == expected for item in selected) != 1):
+        raise PermitError("Worker assignment differs from approved exact permit")
+    check_source(checkout, permit, require_job_unit=False)
 
 
 def load(path: Path, expected_sha256: str, *, checkout: Path, selected: list[dict],
