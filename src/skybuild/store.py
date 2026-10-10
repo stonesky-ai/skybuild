@@ -309,7 +309,8 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
         self._dependencies(connection, project_id, task_id, values['dependencies'])
         after = self._task(connection, project_id, task_id)
         self._journal(connection, principal, after, before, operation=operation, reason=reason)
-        self._invalidate_dependents(connection, principal, project_id, task_id)
+        if not preserve_acceptance:
+            self._invalidate_dependents(connection, principal, project_id, task_id)
         return after
 
     @staticmethod
@@ -518,23 +519,30 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
                 'enabled_actions': [], 'evidence_freshness': 'current' if token.evidence and fresh else
                 'stale' if token.evidence else 'unavailable'}
 
+    def _workflow_control_context(self, connection, principal, task, context):
+        """Control requests wait for held ownership, including an expired claim.
+
+        Worker submission retains its separate fenced claim checks. This helper
+        changes only owner control facts and grants no execution permission.
+        """
+        checked = dict(context)
+        if connection.execute('SELECT 1 FROM task_claims WHERE project_id = %s AND task_id = %s AND held',
+                              (task['project_id'], task['task_id'])).fetchone():
+            checked['effects_resolved'] = False
+        if principal.is_admin:
+            marker = connection.execute('SELECT input_generation FROM task_readiness WHERE project_id = %s AND task_id = %s',
+                                        (task['project_id'], task['task_id'])).fetchone()
+            checked['current_inputs'] = bool(marker and marker['input_generation'] == self.workflow_token(task).input_generation)
+        return checked
+
     def _workflow_view(self, connection, principal, task):
         from .workflow import TaskWorkflow, TRANSITIONS
         token = self.workflow_token(task)
         context = self._workflow_context(connection, principal, task)
-        enabled = TaskWorkflow().enabled(token, context)
-        if principal.is_admin and not context['current_inputs']:
-            marker = connection.execute('SELECT input_generation FROM task_readiness WHERE project_id = %s AND task_id = %s',
-                                        (task['project_id'], task['task_id'])).fetchone()
-            controls = dict(context, current_inputs=bool(marker and marker['input_generation'] == token.input_generation))
-            try:
-                self._require_no_effect_exposure(connection, task['project_id'], task['task_id'])
-            except DomainError as error:
-                if error.code not in {'claim_conflict', 'effect_conflict', 'capacity_conflict'}:
-                    raise
-                controls['effects_resolved'] = False
-            names = {'hold', 'defer', 'release_hold', 'resume_deferred', 'reopen', 'update_control'}
-            enabled += tuple(name for name in TaskWorkflow().enabled(token, controls) if name in names and name not in enabled)
+        names = {'hold', 'defer', 'release_hold', 'resume_deferred', 'reopen', 'update_control'}
+        enabled = tuple(name for name in TaskWorkflow().enabled(token, context) if name not in names)
+        controls = self._workflow_control_context(connection, principal, task, context)
+        enabled += tuple(name for name in TaskWorkflow().enabled(token, controls) if name in names)
         return {'task': {**task, **self.workflow_projection(task), 'enabled_actions': list(enabled)},
                 'token': token.to_dict(), 'available_actions': list(enabled),
                 'transitions': [spec.to_dict() for spec in TRANSITIONS],
@@ -723,9 +731,7 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
                         # Control release reassesses a stored generation without execution approval.
                         if event in {'release_hold', 'resume_deferred', 'reopen'}:
                             self._require_no_effect_exposure(connection, project_id, task_id)
-                        marker = connection.execute('SELECT input_generation FROM task_readiness WHERE project_id = %s AND task_id = %s',
-                                                    (project_id, task_id)).fetchone()
-                        context['current_inputs'] = bool(marker and marker['input_generation'] == self.workflow_token(before).input_generation)
+                        context = self._workflow_control_context(connection, principal, before, context)
                     if event == 'validation_result' and 'result' in body:
                         from .workflow import ValidationResult, ValidationStage
                         result = ValidationResult.from_dict(body['result'])
