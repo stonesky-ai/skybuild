@@ -68,3 +68,106 @@ def test_runtime_go_record_is_required_before_docker(monkeypatch, tmp_path):
     monkeypatch.setattr(rehearsal, "_docker", lambda *_args, **_kwargs: pytest.fail("Docker must not run"))
     with pytest.raises(rehearsal.PreparationError, match="matching independent-review and root GO"):
         rehearsal.execute(tmp_path, evidence_path, path, tmp_path / "out.jsonl")
+
+
+def _private_journal(tmp_path):
+    private = tmp_path / "journal-private"
+    private.mkdir(mode=0o700, parents=True)
+    os.chmod(private, 0o700)
+    return rehearsal.Journal(private / "run.jsonl", {})
+
+
+def test_writer_probe_accepts_only_explicit_absence_and_fails_closed(monkeypatch, tmp_path):
+    journal = _private_journal(tmp_path)
+    monkeypatch.setattr(rehearsal, "_docker", lambda *_args, **_kwargs:
+                        rehearsal.subprocess.CompletedProcess([], 1, "", "Error: No such object: rehearsal"))
+    rehearsal._check_writers(["rehearsal"], expected=None, journal=journal)
+    journal.close()
+
+    monkeypatch.setattr(rehearsal, "_docker", lambda *_args, **_kwargs:
+                        rehearsal.subprocess.CompletedProcess([], 1, "", "Cannot connect to Docker daemon"))
+    journal = _private_journal(tmp_path / "second")
+    with pytest.raises(rehearsal.PreparationError, match="could not establish"):
+        rehearsal._check_writers(["rehearsal"], expected=None, journal=journal)
+    journal.close()
+
+
+def test_writer_probe_requires_the_expected_container_id(monkeypatch, tmp_path):
+    journal = _private_journal(tmp_path)
+    row = {"Name": "/rehearsal", "Id": "a" * 64, "State": {"Running": True}}
+    monkeypatch.setattr(rehearsal, "_docker", lambda *_args, **_kwargs:
+                        rehearsal.subprocess.CompletedProcess([], 0, json.dumps([row]), ""))
+    rehearsal._check_writers(["rehearsal"], expected="rehearsal", expected_id="a" * 64,
+                             journal=journal)
+    with pytest.raises(rehearsal.PreparationError, match="One-writer invariant"):
+        rehearsal._check_writers(["rehearsal"], expected="rehearsal", expected_id="b" * 64,
+                                 journal=journal)
+    journal.close()
+
+
+def test_all_rehearsal_container_runs_are_no_pull_and_resource_limited():
+    for profile in ("postgres", "api", "probe"):
+        prefix = rehearsal._docker_run_prefix(profile, "--rm")
+        assert prefix[:3] == ["run", "--pull=never", *rehearsal.RESOURCE_LIMITS[profile][:1]]
+        assert "--cpus=" in prefix[3]
+        assert "--pids-limit=" in prefix[4]
+    command = rehearsal._candidate_build_command("candidate:run", Path("Dockerfile"), Path("context"))
+    assert "--pull=false" in command
+    assert "--network=none" in command
+    assert f"--memory={rehearsal.BUILD_MEMORY}" in command
+    assert f"--cpu-quota={rehearsal.BUILD_CPU_QUOTA}" in command
+    assert rehearsal.BUILD_TIMEOUT_SECONDS > 0
+
+
+def test_psql_stdin_wiring_uses_interactive_exec(monkeypatch):
+    calls = []
+
+    def capture(*args, **kwargs):
+        calls.append((args, kwargs))
+        return rehearsal.subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(rehearsal, "_docker", capture)
+    rehearsal._psql_input("pg", "db", "CREATE SCHEMA skybuild;")
+    args, kwargs = calls[0]
+    assert args[:3] == ("exec", "-i", "pg")
+    assert kwargs["input_text"] == "CREATE SCHEMA skybuild;"
+
+
+def test_candidate_image_cleanup_removes_only_owned_full_image_id(monkeypatch, tmp_path):
+    journal = _private_journal(tmp_path)
+    image_id = "sha256:" + "a" * 64
+    reference = "skybuild-mvp-rehearsal:run"
+    labels = {"skybuild.rehearsal.run-id": "run", "skybuild.rehearsal.source": "b" * 40}
+    calls = []
+
+    def fake_docker(*args, **kwargs):
+        calls.append(args)
+        if args[:2] == ("image", "inspect") and args[-1] == reference:
+            if any(call[:3] == ("image", "rm", image_id) for call in calls):
+                return rehearsal.subprocess.CompletedProcess(args, 1, "", f"Error: No such object: {reference}")
+            return rehearsal.subprocess.CompletedProcess(args, 0, f"{image_id} {json.dumps(labels)}", "")
+        if args[:2] == ("image", "rm"):
+            return rehearsal.subprocess.CompletedProcess(args, 0, image_id, "")
+        pytest.fail(f"unexpected Docker call: {args}")
+
+    monkeypatch.setattr(rehearsal, "_docker", fake_docker)
+    rehearsal._cleanup_candidate_image(reference, "run", "b" * 40, journal, image_id)
+    assert ("image", "rm", image_id) in calls
+    journal.close()
+
+
+def test_candidate_image_cleanup_refuses_unowned_image(monkeypatch, tmp_path):
+    journal = _private_journal(tmp_path)
+    image_id = "sha256:" + "a" * 64
+    labels = {"skybuild.rehearsal.run-id": "other", "skybuild.rehearsal.source": "b" * 40}
+    calls = []
+
+    def fake_docker(*args, **kwargs):
+        calls.append(args)
+        return rehearsal.subprocess.CompletedProcess(args, 0, f"{image_id} {json.dumps(labels)}", "")
+
+    monkeypatch.setattr(rehearsal, "_docker", fake_docker)
+    with pytest.raises(rehearsal.PreparationError, match="not owned"):
+        rehearsal._cleanup_candidate_image("candidate:run", "run", "b" * 40, journal)
+    assert not any(call[:2] == ("image", "rm") for call in calls)
+    journal.close()

@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import signal
 import shutil
 import stat
 import subprocess
@@ -31,6 +32,16 @@ CANDIDATE_TREE = "ec84d8ed278d7d8fbf8e8bb219cb64ddb48f934f"
 CANDIDATE_REF = "refs/heads/dev-006"
 _SHA40 = re.compile(r"[0-9a-f]{40}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+RESOURCE_LIMITS = {
+    "postgres": ("--memory=2g", "--cpus=1", "--pids-limit=128"),
+    "api": ("--memory=1536m", "--cpus=1", "--pids-limit=128"),
+    "probe": ("--memory=1g", "--cpus=0.5", "--pids-limit=128"),
+}
+BUILD_TIMEOUT_SECONDS = 900
+BUILD_MEMORY = "1g"
+BUILD_CPU_QUOTA = "50000"
+BUILD_CPU_PERIOD = "100000"
+BUILD_PID_LIMIT = 128
 
 
 class PreparationError(ValueError):
@@ -162,6 +173,17 @@ def prepare(checkout: Path, evidence_path: Path, candidate_source: str = CANDIDA
                       "package_version": re.search(r"(?m)^__version__\s*=\s*['\"]([^'\"]+)", version)[1]},
         "schema": {"version": 13, "migration_digests_match": True,
                    "migrations": candidate_digests},
+        "resource_budget": {
+            "minimum_host_available_gib": 8,
+            "peak_concurrent_limited_memory_gib": 4.5,
+            "additional_host_headroom_gib": 3.5,
+            "postgres": {"memory": "2g", "cpus": 1, "pids": 128},
+            "api_or_candidate": {"memory": "1536m", "cpus": 1, "pids": 128},
+            "one_shot_probe": {"memory": "1g", "cpus": 0.5, "pids": 128},
+            "candidate_build": {"memory": BUILD_MEMORY, "cpu_quota": BUILD_CPU_QUOTA,
+                                 "cpu_period": BUILD_CPU_PERIOD, "pids": BUILD_PID_LIMIT,
+                                 "timeout_seconds": BUILD_TIMEOUT_SECONDS},
+        },
         "runtime_gate": [
             "Use a new isolated Docker network and disposable PostgreSQL data directory; no live mounts, credentials, or published ports.",
             "Load representative synthetic task and Cord history through the pinned accepted controller image.",
@@ -183,6 +205,99 @@ def _docker(*args: str, input_text: str | None = None, timeout: int = 120,
     if check and result.returncode:
         raise PreparationError("Isolated Docker rehearsal command failed: " + args[0])
     return result
+
+
+def _docker_run_prefix(profile: str, *mode: str) -> list[str]:
+    if profile not in RESOURCE_LIMITS:
+        raise PreparationError("Unknown rehearsal container resource profile")
+    return ["run", "--pull=never", *RESOURCE_LIMITS[profile], *mode]
+
+
+def _candidate_build_command(image: str, dockerfile: Path, context: Path) -> list[str]:
+    return ["docker", "build", "--pull=false", "--no-cache", "--network=none",
+            "--memory=" + BUILD_MEMORY, "--memory-swap=" + BUILD_MEMORY,
+            "--cpu-period=" + BUILD_CPU_PERIOD, "--cpu-quota=" + BUILD_CPU_QUOTA,
+            "--ulimit", f"nproc={BUILD_PID_LIMIT}:{BUILD_PID_LIMIT}",
+            "--tag", image, "--file", str(dockerfile), str(context)]
+
+
+def _image_details(reference: str, *, check: bool = True) -> tuple[str, dict]:
+    result = _docker("image", "inspect", "--format",
+                     '{{.Id}} {{json .Config.Labels}}', reference, check=check, timeout=10)
+    if result.returncode:
+        return "", {}
+    fields = result.stdout.strip().split(" ", 1)
+    if len(fields) != 2 or not re.fullmatch(r"sha256:[0-9a-f]{64}", fields[0]):
+        raise PreparationError("Image identity or labels are ambiguous")
+    try:
+        labels = json.loads(fields[1]) or {}
+    except json.JSONDecodeError as error:
+        raise PreparationError("Image labels could not be verified") from error
+    if not isinstance(labels, dict):
+        raise PreparationError("Image labels could not be verified")
+    return fields[0], labels
+
+
+def _require_image_absent(reference: str) -> None:
+    result = _docker("image", "inspect", reference, check=False, timeout=10)
+    if result.returncode == 0:
+        raise PreparationError("Unique rehearsal image reference already exists")
+    if result.stderr.strip() not in {f"Error: No such object: {reference}",
+                                     f"Error: No such image: {reference}"}:
+        raise PreparationError("Docker could not establish that the rehearsal image reference is unused")
+
+
+def _cleanup_candidate_image(reference: str, run_id: str, source: str, journal: "Journal",
+                             expected_image_id: str | None = None) -> None:
+    result = _docker("image", "inspect", "--format", '{{.Id}} {{json .Config.Labels}}',
+                     reference, check=False, timeout=10)
+    if result.returncode:
+        if result.stderr.strip() in {f"Error: No such object: {reference}",
+                                     f"Error: No such image: {reference}"}:
+            journal.event("candidate_image_cleanup_acknowledged", image_reference=reference,
+                          image_absent=True)
+            return
+        raise PreparationError("Docker could not establish whether the rehearsal image remains")
+    fields = result.stdout.strip().split(" ", 1)
+    if len(fields) != 2 or not re.fullmatch(r"sha256:[0-9a-f]{64}", fields[0]):
+        raise PreparationError("Candidate image cleanup identity is ambiguous")
+    image_id = fields[0]
+    try:
+        labels = json.loads(fields[1]) or {}
+    except json.JSONDecodeError as error:
+        raise PreparationError("Candidate image cleanup labels are ambiguous") from error
+    if (not isinstance(labels, dict) or labels.get("skybuild.rehearsal.run-id") != run_id
+            or labels.get("skybuild.rehearsal.source") != source):
+        raise PreparationError("Candidate image is not owned by this rehearsal; it was retained")
+    if expected_image_id is not None and image_id != expected_image_id:
+        raise PreparationError("Candidate image reference no longer resolves to the journaled immutable ID")
+    _docker("image", "rm", image_id, timeout=15)
+    verify = _docker("image", "inspect", reference, check=False, timeout=10)
+    if verify.returncode == 0 or verify.stderr.strip() not in {
+            f"Error: No such object: {reference}", f"Error: No such image: {reference}"}:
+        raise PreparationError("Candidate image removal was not verifiably acknowledged")
+    journal.event("candidate_image_cleanup_acknowledged", image_reference=reference,
+                  image_id=image_id)
+
+
+def _psql_input(container: str, database: str, sql: str, *, timeout: int = 15) -> None:
+    """Send SQL on stdin to psql inside the disposable PostgreSQL container."""
+    _docker("exec", "-i", container, "psql", "-U", "postgres", "-d", database,
+            "-v", "ON_ERROR_STOP=1", input_text=sql, timeout=timeout)
+
+
+def _stop_build_process(process: subprocess.Popen) -> None:
+    """Stop the local Docker build client and wait for it before cleanup proceeds."""
+    if process.poll() is not None:
+        return
+    with suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGTERM)
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=5)
 
 
 class Journal:
@@ -325,7 +440,7 @@ def _provision_principals(network: str, accepted_image: str, admin_dsn: str, run
         "s.provision_principal(os.environ['WORKER_ID'],os.environ['WORKER_TOKEN'],grants={os.environ['PROJECT']:["
         "'tasks:read','tasks:write','cord:read','cord:send','cord:handle']})"
     )
-    _docker("run", "--rm", "--network", network,
+    _docker(*_docker_run_prefix("probe", "--rm"), "--network", network,
             "--env", "SKYBUILD_ADMIN_DSN=" + admin_dsn,
             "--env", "SKYBUILD_EXPECTED_DATABASE=skybuild_rehearsal",
             "--env", "RUNTIME_ROLE=" + runtime_role,
@@ -344,7 +459,7 @@ def _candidate_compatibility_probe(network: str, image_id: str, dsn: str) -> dic
         "route=next(r for r in app.routes if r.path=='/version' and 'GET' in r.methods); "
         "print(json.dumps({'ready':ready,'version':route.endpoint()},sort_keys=True))"
     )
-    result = _docker("run", "--rm", "--network", network,
+    result = _docker(*_docker_run_prefix("probe", "--rm"), "--network", network,
                      "--env", "SKYBUILD_DSN=" + dsn,
                      "--env", "SKYBUILD_EXPECTED_DATABASE=skybuild_rehearsal",
                      image_id, "python", "-c", program, timeout=30)
@@ -360,16 +475,24 @@ def _candidate_compatibility_probe(network: str, image_id: str, dsn: str) -> dic
     return response
 
 
-def _check_writers(names: list[str], expected: str | None, journal: Journal) -> None:
+def _check_writers(names: list[str], expected: str | None, journal: Journal,
+                   expected_id: str | None = None) -> None:
     active = []
     for name in names:
         result = _docker("inspect", "--type", "container", name, check=False, timeout=10)
         if result.returncode == 0:
-            row = json.loads(result.stdout)[0]
+            rows = json.loads(result.stdout)
+            if len(rows) != 1 or rows[0].get("Name", "").lstrip("/") != name:
+                raise PreparationError("Controller writer identity is ambiguous")
+            row = rows[0]
             if row["State"]["Running"]:
                 active.append((name, row["Id"]))
+        elif result.stderr.strip() not in {
+                f"Error: No such object: {name}", f"Error: No such container: {name}"}:
+            raise PreparationError("Docker could not establish whether a controller writer exists")
     journal.event("writer_count_checked", active=active, expected=expected or "none")
-    if (expected is None and active) or (expected is not None and (len(active) != 1 or active[0][0] != expected)):
+    if (expected is None and active) or (expected is not None
+            and (len(active) != 1 or active[0] != (expected, expected_id))):
         raise PreparationError("One-writer invariant failed or is uncertain")
 
 
@@ -441,9 +564,11 @@ def execute(checkout: Path, evidence_path: Path, go_path: Path, evidence_output:
     network_id = None
     network_owned = False
     volume_owned = False
+    candidate_image_id = None
+    build_process = None
 
-    def create_container(name: str, *args: str, timeout: int = 30) -> dict:
-        launched = _docker("run", "-d", "--name", name, "--label",
+    def create_container(name: str, *args: str, profile: str = "api", timeout: int = 30) -> dict:
+        launched = _docker(*_docker_run_prefix(profile, "-d"), "--name", name, "--label",
                            "skybuild.rehearsal.run-id=" + run_id, *args, timeout=timeout)
         container_id = launched.stdout.strip()
         if not re.fullmatch(r"[0-9a-f]{64}", container_id):
@@ -483,10 +608,12 @@ def execute(checkout: Path, evidence_path: Path, go_path: Path, evidence_output:
             raise PreparationError("Database volume is not owned by this rehearsal")
         volume_owned = True
         journal.event("database_volume_created", volume=volume)
+        _require_image_absent(candidate_image)
         pg_info = create_container(pg, "--network", network, "--network-alias", "db",
                 "--mount", f"type=volume,src={volume},dst=/var/lib/postgresql/data",
                 "--mount", f"type=bind,src={password_file},dst=/run/secrets/admin-password,readonly",
-                "--env", "POSTGRES_PASSWORD_FILE=/run/secrets/admin-password", pg_image, timeout=30)
+                "--env", "POSTGRES_PASSWORD_FILE=/run/secrets/admin-password", pg_image,
+                profile="postgres", timeout=30)
         pg_id = pg_info["id"]
         journal.event("postgres_started", container=pg, container_id=pg_id, image_id=pg_image)
         ready_deadline = time.monotonic() + 45
@@ -503,21 +630,19 @@ def execute(checkout: Path, evidence_path: Path, go_path: Path, evidence_output:
                       image_id=pg_image, system_identifier=database_system_id)
         _docker("exec", pg, "psql", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1",
                 "-c", "CREATE DATABASE skybuild_rehearsal", timeout=10)
-        _docker("exec", pg, "psql", "-U", "postgres", "-d", "skybuild_rehearsal", "-v", "ON_ERROR_STOP=1",
-                input_text="CREATE SCHEMA skybuild; SET search_path TO skybuild, pg_catalog; "
-                           "CREATE TABLE schema_migrations (version integer PRIMARY KEY, digest text NOT NULL);\n",
-                timeout=10)
+        _psql_input(pg, "skybuild_rehearsal",
+                    "CREATE SCHEMA skybuild; SET search_path TO skybuild, pg_catalog; "
+                    "CREATE TABLE schema_migrations (version integer PRIMARY KEY, digest text NOT NULL);\n",
+                    timeout=10)
         _docker("exec", pg, "psql", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1",
                 "-c", f'CREATE ROLE "{runtime_role}" LOGIN PASSWORD \'{runtime_password}\'', timeout=10)
         for migration in schema_manifest(checkout, candidate_source):
             sql = _blob(checkout, candidate_source, migration["path"]).decode("utf-8")
-            _docker("exec", "-i", pg, "psql", "-U", "postgres", "-d", "skybuild_rehearsal",
-                    "-v", "ON_ERROR_STOP=1", input_text="SET search_path TO skybuild, pg_catalog;\n" + sql,
-                    timeout=15)
+            _psql_input(pg, "skybuild_rehearsal", "SET search_path TO skybuild, pg_catalog;\n" + sql,
+                        timeout=15)
             insert = ("SET search_path TO skybuild, pg_catalog; INSERT INTO schema_migrations "
                       f"VALUES ({migration['version']}, '{migration['sha256']}');\n")
-            _docker("exec", "-i", pg, "psql", "-U", "postgres", "-d", "skybuild_rehearsal",
-                    "-v", "ON_ERROR_STOP=1", input_text=insert, timeout=10)
+            _psql_input(pg, "skybuild_rehearsal", insert, timeout=10)
         journal.event("schema_initialized", schema_version=13,
                       migration_digests=[row["sha256"] for row in plan["schema"]["migrations"]],
                       runtime_role=runtime_role)
@@ -563,31 +688,47 @@ def execute(checkout: Path, evidence_path: Path, go_path: Path, evidence_output:
                 tar.extractall(context, filter="data")
             (context / "Dockerfile").write_text(
                 f"FROM {accepted_image}\nCOPY src/skybuild /candidate/skybuild\n"
+                f"LABEL skybuild.rehearsal.run-id={run_id} skybuild.rehearsal.source={candidate_source}\n"
                 "ENV PYTHONPATH=/candidate\n"
                 "RUN python -c 'import hashlib; value=b\"skybuild-controller-update\"; "
                 "assert sum(hashlib.sha256(value).digest()[0] for _ in range(5000000)) >= 0'\n",
                 encoding="ascii")
-            build = subprocess.Popen(["docker", "build", "--pull=false", "--no-cache", "--network=none",
-                                      "--tag", candidate_image, "--file", str(context / "Dockerfile"),
-                                      str(context)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            build_process = subprocess.Popen(
+                _candidate_build_command(candidate_image, context / "Dockerfile", context),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
             probes = 0
-            while build.poll() is None:
-                probe = _docker("exec", old, "python", "-c",
-                                "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready',timeout=2).read()",
-                                check=False, timeout=5)
-                if probe.returncode:
-                    build.terminate()
-                    build.wait(timeout=5)
-                    raise PreparationError("Accepted controller stopped responding during candidate build")
-                probes += 1
-                journal.event("accepted_responsive_during_build", container_id=old_id, probe=probes)
-                time.sleep(1)
-            if build.returncode != 0 or probes < 1:
+            build_returncode = None
+            build_deadline = time.monotonic() + BUILD_TIMEOUT_SECONDS
+            try:
+                while build_process.poll() is None:
+                    if time.monotonic() >= build_deadline:
+                        raise PreparationError("Candidate build exceeded its reviewed time limit")
+                    probe = _docker("exec", old, "python", "-c",
+                                    "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready',timeout=2).read()",
+                                    check=False, timeout=5)
+                    if probe.returncode:
+                        raise PreparationError("Accepted controller stopped responding during candidate build")
+                    probes += 1
+                    journal.event("accepted_responsive_during_build", container_id=old_id, probe=probes)
+                    time.sleep(1)
+            finally:
+                _stop_build_process(build_process)
+                build_returncode = build_process.returncode
+                journal.event("candidate_build_process_reaped", returncode=build_returncode,
+                              completed=build_returncode == 0)
+                build_process = None
+            if build_returncode != 0 or probes < 1:
                 raise PreparationError("Pinned isolated candidate image build failed or was not observed")
-        candidate_id = _image_id(candidate_image)
+        candidate_image_id, candidate_labels = _image_details(candidate_image)
+        if (candidate_labels.get("skybuild.rehearsal.run-id") != run_id
+                or candidate_labels.get("skybuild.rehearsal.source") != candidate_source):
+            raise PreparationError("Candidate image labels do not match this rehearsal and source pin")
+        if candidate_image_id != _image_id(candidate_image):
+            raise PreparationError("Candidate image identity changed after build")
+        candidate_id = candidate_image_id
         journal.event("candidate_built", image_reference=candidate_image, candidate_image_id=candidate_id,
                       base_image_id=accepted_image, source=candidate_source, tree=candidate_tree)
-        _check_writers(names, expected=old, journal=journal)
+        _check_writers(names, expected=old, journal=journal, expected_id=old_id)
         accepted_version = _api_json(old, "GET", "/version", owner_token)
         candidate_contract = _candidate_compatibility_probe(network, candidate_id, runtime_dsn)
         if (accepted_version.get("service") != candidate_contract["version"].get("service")
@@ -632,7 +773,7 @@ def execute(checkout: Path, evidence_path: Path, go_path: Path, evidence_output:
             raise PreparationError("Manual recovery acknowledgment did not match a running accepted controller")
         journal.event("manual_recovery_start_acknowledged", container=old, container_id=old_id)
         _wait_api(old, journal)
-        _check_writers(names, expected=old, journal=journal)
+        _check_writers(names, expected=old, journal=journal, expected_id=old_id)
         recovered_task = _api_json(old, "GET", project_path + "/tasks/" + task, owner_token)
         recovered_inbox = _api_json(old, "GET", project_path + "/cord/inbox", worker_token)
         if recovered_task.get("task_id") != task or not any(row.get("message_id") == message_id for row in recovered_inbox):
@@ -655,7 +796,7 @@ def execute(checkout: Path, evidence_path: Path, go_path: Path, evidence_output:
         journal.event("candidate_started", container=candidate, container_id=candidate_container["id"],
                       image_id=candidate_id)
         _wait_api(candidate, journal)
-        _check_writers(names, expected=candidate, journal=journal)
+        _check_writers(names, expected=candidate, journal=journal, expected_id=candidate_container["id"])
         identity = _api_json(candidate, "GET", "/api/v1/me", owner_token)
         task_after = _api_json(candidate, "GET", project_path + "/tasks/" + task, owner_token)
         inbox_after = _api_json(candidate, "GET", project_path + "/cord/inbox", worker_token)
@@ -684,6 +825,14 @@ def execute(checkout: Path, evidence_path: Path, go_path: Path, evidence_output:
     finally:
         # Cleanup is fail-closed: every removal is individually journaled; any
         # uncertain Docker acknowledgment makes the result unsuccessful.
+        if build_process is not None:
+            try:
+                _stop_build_process(build_process)
+                journal.event("candidate_build_process_stopped", returncode=build_process.returncode)
+            except Exception as error:
+                cleanup_errors.append("candidate-build-process")
+                with suppress(Exception):
+                    journal.event("candidate_build_process_cleanup_unconfirmed", error=type(error).__name__)
         for name in [candidate, failed, old, pg]:
             container_id = created_containers.get(name)
             if container_id is None:
@@ -710,6 +859,14 @@ def execute(checkout: Path, evidence_path: Path, go_path: Path, evidence_output:
                 cleanup_errors.append(name)
                 with suppress(Exception):
                     journal.event("container_cleanup_unconfirmed", container=name, error=type(error).__name__)
+        try:
+            _cleanup_candidate_image(candidate_image, run_id, candidate_source, journal,
+                                     candidate_image_id)
+        except Exception as error:
+            cleanup_errors.append(candidate_image)
+            with suppress(Exception):
+                journal.event("candidate_image_cleanup_unconfirmed", image_reference=candidate_image,
+                              image_id=candidate_image_id, error=type(error).__name__)
         if network_owned:
             network_identity = _docker("network", "inspect", "--format",
                                        '{{.Id}} {{index .Labels "skybuild.rehearsal.run-id"}}',
