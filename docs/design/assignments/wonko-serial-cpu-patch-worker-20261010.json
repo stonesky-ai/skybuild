@@ -1,0 +1,29 @@
+{
+  "schema": "manual-work-brief-v1",
+  "assignment_id": "WONKO-CPU-WORKER-20261010-001",
+  "task_id": "SKYBUILD-SERIAL-CPU-PATCH-WORKER",
+  "worker": "wonko_cpu_smoke_01",
+  "dispatcher": "pilot_dispatcher",
+  "branch": "task/serial-cpu-patch-worker-20261010",
+  "owned_paths": [
+    "scripts/cpu_patch_worker.py",
+    "tests/test_cpu_patch_worker.py"
+  ],
+  "checks": [
+    "Use architecture A45 and its matching implementation plan. Dispatch only after qualified runtime/profile, with this exact committed brief already in the actual published dev-006 base.",
+    "Bind the current Ready task revision, assignment, approved patch SHA-256, exact base/brief bytes, branch and owned paths; receive, fence-claim and renew through REST/Cord.",
+    "Use one clean owned branch/worktree and one explicitly approved nonsecret CPU patch. No model, provider query, paid API, service deployment or candidate-code execution.",
+    "Require the approved shared native weekly pool/reset/config and fresh quota lease before each new mutating Git/API/file call. At >=50%, unknown/stale usage or deadline, drain and checkpoint; never bypass by switching accounts.",
+    "Run finite AST syntax checks and git diff --check against the pinned base. Require exact index/committed bytes, modes, sole parent and owned paths; refuse hooks, filters and normalization drift.",
+    "Push and verify the exact checked head; submit the current branch/head/base/attempt/fence/input binding through REST before Cord. Preserve actual claim, renewal, patch, Git, checks and submission artifacts.",
+    "Separate actual validation producers record all five current Petri stages. Obtain independent exact-head review, component tests and the frozen bundle default full gate; never manufacture passing or not-applicable evidence.",
+    "Admit no next task until confirmed dev inclusion, owner-attested REST acceptance and current Done. Unknown publication or response retains ownership and requires observation, never blind replay.",
+    "Apply the approved portable serial CPU worker patch. Allow only explicitly approved hash-pinned patches and committed briefs; actual Ready/fenced REST claim, renewal and current input binding precede work.",
+    "Clamp Git hooks, filters and normalization; verify exact index and committed bytes/modes, sole pinned parent and allowed paths. Never run the unreviewed candidate, invoke models/admin/publication, or replay an unknown write.",
+    "Refresh the native quota lease before every new mutating Git/API/file call; retain >=50% high-water and stale/unknown drain. Allow durable checkpoint/reconciliation after drain, but no next write stage or task.",
+    "Commit meaningful public tests importing the actual repository script for assignment/patch/scope guards, ownership/renewal, quota expiry/drain, exact Git bytes and unknown-effect reconciliation.",
+    "The component cannot attest its own review, validation, gate or publication. The owner separately runs component tests and the full frozen gate; acceptance and current Done gate task two."
+  ],
+  "model_limit": "One bounded CPU-only hash-pinned patch. No model, paid API, candidate execution, service daemon or new task launch.",
+  "next_action": "After the weekly guard is accepted and separate runtime/profile/assignment qualification holds, apply the approved serial CPU worker patch, check, commit, push and submit. Await actual validation, independent review, frozen gate and dev acceptance before further processing."
+}
