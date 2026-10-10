@@ -66,6 +66,23 @@ def test_launch_is_niced_capped_isolated_and_durable(tmp_path):
     assert not any("GH_TOKEN" in item for item in command)
 
 
+def test_pinned_launch_nonce_and_invocation_are_returned(tmp_path):
+    fake = FakeSystemd()
+    job = spec(tmp_path, launch_nonce="b" * 32)
+    manager = JobUnitManager(tmp_path / "state", run=fake)
+    unit = manager.start(job)
+    observed = manager.observe(unit)
+    manifest = json.loads((tmp_path / "state" / f"{unit}.json").read_text())
+    assert manifest["launch_nonce"] == "b" * 32
+    assert observed.launch_nonce == "b" * 32
+    assert observed.invocation_id == fake.invocation
+
+
+def test_launch_nonce_must_be_exact_lowercase_hex(tmp_path):
+    with pytest.raises(JobUnitError, match="launch_nonce"):
+        spec(tmp_path, launch_nonce="B" * 32).validate()
+
+
 def test_existing_intent_prevents_replay_after_restart(tmp_path):
     fake = FakeSystemd()
     job = spec(tmp_path)
