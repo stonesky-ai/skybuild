@@ -181,7 +181,7 @@ class Client:
         """Submit caller details. Store computes all guards in one transaction."""
         from .workflow import TRANSITIONS
 
-        if event not in {spec.event for spec in TRANSITIONS} | {"initialize"}:
+        if not isinstance(event, str) or event not in {spec.event for spec in TRANSITIONS} | {"initialize"}:
             raise ValueError("Unknown workflow event")
         if body is not None and (not isinstance(body, dict) or "event" in body):
             raise ValueError("Workflow details cannot replace the event")
