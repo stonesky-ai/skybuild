@@ -281,6 +281,7 @@ def test_binding_order_does_not_change_owned_addresses(promotion):
 def test_schema_010_role_audit_and_atomic_candidate_requalification(monkeypatch):
     from uuid import uuid4
     from psycopg import sql
+    from psycopg.types.json import Jsonb
     from psycopg.conninfo import conninfo_to_dict, make_conninfo
     from fastapi.testclient import TestClient
     from skybuild.api import create_app
@@ -333,6 +334,27 @@ def test_schema_010_role_audit_and_atomic_candidate_requalification(monkeypatch)
             assert runtime_role.provision_runtime_role(connection, target, role)['ok'] is True
 
         class Accepted010Store(Store):
+            # Model the accepted controller's schema-010 write contract exactly.
+            # Current production Store remains strict about schema-013 enrollment.
+            @staticmethod
+            def _new_task_metadata(task):
+                return task['metadata']
+
+            @staticmethod
+            def _journal(connection, principal, after, before=None, *, operation=None,
+                         reason=None, event_facts=None):
+                assert event_facts is None, 'Schema-010 controller cannot write Petri events'
+                operation = operation or ('updated' if before else 'created')
+                if operation == 'created':
+                    connection.execute(
+                        'INSERT INTO task_readiness (project_id, task_id) VALUES (%s, %s) ON CONFLICT DO NOTHING',
+                        (after['project_id'], after['task_id']))
+                connection.execute(
+                    'INSERT INTO task_journal (event_id, project_id, task_id, actor, operation, revision, reason, before_state, after_state) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)',
+                    (uuid4(), after['project_id'], after['task_id'], principal.principal_id,
+                     operation, after['revision'], reason or 'Task ' + operation,
+                     Jsonb(before) if before else None, Jsonb(after)))
+
             def readiness(self):
                 with self._connection() as connection:
                     versions = connection.execute(
@@ -367,7 +389,13 @@ def test_schema_010_role_audit_and_atomic_candidate_requalification(monkeypatch)
             inbox = client.get(api + '/cord/inbox', headers=headers(worker_token))
             assert inbox.status_code == 200, inbox.text
             assert [message['subject'] for message in inbox.json()] == ['Pinned assignment']
-            return task_history.json(), inbox.json()
+            history = task_history.json()
+            # Migration 013 adds a nullable column to these unchanged records.
+            # Remove only its empty projection; retain any unexpected event facts.
+            for event in history:
+                if event.get('event_facts') is None:
+                    event.pop('event_facts', None)
+            return history, inbox.json()
 
         accepted = Accepted010Store(runtime_dsn, target)
         with TestClient(create_app(accepted)) as client:

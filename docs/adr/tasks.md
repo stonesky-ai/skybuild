@@ -24,3 +24,19 @@ Attempts, processes and workers describe execution. Bundles group tasks. Keep CP
 Provide an early task page for scope/definition edits, rework, split/merge, dependency changes and date/milestone deferral. Append each action and correction to the journal; never edit or delete historical events. Keep definitions and projections mutable, while preserving prior versions, attribution, evidence and lineage. Defer multi-person approval chains; preserve actor identity now. A planning scan may propose changes but cannot silently alter accepted scope or spending authority.
 
 Proposed mechanics: commit mutations, journal events and invalidations together; evaluate captured input generations and reject stale projection writes. Use expected revisions, cycle checks and budget/ID lineage for structural edits. Reconcile old effects before replacement work. Deferral triggers reassessment, not automatic model launch. Keep stalled transitions visible with a named resolver. See [workflow contract](../design/task_workflow.md) and architecture sections 5, 9 and 13.
+
+### Petri refinement, 2026-10-09
+
+**The seven-place requirement is accepted. The implementation remains proposed.**
+The owner names the project Petri and assigns priority 2.
+Use Ready, Working, Validating, Integrating, Done, Deferred and Hold.
+The token carries unit tests, scans, long tests, code review and needs-rebase evidence.
+Confirmed validation and integration failures return the task to Ready with the fault.
+These places replace the earlier proposed review, rework, rebase and assessment places.
+Historical records do not change.
+
+The [Petri plan](../design/petri_workflow.md) recommends four small classes and one fixed transition table.
+Existing Store transactions remain the application boundary.
+SNAKES remains an optional modeling library, not an initial runtime dependency.
+The owner approves implementation through subtasks, in parallel where dependencies permit.
+Existing history, authority, fencing, review and deployment controls remain applicable.

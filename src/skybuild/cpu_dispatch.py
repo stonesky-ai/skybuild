@@ -63,7 +63,7 @@ class CPUDispatch:
             raise DomainError('stale_revision', 'Task revision has changed', 409)
         readiness = connection.execute('SELECT * FROM task_readiness WHERE project_id = %s AND task_id = %s',
                                        (project, task_id)).fetchone()
-        if (task['status'] != 'ready' or not readiness or
+        if (not readiness or
                 readiness['input_generation'] != reservation['readiness_generation'] or
                 readiness['assessed_generation'] != reservation['readiness_generation']):
             raise DomainError('workflow_conflict', 'CPU dispatch requires current readiness', 409)
@@ -71,9 +71,10 @@ class CPUDispatch:
         actor = self.store._principal(connection, reservation['actor'])
         self.store._authorize(connection, actor, project, 'tasks:claim')
         self.store._require_claim_fence(connection, actor, project, task_id, reservation['claim_fence'])
-        claim = connection.execute('SELECT task_revision FROM task_claims WHERE project_id = %s AND task_id = %s',
+        claim = connection.execute('SELECT * FROM task_claims WHERE project_id = %s AND task_id = %s',
                                    (project, task_id)).fetchone()
-        if claim['task_revision'] != reservation['task_revision']:
+        if (claim['task_revision'] != (reservation.get('claim_task_revision') or reservation['task_revision'])
+                or not self.store._cpu_task_binding(task, claim, reservation['readiness_generation'], reservation['attempt_id'])):
             raise DomainError('claim_conflict', 'Claim revision does not match reservation', 409)
 
     @staticmethod
@@ -84,7 +85,7 @@ class CPUDispatch:
             'AND held AND holder = %s AND fence = %s AND task_revision = %s '
             'AND lease_until > clock_timestamp()',
             (reservation['project_id'], reservation['task_id'], reservation['actor'],
-             reservation['claim_fence'], reservation['task_revision'])).fetchone()
+             reservation['claim_fence'], reservation.get('claim_task_revision') or reservation['task_revision'])).fetchone()
 
     def prepare_fake(self, principal, project_id, action_id, operation_id, *, input_digest):
         """Commit uncertain fake intent before any simulator call; replay never launches."""

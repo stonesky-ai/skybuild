@@ -136,10 +136,12 @@ class CPUAdmission:
         if task['revision'] != request['task_revision']:
             raise DomainError('stale_revision', 'Task revision has changed', 409)
         claim = connection.execute('SELECT *, lease_until > clock_timestamp() AS live FROM task_claims WHERE project_id = %s AND task_id = %s' + suffix, (project_id, task_id)).fetchone()
-        if not claim or not claim['held'] or not claim['live'] or claim['fence'] != request['claim_fence'] or claim['holder'] != principal.principal_id or claim['task_revision'] != request['task_revision']:
+        if not claim or not claim['held'] or not claim['live'] or claim['fence'] != request['claim_fence'] or claim['holder'] != principal.principal_id:
             raise DomainError('claim_conflict', 'CPU reservation requires current claim holder, lease and fence', 409)
         readiness = connection.execute('SELECT * FROM task_readiness WHERE project_id = %s AND task_id = %s', (project_id, task_id)).fetchone()
-        if task['status'] != 'ready' or not readiness or readiness['input_generation'] != request['readiness_generation'] or readiness['assessed_generation'] != request['readiness_generation']:
+        if (not readiness or readiness['input_generation'] != request['readiness_generation']
+                or readiness['assessed_generation'] != request['readiness_generation']
+                or not self._cpu_task_binding(task, claim, request['readiness_generation'], request['attempt_id'])):
             raise DomainError('workflow_conflict', 'CPU reservation requires current readiness', 409)
         self._require_current_dependencies(connection, project_id, task)
         self._require_no_external_exposure(connection, project_id, task_id)
@@ -182,9 +184,13 @@ class CPUAdmission:
             try:
                 prior = self._cpu_eligibility(connection, principal, project_id, request,
                                               self._cpu_digest(principal, project_id, request), observed, lock=False)
-                if prior is None and not connection.execute(_CURRENT_CPU_CLAIM,
-                        (project_id, task_id, principal.principal_id, claim_fence, expected_revision)).fetchone():
-                    raise DomainError('claim_conflict', 'Ownership lease expired before CPU reservation', 409)
+                if prior is None:
+                    claim_revision = connection.execute(
+                        'SELECT task_revision FROM task_claims WHERE project_id = %s AND task_id = %s',
+                        (project_id, task_id)).fetchone()['task_revision']
+                    if not connection.execute(_CURRENT_CPU_CLAIM,
+                            (project_id, task_id, principal.principal_id, claim_fence, claim_revision)).fetchone():
+                        raise DomainError('claim_conflict', 'Ownership lease expired before CPU reservation', 409)
             except DomainError as error:
                 if error.code not in {'control_conflict', 'stale_revision', 'claim_conflict', 'workflow_conflict',
                                       'effect_conflict', 'capacity_conflict', 'idempotency_conflict', 'not_found'}:
@@ -216,11 +222,13 @@ class CPUAdmission:
             prior = self._cpu_eligibility(connection, principal, project_id, request, digest, {}, lock=True)
             if prior:
                 return _public(prior)
-            inserted = connection.execute('INSERT INTO cpu_reservations (action_id, attempt_id, project_id, task_id, actor, claim_fence, task_revision, readiness_generation, generation, local_generation, units, intent_hash) '
-                                          'SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s '
+            claim_revision = connection.execute('SELECT task_revision FROM task_claims WHERE project_id = %s AND task_id = %s',
+                                                (project_id, task_id)).fetchone()['task_revision']
+            inserted = connection.execute('INSERT INTO cpu_reservations (action_id, attempt_id, project_id, task_id, actor, claim_fence, task_revision, readiness_generation, generation, local_generation, units, intent_hash, claim_task_revision) '
+                                          'SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s '
                                           'WHERE EXISTS (' + _CURRENT_CPU_CLAIM + ')',
-                                          (action_id, attempt_id, project_id, task_id, principal.principal_id, claim_fence, expected_revision, readiness_generation, generation, local_generation, units, digest,
-                                           project_id, task_id, principal.principal_id, claim_fence, expected_revision))
+                                          (action_id, attempt_id, project_id, task_id, principal.principal_id, claim_fence, expected_revision, readiness_generation, generation, local_generation, units, digest, claim_revision,
+                                           project_id, task_id, principal.principal_id, claim_fence, claim_revision))
             if inserted.rowcount != 1:
                 raise DomainError('claim_conflict', 'Ownership lease expired before CPU reservation', 409)
             after = connection.execute('SELECT * FROM cpu_reservations WHERE action_id = %s', (action_id,)).fetchone()

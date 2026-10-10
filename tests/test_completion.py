@@ -3,6 +3,7 @@
 from copy import deepcopy
 import os
 from uuid import uuid4
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -90,6 +91,12 @@ def service():
         yield client, store, project, tokens
 
 
+def create_legacy_task(store, principal, project, body, key):
+    """Construct pre-Petri acceptance input without changing production guards."""
+    with patch.object(store, "_new_task_metadata", side_effect=lambda task: task["metadata"]):
+        return store.create_task(principal, project, body, key)
+
+
 def headers(token, key, revision=None):
     result = {"Authorization": "Bearer " + token, "Idempotency-Key": key}
     if revision is not None:
@@ -102,7 +109,9 @@ def test_completion_http_atomic_replay_authorization_and_reopening(service):
     base = f"/api/v1/projects/{project}/tasks"
     create = {"task_id": "T1", "title": "Task", "description": "Exact definition",
               "acceptance_criteria": ["Pass meaningful checks"]}
-    assert client.post(base, json=create, headers=headers(tokens["owner"], "create")).status_code == 201
+    # Exercise the legacy HTTP completion contract on a synthetic legacy task.
+    with patch.object(store, "_new_task_metadata", side_effect=lambda task: task["metadata"]):
+        assert client.post(base, json=create, headers=headers(tokens["owner"], "create")).status_code == 201
     body = evidence()
     assert client.post(base + "/T1/complete", json=body, headers=headers(tokens["worker"], "worker", 1)).status_code == 403
     missing = deepcopy(body)
@@ -130,8 +139,8 @@ def test_completion_http_atomic_replay_authorization_and_reopening(service):
 def test_completion_requires_current_dependency_evidence(service):
     client, store, project, tokens = service
     owner = store.authenticate(tokens["owner"])
-    store.create_task(owner, project, {"task_id": "D", "title": "Dependency", "description": "Definition"}, "dependency")
-    store.create_task(owner, project, {"task_id": "T", "title": "Task", "description": "Definition",
+    create_legacy_task(store, owner, project, {"task_id": "D", "title": "Dependency", "description": "Definition"}, "dependency")
+    create_legacy_task(store, owner, project, {"task_id": "T", "title": "Task", "description": "Definition",
                                       "acceptance_criteria": ["Pass meaningful checks"], "dependencies": ["D"]}, "task")
     with pytest.raises(DomainError) as error:
         store.complete_task(owner, project, "T", evidence(), 1, "complete")
@@ -142,7 +151,7 @@ def test_completion_requires_current_dependency_evidence(service):
 def test_edit_and_revert_cannot_revive_previous_completion(service):
     client, store, project, tokens = service
     owner = store.authenticate(tokens["owner"])
-    initial = store.create_task(owner, project, {"task_id": "T", "title": "Task", "description": "Original",
+    initial = create_legacy_task(store, owner, project, {"task_id": "T", "title": "Task", "description": "Original",
                                                "acceptance_criteria": ["Pass meaningful checks"]}, "create")
     completed = store.complete_task(owner, project, "T", evidence(), initial["revision"], "complete")
     assert current_completion(completed)
@@ -161,10 +170,10 @@ def test_edit_and_revert_cannot_revive_previous_completion(service):
 def test_dependency_bearing_completion_accepts_current_attested_dependency(service):
     client, store, project, tokens = service
     owner = store.authenticate(tokens["owner"])
-    store.create_task(owner, project, {"task_id": "D", "title": "Dependency", "description": "Definition",
+    create_legacy_task(store, owner, project, {"task_id": "D", "title": "Dependency", "description": "Definition",
                                       "acceptance_criteria": ["Pass meaningful checks"]}, "dependency")
     store.complete_task(owner, project, "D", evidence(), 1, "complete-dependency")
-    store.create_task(owner, project, {"task_id": "T", "title": "Task", "description": "Definition",
+    create_legacy_task(store, owner, project, {"task_id": "T", "title": "Task", "description": "Definition",
                                       "acceptance_criteria": ["Pass meaningful checks"], "dependencies": ["D"]}, "task")
     completed = store.complete_task(owner, project, "T", evidence(), 1, "complete")
     assert current_completion(completed)
