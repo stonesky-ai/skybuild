@@ -1041,12 +1041,16 @@ def _check_firewall_inspect(row: dict, *, name: str, run_id: str, container_id: 
                       kind=kind, image_id=image_id)
     host = row.get("HostConfig", {})
     log_config = host.get("LogConfig", {})
+    mounts = row.get("Mounts", [])
     if (host.get("NetworkMode") != "container:" + namespace_id
             or host.get("CapAdd") != ["NET_ADMIN"] or "ALL" not in host.get("CapDrop", [])
             or host.get("Privileged") is not False or host.get("ReadonlyRootfs") is not True
+            or host.get("Tmpfs") != {"/run": "rw,nosuid,nodev,size=1048576,mode=493"}
             or host.get("Memory") != 128 * 1024**2 or host.get("MemorySwap") != 128 * 1024**2
             or host.get("NanoCpus") != 250_000_000 or host.get("PidsLimit") != 32
-            or host.get("PortBindings") not in ({}, None) or row.get("Mounts")
+            or host.get("PortBindings") not in ({}, None) or len(mounts) != 1
+            or mounts[0].get("Type") != "tmpfs" or mounts[0].get("Destination") != "/run"
+            or mounts[0].get("RW") is not True
             or log_config.get("Type") != "local"
             or log_config.get("Config") != {"max-size": "4m", "max-file": "1"}
             or row.get("Config", {}).get("Cmd") != [
@@ -1443,6 +1447,7 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path | None, key_path
             sidecar_args = [
                 "--network=container:" + namespace_id, "--memory=128m", "--memory-swap=128m",
                 "--cpus=0.25", "--pids-limit=32", "--read-only", "--cap-drop=ALL",
+                "--tmpfs", "/run:rw,nosuid,nodev,size=1m,mode=0755",
                 "--log-driver=local", "--log-opt=max-size=4m", "--log-opt=max-file=1",
                 "--cap-add=NET_ADMIN", "--security-opt=no-new-privileges", "--entrypoint", "/bin/sh",
                 image_id, "-ec", _firewall_script(pg_ip, candidate_ip, postgres_namespace=pg_namespace),
