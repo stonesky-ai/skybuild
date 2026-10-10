@@ -3,12 +3,83 @@
 from __future__ import annotations
 
 import os
+import calendar
+import hashlib
 from importlib.machinery import PathFinder
+import json
 from pathlib import Path
+import re
 import shutil
 import socket
+import stat
+import subprocess
 import sys
 import time
+import tomllib
+
+
+UV_VERSION = "0.11.22"
+MAX_ENVIRONMENT_BYTES = 256 * 1024 * 1024
+
+
+def _prepare_environment(workspace: Path, template: Path) -> None:
+    """Copy reviewed installed dependencies and rebase editable metadata as data."""
+    project_bytes = (workspace / "pyproject.toml").read_bytes()
+    project = tomllib.loads(project_bytes.decode())
+    if (project.get("project", {}).get("dynamic")
+            or "cache-keys" in project.get("tool", {}).get("uv", {})
+            or (workspace / "setup.py").exists() or (workspace / "setup.cfg").exists()):
+        raise RuntimeError("project cache metadata requires a separately qualified image contract")
+    manifest = json.loads((template / ".skybuild-environment.json").read_bytes())
+    expected = {"schema": "skybuild.full-test.environment.v1", "uv_version": UV_VERSION,
+                "pyproject_sha256": hashlib.sha256(project_bytes).hexdigest(),
+                "uv_lock_sha256": hashlib.sha256((workspace / "uv.lock").read_bytes()).hexdigest()}
+    if manifest != expected:
+        raise RuntimeError("preinstalled environment does not match the pinned project and uv protocol")
+    size = 0
+    count = 0
+    for path in template.rglob("*"):
+        info = path.lstat()
+        count += 1
+        if stat.S_ISREG(info.st_mode):
+            size += info.st_size
+        elif not (stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)):
+            raise RuntimeError("preinstalled environment contains a special file")
+        if size > MAX_ENVIRONMENT_BYTES or count > 100_000:
+            raise RuntimeError("preinstalled environment exceeds its copy bound")
+    destination = workspace / ".venv"
+    if destination.exists():
+        raise RuntimeError("candidate archive contains an unexpected project environment")
+    shutil.copytree(template, destination, symlinks=True)
+    metadata = list(destination.glob("lib/python*/site-packages/skybuild-*.dist-info"))
+    pth = list(destination.glob("lib/python*/site-packages/_editable_impl_skybuild.pth"))
+    if (len(metadata) != 1 or len(pth) != 1 or not (destination / "bin/python").is_file()
+            or json.loads((metadata[0] / "uv_build.json").read_bytes()) != {}):
+        raise RuntimeError("preinstalled editable project metadata is incomplete")
+    # The immutable image contains reviewed installed metadata for this exact
+    # pyproject hash. Rebase its source URL/path without loading a build backend.
+    (metadata[0] / "direct_url.json").write_text(json.dumps({
+        "url": workspace.as_uri(), "dir_info": {"editable": True}}), encoding="utf-8")
+    pth[0].write_text(str(workspace / "src"), encoding="utf-8")
+    # uv 0.11.22 keys Unix files by ctime and directories by creation time,
+    # falling back to inode when creation time is unavailable. Copying the
+    # reviewed environment changes these keys without changing project bytes.
+    changed = (workspace / "pyproject.toml").stat().st_ctime_ns
+    seconds, nanos = divmod(changed, 1_000_000_000)
+    birth = subprocess.run(["/usr/bin/stat", "--format=%w", str(workspace / "src")],
+        capture_output=True, text=True, timeout=5, check=True,
+        env={"LC_ALL": "C", "TZ": "UTC"}).stdout.strip()
+    if birth == "-":
+        directory = (workspace / "src").stat().st_ino
+    else:
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{9} \+0000", birth):
+            raise RuntimeError("directory creation time has an unsupported format")
+        directory = {"secs_since_epoch": calendar.timegm(time.strptime(birth[:19], "%Y-%m-%d %H:%M:%S")),
+                     "nanos_since_epoch": int(birth[20:29])}
+    (metadata[0] / "uv_cache.json").write_text(json.dumps({
+        "timestamp": {"secs_since_epoch": seconds, "nanos_since_epoch": nanos},
+        "commit": None, "tags": None, "env": {}, "directories": {"src": directory}}), encoding="utf-8")
+    print("GATE_OFFLINE_ENVIRONMENT=prepared", flush=True)
 
 
 def _can_connect(host: str, port: int) -> bool:
@@ -93,6 +164,7 @@ def main() -> int:
         (Path("/scratch") / relative).mkdir(mode=0o700)
     (Path("/scratch/home") / ".gitconfig").write_text(
         "[safe]\n\tdirectory = /scratch/workspace\n", encoding="ascii")
+    _prepare_environment(workspace, Path("/opt/skybuild-venv"))
     os.chdir(workspace)
     # PathFinder inspects filenames only. It must never execute candidate code
     # before this trusted launcher reaches the fixed command exec boundary.

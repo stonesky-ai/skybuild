@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -31,6 +32,7 @@ def test_candidate_environment_contains_only_synthetic_database_credentials():
     )
     assert environment["UV_NO_SYNC"] == "1"
     assert environment["UV_OFFLINE"] == "1"
+    assert environment["UV_PROJECT_ENVIRONMENT"] == "/scratch/workspace/.venv"
     assert all("TOKEN" not in name and "SECRET" not in name and "KEY" not in name
                for name in environment)
 
@@ -472,6 +474,7 @@ def test_hostile_package_cannot_exit_before_trusted_launcher_exec(monkeypatch, t
         chdir=lambda workspace: None,
         execvpe=lambda executable, argv, environment: launched.append(argv)))
     monkeypatch.setattr(entrypoint, "_network_preflight", lambda: None)
+    monkeypatch.setattr(entrypoint, "_prepare_environment", lambda *args: None)
     assert entrypoint.main() == 127
     assert launched == [gate.DEFAULT_GATE_COMMAND]
     assert not marker.exists()
@@ -508,6 +511,7 @@ class _DockerModel:
                 "org.skybuild.full-test.command-sha256": gate.DEFAULT_GATE_COMMAND_SHA256,
                 "org.skybuild.full-test.entrypoint-sha256": self.predicate["trusted_entrypoint_sha256"],
                 "org.skybuild.full-test.network-probe-sha256": self.predicate["network_probe_sha256"],
+                "org.skybuild.full-test.uv-version": gate.UV_VERSION,
                 "org.skybuild.full-test.firewall-policy-sha256": gate.FIREWALL_POLICY_SHA256,
             }
             return result(json.dumps([{"Id": args[2], "Config": {"Labels": labels,
@@ -642,6 +646,7 @@ class _DockerModel:
             return blocked
         text = blocked + "\n".join(("GATE_FIREWALL_RELEASE=verified",
             "GATE_CANDIDATE_ARCHIVE_READONLY=true", "GATE_CANDIDATE_COPY=complete",
+            "GATE_OFFLINE_ENVIRONMENT=prepared",
             "GATE_PREFLIGHT_SOURCE_PATH=/scratch/workspace/src/skybuild/__init__.py",
             "GATE_COMMAND_LAUNCH=trusted_exec", "GATE_HOST_GATEWAY_PROBE=blocked",
             "GATE_EXTERNAL_DIRECT_IP_PROBE=blocked", "GATE_EXTERNAL_DNS_PROBE=blocked"))
@@ -749,3 +754,51 @@ def test_full_modeled_flow_rejects_mismatches_and_never_signs(monkeypatch, tmp_p
     assert result["attestation"] is None
     assert result["exit_code"] != 0
     assert not list(tmp_path.glob("run-*/attestation.json"))
+
+
+def test_copied_environment_runs_unchanged_project_python_offline_with_empty_cache(tmp_path):
+    import gate_container_entrypoint as entrypoint
+
+    checkout = Path(gate.__file__).resolve().parents[1]
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    for name in ("pyproject.toml", "uv.lock"):
+        shutil.copy2(checkout / name, workspace / name)
+    for name in ("src", "scripts"):
+        shutil.copytree(checkout / name, workspace / name, symlinks=True)
+    template = tmp_path / "installed-template"
+    shutil.copytree(checkout / ".venv", template, symlinks=True)
+    (template / ".skybuild-environment.json").write_text(json.dumps({
+        "schema": "skybuild.full-test.environment.v1", "uv_version": entrypoint.UV_VERSION,
+        "pyproject_sha256": hashlib.sha256((workspace / "pyproject.toml").read_bytes()).hexdigest(),
+        "uv_lock_sha256": hashlib.sha256((workspace / "uv.lock").read_bytes()).hexdigest()}))
+    entrypoint._prepare_environment(workspace, template)
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    (caller / "selected.py").write_text("import skybuild; print(skybuild.__file__)\n")
+    home = tmp_path / "home"
+    home.mkdir()
+    cache = tmp_path / "empty-cache"
+    environment = {"PATH": os.environ["PATH"], "HOME": str(home), "UV_OFFLINE": "1",
+                   "UV_CACHE_DIR": str(cache), "UV_WORKING_DIR": str(tmp_path / "foreign")}
+    result = subprocess.run([str(workspace / "scripts/project_python"), "selected.py"],
+        cwd=caller, env=environment, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(workspace / "src/skybuild/__init__.py")
+    assert "Building" not in result.stderr and "Installed" not in result.stderr
+    assert not list(cache.glob("**/hatchling*"))
+
+
+def test_environment_manifest_mismatch_stops_before_copy_or_backend(tmp_path):
+    import gate_container_entrypoint as entrypoint
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "pyproject.toml").write_text('[project]\nname="skybuild"\nversion="0.1.0"\n')
+    (workspace / "uv.lock").write_text("lock")
+    template = tmp_path / "template"
+    template.mkdir()
+    (template / ".skybuild-environment.json").write_text("{}")
+    with pytest.raises(RuntimeError, match="pinned project"):
+        entrypoint._prepare_environment(workspace, template)
+    assert not (workspace / ".venv").exists()
