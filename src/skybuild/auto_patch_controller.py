@@ -594,7 +594,12 @@ def run(*, repo: Path, manifest: Path, project: str, dispatcher: str, url: str,
             with Client(url, _token_from_file(Path(item["token_file"])), retries=0, timeout=10,
                         trust_env=False, ca_file=ca_file, expected_ca_sha256=ca_digest) as worker_client:
                 current = worker_client.get_task(project, item["task_id"])
-                status = worker_client.cpu_control_status(project)
+                # CPU-control inspection is owner-only. Keep the worker token for
+                # the fenced reservation below, but read the current pool snapshot
+                # with the already-authorized owner principal after claim.
+                with Client(url, _token_from_file(owner_token), retries=0, timeout=10,
+                            trust_env=False, ca_file=ca_file, expected_ca_sha256=ca_digest) as owner_client:
+                    status = owner_client.cpu_control_status(project)
                 readiness = current.get("metadata", {}).get("_skybuild_workflow", {}).get("readiness", {})
                 pool = status.get("pool") if isinstance(status, dict) else None
                 if (not isinstance(readiness, dict) or type(readiness.get("input_generation")) is not int

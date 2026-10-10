@@ -71,6 +71,7 @@ def _setup(tmp_path, monkeypatch, *, fail_at=None):
         def whoami(self):
             return {"is_admin": self.token == "owner"}
         def cpu_control_status(self, _project):
+            assert self.token == "owner"
             events.append("owner_controls")
             return {"pool": {"enabled": True, "local_enabled": True, "capacity": 2,
                              "generation": 3, "local_generation": 4},
@@ -79,6 +80,7 @@ def _setup(tmp_path, monkeypatch, *, fail_at=None):
             return {"task_id": task_id, "status": "in-progress", "revision": 3,
                     "metadata": {"_skybuild_workflow": {"readiness": {"input_generation": 5}}}}
         def reserve_cpu(self, _project, request):
+            assert self.token == "worker_" + request["task_id"].rsplit("-", 1)[1]
             events.append("reserve:" + request["task_id"])
             return {"action_id": request["action_id"], "attempt_id": request["attempt_id"],
                     "state": "reserved"}
