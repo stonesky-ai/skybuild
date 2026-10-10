@@ -166,3 +166,37 @@ def test_journal_rejects_cross_task_or_nonsequential_changes():
     for after in (replace(before, task_id="TASK-2", revision=1), replace(before, revision=2)):
         with pytest.raises(DomainError):
             TaskWorkflow.journal_facts(before, after, event(before, "claim"))
+
+
+
+def test_verified_no_publication_reason_survives_token_and_journal():
+    workflow = TaskWorkflow()
+    current = prepared(Place.VALIDATING)
+    reason = "Policy accepts this task without publication"
+    facts = {**context(current), "publication_required": False, "policy_reason": reason}
+    for name in ("freeze", "accept"):
+        before = current
+        request = event(before, name)
+        current = workflow.apply(before, request, facts)
+        assert current.policy_reason == reason
+        assert TaskToken.from_dict(current.to_dict()).policy_reason == reason
+        journal = workflow.journal_facts(before, current, request)
+        assert journal["policy_reason"] == reason
+        assert journal["acceptance_mode"] == "without_publication"
+
+
+def test_publication_path_clears_old_exemption_and_records_mode():
+    workflow = TaskWorkflow()
+    for place, name in ((Place.VALIDATING, "freeze"), (Place.INTEGRATING, "accept")):
+        before = replace(prepared(place), policy_reason="Old exemption")
+        request = event(before, name)
+        after = workflow.apply(before, request, context(before))
+        assert after.policy_reason is None
+        assert workflow.journal_facts(before, after, request)["acceptance_mode"] == "publication"
+
+
+def test_caller_cannot_supply_no_publication_policy_reason():
+    current = prepared(Place.VALIDATING)
+    with pytest.raises(DomainError) as error:
+        TaskWorkflow().apply(current, {**event(current, "freeze"), "policy_reason": "Forged"}, context(current))
+    assert error.value.status_code == 422
