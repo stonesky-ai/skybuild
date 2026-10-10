@@ -77,6 +77,26 @@ def available_memory():
     raise SessionError("Available memory cannot be measured")
 
 
+def launcher_identity():
+    fields = Path("/proc/self/stat").read_text().rsplit(")", 1)[1].split()
+    return {"pid": os.getpid(), "start_ticks": fields[19],
+            "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip()}
+
+
+def service_environment(expected_host):
+    if socket.gethostname().casefold() != expected_host.casefold():
+        raise SessionError("The execution host differs from the required host")
+    runtime = Path(f"/run/user/{os.getuid()}")
+    if not (runtime / "bus").is_socket():
+        raise SessionError("The user service bus is not available")
+    if not Path("/sys/fs/cgroup/cgroup.controllers").is_file():
+        raise SessionError("The host does not use cgroup v2")
+    env = dict(os.environ, XDG_RUNTIME_DIR=str(runtime),
+               DBUS_SESSION_BUS_ADDRESS=f"unix:path={runtime}/bus")
+    checked(["systemctl", "--user", "show", "-p", "Version"], env=env)
+    return env
+
+
 def validate(args):
     if socket.gethostname().casefold() != args.expected_host.casefold():
         raise SessionError("The execution host differs from the required host")
@@ -105,15 +125,7 @@ def validate(args):
             raise SessionError("The final command arguments must contain the exact target ref or branch")
     elif args.target_ref is not None:
         raise SessionError("An analysis run does not accept a publication target")
-    runtime = Path(f"/run/user/{os.getuid()}")
-    if not (runtime / "bus").is_socket():
-        raise SessionError("The user service bus is not available")
-    if not Path("/sys/fs/cgroup/cgroup.controllers").is_file():
-        raise SessionError("The host does not use cgroup v2")
-    env = dict(os.environ, XDG_RUNTIME_DIR=str(runtime),
-               DBUS_SESSION_BUS_ADDRESS=f"unix:path={runtime}/bus")
-    checked(["systemctl", "--user", "show", "-p", "Version"], env=env)
-    return env
+    return service_environment(args.expected_host)
 
 
 def service_command(args, unit):
@@ -177,7 +189,7 @@ def run(args):
         record = {"schema": "skybuild.managed-session.v1", "unit": unit, "host": socket.gethostname(),
                   "profile": args.profile, "checkout": str(args.checkout), "target_ref": args.target_ref,
                   "memory_max_bytes": args.memory_max_gib * GIB, "created_at": time.time(),
-                  "phase": "launch_intent"}
+                  "phase": "launch_intent", "launcher": launcher_identity()}
         write_new(record_path, record)
         if args.profile == "merge":
             write_new(slot_path, {"unit": unit, "target_ref": args.target_ref})

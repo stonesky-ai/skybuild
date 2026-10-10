@@ -17,3 +17,5 @@ The owner approved this setup on 2026-10-10 and asked to start to use it. Use AS
 - The merge profile sets `ManagedOOMPreference=avoid`. On the observed Wonko setup, the monitored `user@1000.service` cgroup and its child services have the same owner, so this preference can apply. Recheck the monitor and ownership after a host change. The preference does not disable kernel OOM limits or protect against every monitor.
 
 Use the checkout's `scripts/project_python` for project tests. The runner and its cleanup hook use only the standard library; the cleanup hook uses `/usr/bin/python3` to avoid dependency preparation during shutdown. Do not change the existing `JobUnitManager` completion contract as part of this operational setup.
+
+Use `scripts/managed_session_state.py --expected-host wonko status` for read-only state inspection. After a launcher failure, follow the recovery contract in the operational document. Use `recover` only with evidence for the exact service, invocation, and target. Keep uncertain publication blocked. Never delete the slot by hand. Older launch records without a process identity need manual reconciliation; this command refuses them.

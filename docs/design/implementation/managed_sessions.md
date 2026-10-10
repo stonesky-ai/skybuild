@@ -31,6 +31,38 @@ rtk proxy /absolute/checkout/scripts/project_python \
 
 For a merge run, pass the exact target and the existing reviewed integration command. Keep `--base dev-NNN` in that command. Do not infer the branch from a local checkout. Do not use a custom gate for publication. Do not launch a publication until its bundle, exact source, review evidence, and required gate are ready.
 
+## Status and recovery
+
+Use `scripts/managed_session_state.py --expected-host wonko status` to inspect the installed state directory. Status does not release a slot. The report is a snapshot; another launcher can change state after the report.
+
+Each new launch record stores the launcher PID, process start ticks, and kernel boot ID. Recovery uses all three values. A reused PID does not prove that the original launcher is alive. Older records without this identity cannot use automatic recovery.
+
+For a stopped launcher, first reconcile publication from the retained command and authoritative target evidence. Do not repeat publication to obtain evidence. Save a private JSON object with this contract:
+
+```json
+{
+  "schema": "skybuild.merge-resolution.v1",
+  "unit": "skybuild-merge-<exact-service-id>.service",
+  "invocation_id": "<exact-systemd-invocation-id>",
+  "target_ref": "refs/heads/dev-NNN",
+  "publication_state": "not-started",
+  "reason": "Describe the command and the evidence that resolves publication.",
+  "observed_at": 0
+}
+```
+
+Replace all placeholders. Set `observed_at` to the actual Unix observation time after service completion. Set `publication_state` to `not-started`, `confirmed`, or `no-effect` only when the evidence supports that state. Pending and unknown results cannot release a slot. This object is an operator assertion. The recovery command does not query the publication API or independently establish the assertion.
+
+Run recovery with the exact service name and absolute evidence path:
+
+```sh
+rtk proxy /usr/bin/python3 /absolute/runtime/scripts/managed_session_state.py \
+  --expected-host wonko recover --unit skybuild-merge-<exact-service-id>.service \
+  --resolution-evidence /absolute/private/resolution.json
+```
+
+Recovery holds the admission lock. It requires a dead original launcher, a terminal service, the matching invocation, a valid cleanup record, and no remaining cgroup processes. It refuses a slot owned by another service. It saves and synchronizes a recovery receipt before it releases the slot. The receipt binds the exact evidence bytes with SHA-256. A repeated recovery with the same evidence returns the same receipt. Recovery sends no process signals, starts no service, and performs no publication.
+
 ## Host limits and rollout
 
 Read-only Wonko checks found systemd 259, cgroup v2, a working user bus, and about 22.6 GiB available at the time of the check. The `memory.low` values of the user-service ancestors were zero. Password-free sudo was unavailable. This user-level setup therefore does not claim effective `MemoryLow` protection. Effective protection needs a separately configured parent reservation or a privileged service configuration. Other programs outside the managed state directory can still use host memory.
