@@ -252,7 +252,7 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries, T
         current = self._principal(connection, principal.principal_id)
         if not current.is_admin and operation not in current.grants.get(project_id, ()):
             raise DomainError('authorization', 'Project operation not permitted', 403)
-        if operation == 'tasks:write' and connection.execute(
+        if operation in {'tasks:write', 'integration:attest'} and connection.execute(
             "SELECT 1 WHERE lock_ledger_import(%s)", (project_id,)
         ).fetchone():
             raise DomainError('authority', 'Markdown ledger remains task authority', 409)
@@ -836,7 +836,8 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries, T
                                     {'task_id': task_id, 'event': request, 'body': body}, mutation)
 
     def verified_workflow_transition(self, principal, project_id, task_id, event, body,
-                                     expected_revision, idempotency_key, *, evidence, verifier):
+                                     expected_revision, idempotency_key, *, evidence, verifier,
+                                     trusted_operation=None):
         """Internal admin-attestation boundary, never an HTTP guard-fact endpoint.
 
         The adapter validates its receipt inside this transaction. Evidence is
@@ -846,13 +847,16 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries, T
         from .workflow import WorkflowEvent, _workflow_event
         _body(body, set(WorkflowEvent.__annotations__) - {'event', 'operation_id', 'expected_revision'})
         _body(evidence, set(evidence) if isinstance(evidence, dict) else set())
-        if not callable(verifier) or event == 'claim':
+        if (not callable(verifier) or event == 'claim'
+                or trusted_operation not in {None, 'integration:attest'}
+                or trusted_operation == 'integration:attest' and event not in {'freeze', 'accept'}):
             _invalid('Verified workflow requires an internal receipt verifier')
         request = _workflow_event({**body, 'event': event, 'operation_id': idempotency_key,
                                    'expected_revision': expected_revision})
         with self._connection() as connection:
-            principal = self._authorize(connection, principal, project_id, 'tasks:write')
-            if not principal.is_admin:
+            principal = self._authorize(connection, principal, project_id,
+                                        trusted_operation or 'tasks:write')
+            if not principal.is_admin and trusted_operation != 'integration:attest':
                 raise DomainError('authorization', 'Only owner/admin may attest producer evidence', 403)
             def mutation():
                 self._graph_lock(connection, project_id)
@@ -867,9 +871,12 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries, T
                            'bundle_id', 'publication_required', 'acceptance_verified', 'publication_verified',
                            'task_included', 'policy_reason', 'failure_confirmed', 'completion_evidence',
                            'publication_policy_version', 'acceptance_policy', 'integration_observation_verified',
-                           'exclusion_verified', 'publication_outcome'}
+                           'exclusion_verified', 'publication_outcome', 'completion_kind'}
                 if set(checked) - allowed:
                     _invalid('Receipt cannot replace database input or ownership facts')
+                if checked.get('completion_kind') == 'trusted_publisher' and (
+                        trusted_operation != 'integration:attest' or event != 'accept'):
+                    _invalid('Signed publisher completion requires the dedicated integration operation')
                 context.update({key: value for key, value in checked.items() if key != 'completion_evidence'})
                 if event == 'accept':
                     self._require_current_dependencies(connection, project_id, before)
@@ -883,7 +890,8 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries, T
                         change = completion_without_publication(before, completion, principal.principal_id, context)
                     else:
                         from .completion import completion_change
-                        change = completion_change(before, completion, principal.principal_id)
+                        change = completion_change(before, completion, principal.principal_id,
+                                                   kind=checked.get('completion_kind', 'owner_attestation'))
                     # Preserve the original journal before-state; add acceptance
                     # evidence to the stored token only after kernel validation.
                     prepared = json.loads(json.dumps(before))

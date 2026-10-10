@@ -189,6 +189,13 @@ class ManualIntegration(Input):
     evidence: dict[str, Any]
 
 
+class TrustedIntegration(Input):
+    """Signed trusted-host producer statement, verified inside the task transaction."""
+
+    event: Literal["freeze", "accept"]
+    evidence: dict[str, Any]
+
+
 class CPUCentralControl(CPULocalControl):
     capacity: Annotated[StrictInt, Field(ge=0, lt=2**31)]
 
@@ -341,7 +348,7 @@ class BodyLimit:
         await self.app(scope, bounded_receive, send)
 
 
-def create_app(store: Any) -> FastAPI:
+def create_app(store: Any, *, trusted_integration: dict | None = None) -> FastAPI:
     """Create an app without connecting, migrating, or reading configuration."""
     app = FastAPI(title="SkyBuild", version=__version__)
     app.add_middleware(BodyLimit)
@@ -476,6 +483,17 @@ def create_app(store: Any) -> FastAPI:
                            actor: Actor, idem: Key, expected: Revision) -> dict:
         from .manual_integration import transition
         return transition(store, actor, project_id, task_id, body.event, body.evidence, expected, idem)
+
+    @app.post(base + "/tasks/{task_id}/trusted-integration")
+    def signed_integration(project_id: ProjectPath, task_id: RecordPath, body: TrustedIntegration,
+                           actor: Actor, idem: Key, expected: Revision) -> dict:
+        if trusted_integration is None:
+            raise DomainError("workflow_conflict", "Trusted integration producer is not configured", 409)
+        from .trusted_integration import transition
+        return transition(store, actor, project_id, task_id, body.event, body.evidence, expected, idem,
+                          producer_id=trusted_integration["producer_id"],
+                          key_id=trusted_integration["key_id"],
+                          key_path=trusted_integration["key_path"])
 
     @app.get(base + "/tasks/{task_id}/execution-status")
     def execution_status(project_id: ProjectPath, task_id: RecordPath, actor: Actor,
