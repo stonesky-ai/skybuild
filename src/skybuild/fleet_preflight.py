@@ -20,6 +20,7 @@ class PreflightError(ValueError):
 
 _WORKER_SCOPES = {"tasks:read", "cord:read", "cord:send", "cord:handle"}
 _REQUIRED_SCOPES = {"tasks:read", "cord:read", "cord:send", "cord:handle"}
+_CPU_CLAIM_SCOPES = {"tasks:read", "tasks:claim", "cord:read"}
 _TAILNET_V4 = ipaddress.ip_network("100.64.0.0/10")
 _TAILNET_V6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
 
@@ -54,8 +55,10 @@ def probe_private_api(url: str, project_id: str, token_file: Path, expected_prin
                       *, transport: httpx.BaseTransport | None = None,
                       ca_file: Path | None = None,
                       resolve: Callable[[str], Iterable[str]] = _resolved_addresses,
-                      workflow: bool = False) -> dict:
+                      workflow: bool = False, cpu_claim: bool = False) -> dict:
     """Require trusted HTTPS, ready service, exact worker identity and narrow grants."""
+    if workflow and cpu_claim:
+        raise PreflightError("Choose one worker credential profile")
     endpoint = httpx.URL(url)
     if (endpoint.scheme != "https" or not endpoint.host or not endpoint.host.endswith(".ts.net")
             or endpoint.userinfo or endpoint.query or endpoint.fragment or endpoint.path not in {"", "/"}):
@@ -83,8 +86,11 @@ def probe_private_api(url: str, project_id: str, token_file: Path, expected_prin
             if identity.get("is_admin") is not False or not isinstance(grants, dict) or set(grants) != {project_id}:
                 raise PreflightError("Token is not confined to this worker project")
             scopes = grants[project_id]
-            permitted = _WORKER_SCOPES | ({"tasks:claim", "tasks:write"} if workflow else set())
-            required = _REQUIRED_SCOPES | ({"tasks:claim", "tasks:write"} if workflow else set())
+            if cpu_claim:
+                permitted = required = _CPU_CLAIM_SCOPES
+            else:
+                permitted = _WORKER_SCOPES | ({"tasks:claim", "tasks:write"} if workflow else set())
+                required = _REQUIRED_SCOPES | ({"tasks:claim", "tasks:write"} if workflow else set())
             if (not isinstance(scopes, list) or not all(isinstance(scope, str) for scope in scopes)
                     or len(scopes) != len(set(scopes))
                     or not required <= set(scopes) <= permitted):

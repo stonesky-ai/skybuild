@@ -40,7 +40,7 @@ WORKER_SOURCE = {
     'src/skybuild/__init__.py': '6dc62b0e7d135b949d66c97b99c12155a4ffa60d822b994b9a5d109b1ebe9af1',
     # Auto-worker client from 3bb plus this branch's CPU dispatch endpoints.
     'src/skybuild/client.py': '0a82e21643184e1cf8bd6587ab87affbe9807e28c475df2ef6f8de98cf960ff3',
-    'src/skybuild/fleet_preflight.py': 'f2ec5d39b6b1bc0c0a71354a7be89837bd153b5812a9be55f8a951a15fc9424c',
+    'src/skybuild/fleet_preflight.py': 'ec38eaed0dba3f83360c7f0d39506879ed7d917d6d81f8ad2ac4ea389bf50878',
     'src/skybuild/auto_patch_worker.py': '156d6d43ead7fd93bc60cf9d630dbd2b9b6a32dce3d052e5f006e2b861f8fa94',
     'src/skybuild/auto_patch_permit.py': 'd18ba6aa4d2993d69e9cd31c890c63eb4f0e64ae0d8fb8eb5667e60962cbdf51',
     'src/skybuild/manual_assignment.py': '349dc9f367ba63e0bf6c2f3e2d63b7d45c6e5dadcb715f6b67295ad86b65daf7',

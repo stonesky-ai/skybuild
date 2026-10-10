@@ -70,6 +70,22 @@ def test_petri_worker_profile_requires_explicit_selection_and_exact_grants(token
         checked_probe(URL, "skybuild", token_file, "wonko-worker", workflow=True, transport=transport_for(identity()))
 
 
+def test_cpu_claim_profile_accepts_the_exact_nonadmin_worker_grants(token_file):
+    grants = {"skybuild": ["cord:read", "tasks:claim", "tasks:read"]}
+    result = checked_probe(URL, "skybuild", token_file, "wonko-worker", cpu_claim=True,
+                           transport=transport_for(identity(grants=grants)))
+    assert result["scopes"] == ["cord:read", "tasks:claim", "tasks:read"]
+    assert result["inbox_access"] is True and result["task_list_access"] is True
+    with pytest.raises(PreflightError, match="missing or broader"):
+        checked_probe(URL, "skybuild", token_file, "wonko-worker", cpu_claim=True,
+                      transport=transport_for(identity()))
+    with pytest.raises(PreflightError, match="missing or broader"):
+        checked_probe(URL, "skybuild", token_file, "wonko-worker", cpu_claim=True,
+                      transport=transport_for(identity(grants={"skybuild": grants["skybuild"] + ["tasks:write"]})))
+    with pytest.raises(PreflightError, match="one worker credential profile"):
+        checked_probe(URL, "skybuild", token_file, "wonko-worker", cpu_claim=True, workflow=True)
+
+
 @pytest.mark.parametrize("overrides", [
     {"principal_id": "another-worker"},
     {"is_admin": True},

@@ -572,7 +572,7 @@ def run(*, repo: Path, manifest: Path, project: str, dispatcher: str, url: str,
                         trust_env=False, ca_file=ca_file, expected_ca_sha256=ca_digest) as owner:
                 _cpu_controls(owner, project, required_free=1)
             probe_private_api(url, project, Path(item["token_file"]), item["worker"],
-                              ca_file=ca_file, workflow=True)
+                              ca_file=ca_file, cpu_claim=True)
             worker_root = state_dir / ("worker-" + item["worker"])
             worker_root.mkdir(mode=0o700, exist_ok=False)
             runtime_state = worker_root / "runtime"
