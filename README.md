@@ -60,6 +60,9 @@ Python's `-P` mode suppresses implicit caller/script-directory imports; reposito
 helpers resolve through the explicit `scripts` path. External scripts that depend
 on sibling imports need their own invocation instead. Python options such as
 `-E` or `-I` deliberately bypass `PYTHONPATH`; do not use them for source checks.
+Reviewed integration and disposable PostgreSQL gates rebind the environment and
+source paths to their own candidate before running nested Python commands. The
+author checkout's launcher selection must not leak into candidate validation.
 
 PostgreSQL tests require explicit disposable targets. Without these variables, database integration tests skip:
 
