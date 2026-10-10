@@ -55,22 +55,26 @@ def _dns_blocked() -> bool:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(0.5)
     try:
-        # Minimal DNS question for an external-only name; a response would mean
-        # the candidate namespace can reach Docker's embedded resolver.
-        question = (b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
-                    b"\x07example\x03com\x00\x00\x01\x00\x01")
-        sock.sendto(question, ("127.0.0.11", 53))
+        try:
+            # Minimal DNS question for an external-only name; a response would
+            # mean the candidate namespace can reach Docker's embedded resolver.
+            question = (b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+                        b"\x07example\x03com\x00\x00\x01\x00\x01")
+            sock.sendto(question, ("127.0.0.11", 53))
+        except OSError as error:
+            # Linux reports an iptables OUTPUT DROP to a local UDP destination
+            # as EPERM on sendto. Keep this exception local to the send check.
+            return (error.errno in BLOCKED_ERRORS or error.errno == errno.EPERM
+                    or isinstance(error, TimeoutError))
         try:
             sock.recvfrom(512)
         except TimeoutError:
             return True
+        except OSError as error:
+            # EPERM from receive is not the observed firewall-drop behavior.
+            # Unknown errors fail closed.
+            return error.errno in BLOCKED_ERRORS
         return False
-    except OSError as error:
-        # Linux reports an iptables OUTPUT DROP to a local UDP destination as
-        # EPERM on sendto. Keep this exception local to the DNS send check;
-        # other unclassified errors must fail the isolation check.
-        return (error.errno in BLOCKED_ERRORS or error.errno == errno.EPERM
-                or isinstance(error, TimeoutError))
     finally:
         sock.close()
 
