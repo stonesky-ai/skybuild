@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from threading import Barrier
 from uuid import uuid4
 
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
@@ -109,6 +110,24 @@ def _persisted(admin, project, action_id, operation_id):
         observations = connection.execute(
             "SELECT * FROM cpu_worker_observations WHERE operation_id = %s ORDER BY sequence", (operation_id,)).fetchall()
     return dispatch, effect, reservation, observations
+
+
+def test_migration_014_digest_and_append_only_dispatch_guards(cpu_dispatch):
+    admin, runtime, client, project, people, tokens = cpu_dispatch
+    with admin._connection() as connection:
+        applied = connection.execute("SELECT digest FROM schema_migrations WHERE version = 14").fetchone()
+    assert applied["digest"] == "3e23398a3e4aac182549301c41819e64894dc12e7fcf9c9aaba9ba63620f0ab4"
+
+    request, _, _ = _make_reservation(runtime, people, project)
+    pins = _pins(request["action_id"], "operation-" + uuid4().hex)
+    assert _prepare(client, project, tokens["owner"], pins).status_code == 200
+    with pytest.raises(psycopg.Error):
+        with admin._connection() as connection:
+            connection.execute("UPDATE cpu_worker_dispatches SET patch_digest = %s WHERE operation_id = %s",
+                               ("a" * 64, pins["operation_id"]))
+    dispatch, effect, reservation, observations = _persisted(admin, project, request["action_id"], pins["operation_id"])
+    assert dispatch["patch_digest"] == pins["patch_digest"]
+    assert effect["exposure_held"] is True and reservation["state"] == "reserved" and observations == []
 
 
 def test_prepare_binds_one_held_effect_and_same_pin_replay(cpu_dispatch):
