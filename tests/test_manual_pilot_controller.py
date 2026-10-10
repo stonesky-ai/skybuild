@@ -26,6 +26,26 @@ def test_promotion_accepts_only_additive_012_authority_migration():
         controller._verify_schema_011_to_012(current, changed)
 
 
+def test_promotion_accepts_only_exact_schema_013_to_016_migration_set():
+    current = {f"migrations/{version:03d}_migration.sql": f"{version:064x}"
+               for version in range(1, 14)}
+    migrations = controller.SCHEMA_TRANSITIONS["013-to-016"][2]
+    candidate = {**current, **{name: "f" * 64 for name in migrations}}
+    assert controller._verify_schema_transition(current, candidate, "013-to-016") == (13, 16)
+
+    changed_prefix = {**candidate, "migrations/013_migration.sql": "e" * 64}
+    missing_middle = dict(candidate)
+    del missing_middle[migrations[1]]
+    wrong_name = dict(candidate)
+    wrong_name["migrations/015_unreviewed.sql"] = wrong_name.pop(migrations[1])
+    extra_migration = {**candidate, "migrations/017_unreviewed.sql": "a" * 64}
+    for invalid in (changed_prefix, missing_middle, wrong_name, extra_migration):
+        with pytest.raises(ValueError, match="unchanged schema 001-013"):
+            controller._verify_schema_transition(current, invalid, "013-to-016")
+    with pytest.raises(ValueError, match="explicit reviewed"):
+        controller._verify_schema_transition(current, candidate, "013-to-017")
+
+
 def test_secret_initialization_is_private_and_never_rotates(tmp_path):
     state = tmp_path / "new-pilot-state"
     result = init_secrets(state)

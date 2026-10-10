@@ -19,7 +19,7 @@ import manual_pilot_tls as tls  # noqa: E402
 assert Path(skybuild.__file__).resolve().parents[2] == Path(__file__).resolve().parents[1]
 
 
-@pytest.fixture(params=["011-to-012", "012-to-013"])
+@pytest.fixture(params=["011-to-012", "012-to-013", "013-to-016"])
 def promotion(tmp_path, monkeypatch, request):
     state = tmp_path / 'private-state'
     provisioner.init_secrets(state)
@@ -29,12 +29,12 @@ def promotion(tmp_path, monkeypatch, request):
     provisioner._write_new(state / 'runtime.env', env, 0o600)
     (state / 'tls').mkdir(mode=0o700)
     (state / 'tls/ca.crt').write_bytes(b'retained fixture CA')
-    current_version, candidate_version, migration = controller.SCHEMA_TRANSITIONS[request.param]
+    current_version, candidate_version, migrations = controller.SCHEMA_TRANSITIONS[request.param]
     current = {f'migrations/{i:03}_migration.sql': hashlib.sha256(str(i).encode()).hexdigest()
                for i in range(1, current_version + 1)}
     current.update({f'static/workbench.{suffix}': hashlib.sha256(suffix.encode()).hexdigest()
                     for suffix in ('css', 'html', 'js')})
-    candidate = dict(current, **{migration: 'f' * 64})
+    candidate = dict(current, **{migration: 'f' * 64 for migration in migrations})
     api_id, db_id, image = '1' * 64, '2' * 64, 'sha256:' + '3' * 64
     ip, hostname = '100.100.1.2', 'controller.tail.ts.net'
     ports = {'8000/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '8000'}, {'HostIp': ip, 'HostPort': '8443'}]}
@@ -175,11 +175,12 @@ def test_promotion_resource_and_identity_guards(promotion, monkeypatch, boundary
 ])
 def test_promotion_rejects_unreviewed_schema_or_publication(promotion, boundary):
     arguments, data = promotion
-    migration = controller.SCHEMA_TRANSITIONS[arguments['schema_transition']][2]
+    migrations = controller.SCHEMA_TRANSITIONS[arguments['schema_transition']][2]
     prefix = f"migrations/{data['current_version']:03}_migration.sql"
     if boundary == 'last-prefix-digest': data['candidate'][prefix] = 'changed'
-    elif boundary == 'missing-next': del data['candidate'][migration]
+    elif boundary == 'missing-next': del data['candidate'][migrations[0]]
     elif boundary == 'wrong-next-name':
+        migration = migrations[0]
         data['candidate'][migration.replace('.sql', '_other.sql')] = data['candidate'].pop(migration)
     elif boundary == 'noncontiguous-prefix':
         del data['current'][prefix]
