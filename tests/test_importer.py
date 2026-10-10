@@ -66,6 +66,23 @@ def current_plan(current_source):
     return prepare_import(current_source, CURRENT_CONTRACT, repository=ROOT)
 
 
+@pytest.fixture
+def v2_workflow_plan(plan, tmp_path):
+    contract = json.loads(CONTRACT.read_text())
+    contract["schema_version"] = 2
+    contract["workflow"] = {
+        record["task_id"]: _workflow_fields(record["description"], record["status"])
+        for record in plan["records"]
+    }
+    task_id = "SKYBUILD-TASK-CUTOVER"
+    contract["workflow"][task_id].update(
+        assignee="worker 'one'", blocker="Await owner's reviewed cutover",
+    )
+    contract_path = tmp_path / "workflow-contract.json"
+    contract_path.write_text(json.dumps(contract))
+    return prepare_import(LEDGERS, contract_path), contract_path, task_id
+
+
 def postgres_system_identifier(dsn):
     with psycopg.connect(dsn) as connection:
         return str(connection.execute("SELECT system_identifier::text FROM pg_control_system()").fetchone()[0])
@@ -156,6 +173,50 @@ def test_atomic_import_replay_api_and_restart(plan, fresh_store):
     with store._connection() as connection:
         assert connection.execute("SELECT authority FROM ledger_imports").fetchone()["authority"] == "markdown"
         assert connection.execute("SELECT count(*) AS count FROM task_dependencies").fetchone()["count"] == sum(len(r["dependencies"]) for r in plan["records"])
+
+
+def test_v2_import_preserves_assignee_blocker_and_matching_replay(v2_workflow_plan, fresh_store):
+    plan, contract, task_id = v2_workflow_plan
+    expected = next(record for record in plan["records"] if record["task_id"] == task_id)
+    assert apply(fresh_store, plan, contract)["result"] == "imported"
+    with fresh_store._connection() as connection:
+        task = fresh_store._task(connection, "skybuild", task_id)
+        journal = connection.execute(
+            "SELECT after_state FROM task_journal WHERE project_id = %s AND task_id = %s",
+            ("skybuild", task_id),
+        ).fetchone()["after_state"]
+        for field in ("assignee", "blocker"):
+            assert task[field] == journal[field] == expected[field]
+        before_journal = connection.execute("SELECT count(*) AS count FROM task_journal").fetchone()["count"]
+    assert apply(fresh_store, plan, contract)["result"] == "unchanged"
+    with fresh_store._connection() as connection:
+        assert connection.execute("SELECT count(*) AS count FROM task_journal").fetchone()["count"] == before_journal
+
+
+@pytest.mark.parametrize("field", ["assignee", "blocker"])
+def test_v2_replay_refuses_assignee_or_blocker_drift(v2_workflow_plan, fresh_store, field):
+    plan, contract, task_id = v2_workflow_plan
+    apply(fresh_store, plan, contract)
+    with fresh_store._connection() as connection:
+        connection.execute(
+            sql.SQL("UPDATE tasks SET {} = %s WHERE project_id = %s AND task_id = %s").format(sql.Identifier(field)),
+            ("changed", "skybuild", task_id),
+        )
+    with pytest.raises(DomainError, match="Imported destination changed"):
+        apply(fresh_store, plan, contract)
+    with fresh_store._connection() as connection:
+        assert fresh_store._task(connection, "skybuild", task_id)[field] == "changed"
+        assert connection.execute("SELECT count(*) AS count FROM task_journal").fetchone()["count"] == plan["task_count"]
+
+
+def test_v1_import_and_replay_treat_missing_workflow_fields_as_null(plan, fresh_store):
+    assert all("assignee" not in record and "blocker" not in record for record in plan["records"])
+    assert apply(fresh_store, plan)["result"] == "imported"
+    with fresh_store._connection() as connection:
+        rows = connection.execute("SELECT assignee, blocker FROM tasks").fetchall()
+        assert len(rows) == plan["task_count"]
+        assert all(row["assignee"] is None and row["blocker"] is None for row in rows)
+    assert apply(fresh_store, plan)["result"] == "unchanged"
 
 
 @pytest.mark.parametrize("project_id", ["skybuild", "missing-receipt-project"])
