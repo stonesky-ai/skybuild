@@ -2,7 +2,7 @@
   "ui_revision": "9e72026dce285c99085f0180d90b13144641b2c2",
   "api_revision": "7da0ef6542f2a9aeae6feac529eca63b0b2d5bca",
   "sha256": {
-    "ui/src/skybuild/static/tasks.html": "dbd929ea6106a87aee41cf0ce9264991fc5dbfd4589f9375acdc18ffda8df120",
+    "ui/src/skybuild/static/tasks.html": "0672e98e9b496ca60c4ef1dd6bb95726d3acad80f0f8f9252e17b28a6ee060ef",
     "ui/src/skybuild/static/tasks.js": "b88d4bc77aee27058017ba7e7a1fb7a8e22cb80861aa2172b2598701f68d0754",
     "ui/src/skybuild/static/tasks.css": "88f25790cb2ca420e7eaca8664cd49db475a64d9d46a6782cd8aae1f48b9cdbb",
     "ui/src/skybuild/static/workbench.css": "92b3d83974a8ea1a05f7ac6d1552f73d92cb2b98d49c1579d3a9a05cb022c1c8",

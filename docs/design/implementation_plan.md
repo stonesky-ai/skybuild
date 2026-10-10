@@ -1,6 +1,6 @@
 # SkyBuild implementation plan
 
-Derived from architecture revision A47, 2026-10-10. Status: MVP sequence refined; the launch-free task API and frozen-ledger authority switch are deployed. `SKYBUILD-TASK-CUTOVER` remains blocked/reassess pending evidence and a valid completion contract. Fleet activation and model execution remain separate boundaries. [architecture.md](architecture.md) governs. This plan supersedes the delivery section of the dated combined revision 2 plan.
+Derived from architecture revision A48, 2026-10-10. Status: MVP sequence refined; the launch-free task API and frozen-ledger authority switch are deployed. `SKYBUILD-TASK-CUTOVER` remains blocked/reassess pending evidence and a valid completion contract. Fleet activation and model execution remain separate boundaries. [architecture.md](architecture.md) governs. This plan supersedes the delivery section of the dated combined revision 2 plan.
 
 ## Planning discipline
 
@@ -214,6 +214,8 @@ Task: SKYBUILD-TASK-WORKBENCH. Depends on SKYBUILD-BOOTSTRAP; production edits f
 Provide the early outstanding-task page and detail/journal view. Show phase, owner, next action, blocker/age, evidence freshness and current bundle/attempt. Support conditional edits to scope, description, definition of done and considerations, plus rework/reassessment, split/merge, dependency changes and date/milestone deferral. Use a small explicit transition function and the documented flowchart/table, not a configurable workflow product. Basic task management is required before automatic adoption and remains usable without model capacity.
 
 Owner-directed private MVP exception (2026-10-10): keep browser bearer-token entry disabled in the private Workbench installation until well after MVP. An explicit installation flag may select one protected server-side token file and one project; the gateway scopes injection to task, task-action, history, lineage, workflow and board routes, and requires same-origin intent for mutations. Preserve caller-token gateway mode and direct REST authentication. Never auto-read owner credentials. This UI exception does not qualify deployment or worker/fleet authority; test credential-safe failures and keep the installation on loopback/Tailscale.
+
+Owner-directed login addition (2026-10-10): configure username `user1` and the password only in protected runtime files. Require same-origin login/logout and bounded opaque HTTPS sessions with Secure, HttpOnly, SameSite cookies. Verify login, logout, unauthenticated API denial and real task/workflow rendering in the deployed browser before runtime acceptance. Defer multi-user roles and credential-management UI.
 
 Keep split/merge lineage, dependency rewiring/cycle checks and events atomic. Preserve historical IDs/evidence and consumed/uncertain usage. Mark replaced tasks superseded rather than successfully completed; reconcile live effects before replacement work. Deferral expiry or milestone completion schedules reassessment without renewing approval. Validate concurrent edits, structural changes during work/tests/publication, stale results, delayed trigger processing and attempted journal edits. Every result has a known next state/action or an explicit conflict; no unexplained unmergeable flag.
 

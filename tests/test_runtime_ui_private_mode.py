@@ -16,6 +16,8 @@ module_spec.loader.exec_module(runtime_ui)
 
 TOKEN = "private-workbench-token-which-must-never-escape"
 PROJECT = "skybuild"
+USERNAME = "user1"
+PASSWORD = "private-test-password"
 
 
 def token_file(path: Path, value: str = TOKEN) -> Path:
@@ -25,12 +27,85 @@ def token_file(path: Path, value: str = TOKEN) -> Path:
 
 
 def private_app(handler, token_path, project=PROJECT):
+    password_path = token_path.with_name(token_path.name + ".password")
+    password_path.write_text(PASSWORD + "\n")
+    password_path.chmod(0o600)
     return runtime_ui.create_app(
         ui_checkout=ROOT / "ui", api_checkout=API, ca_file=CA,
         backend_hostname=HOST, backend_connect_host="api",
         workbench_token_file=token_path, workbench_project=project,
+        workbench_username=USERNAME, workbench_password_file=password_path,
         transport=httpx.MockTransport(handler),
     )
+
+
+def login(client, username=USERNAME, password=PASSWORD):
+    response = client.post("/workbench/session", headers={
+        "Origin": "https://localhost:8443", "Sec-Fetch-Site": "same-origin",
+        "X-Skybuild-Workbench": "1"}, json={"username": username, "password": password})
+    return response
+
+
+def test_private_login_creates_secure_session_and_logout_revokes_it(tmp_path):
+    path = token_file(tmp_path / "token")
+    seen = []
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json=[])
+
+    with TestClient(private_app(handler, path), base_url="https://localhost:8443") as client:
+        assert client.get("/workbench", follow_redirects=False).status_code == 303
+        assert client.get("/api/v1/projects/skybuild/tasks", headers={
+            "X-Skybuild-Workbench": "1"}).status_code == 401
+        rejected_logout = client.delete("/workbench/session", headers={
+            "Origin": "https://evil.invalid", "X-Skybuild-Workbench": "1"})
+        assert rejected_logout.status_code == 403
+        login_page = client.get("/workbench/login")
+        assert 'src="/workbench/assets/private-login.js" defer' in login_page.text
+        assert 'href="/workbench/assets/private-mode.css"' in login_page.text
+        assert 'autocomplete="username"' in login_page.text
+        assert 'autocomplete="current-password"' in login_page.text
+        assert PASSWORD not in login_page.text
+        bad = login(client, password="wrong-password")
+        assert bad.status_code == 401 and bad.json() == {"detail": "Username or password is incorrect"}
+        assert client.get("/api/v1/projects/skybuild/tasks", headers={
+            "X-Skybuild-Workbench": "1"}).status_code == 401
+        accepted = login(client)
+        assert accepted.status_code == 200
+        assert accepted.json() == {"username": USERNAME}
+        assert client.get("/api/v1/projects/skybuild/tasks", headers={
+            "X-Skybuild-Workbench": "1", "Sec-Fetch-Site": "same-origin"}).status_code == 200
+        rejected_logout = client.delete("/workbench/session", headers={
+            "Origin": "https://evil.invalid", "X-Skybuild-Workbench": "1"})
+        assert rejected_logout.status_code == 403
+        assert client.get("/api/v1/projects/skybuild/tasks", headers={
+            "X-Skybuild-Workbench": "1", "Sec-Fetch-Site": "same-origin"}).status_code == 200
+        logout = client.delete("/workbench/session", headers={
+            "Origin": "https://localhost:8443", "Sec-Fetch-Site": "same-origin",
+            "X-Skybuild-Workbench": "1"})
+        assert logout.status_code == 204
+        assert "Max-Age=0" in logout.headers["set-cookie"]
+        assert client.get("/workbench", follow_redirects=False).status_code == 303
+        assert client.get("/api/v1/projects/skybuild/tasks", headers={
+            "X-Skybuild-Workbench": "1"}).status_code == 401
+    assert len(seen) == 2
+    assert all(request.headers["authorization"] == f"Bearer {TOKEN}" for request in seen)
+    assert all("cookie" not in request.headers for request in seen)
+
+
+def test_private_login_requires_same_origin_and_limits_failures(tmp_path):
+    path = token_file(tmp_path / "token")
+    with TestClient(private_app(lambda request: httpx.Response(200), path),
+                    base_url="https://localhost:8443") as client:
+        rejected = client.post("/workbench/session", headers={
+            "X-Skybuild-Workbench": "1", "Origin": "https://evil.invalid"},
+            json={"username": USERNAME, "password": PASSWORD})
+        assert rejected.status_code == 403
+        for _ in range(runtime_ui.LOGIN_FAILURE_LIMIT):
+            assert login(client, password="wrong-password").status_code == 401
+        limited = login(client)
+        assert limited.status_code == 429
+        assert USERNAME not in limited.text and PASSWORD not in limited.text
 
 
 def test_private_pages_bootstrap_only_project_and_never_credential(tmp_path):
@@ -49,15 +124,25 @@ def test_private_pages_bootstrap_only_project_and_never_credential(tmp_path):
 
     path = token_file(tmp_path / "token")
     with TestClient(private_app(handler, path), base_url="https://localhost:8443") as client:
+        assert client.get("/workbench/tasks", follow_redirects=False).headers["location"] == "/workbench/login"
+        login_response = login(client)
+        assert login_response.status_code == 200
+        cookie = login_response.headers["set-cookie"]
+        assert "HttpOnly" in cookie and "Secure" in cookie and "SameSite=strict" in cookie
+        assert "Max-Age=28800" in cookie
         task_page = client.get("/workbench/tasks").text
         task_script = client.get("/workbench/assets/tasks.js").text
         workflow_page = client.get("/workbench/workflow").text
         workflow_script = client.get("/workbench/assets/live-workflow.js").text
         private_style = client.get("/workbench/assets/private-mode.css")
         bootstrap = client.get("/workbench/assets/private-mode.js").text
+        login_page = client.get("/workbench/login", follow_redirects=False)
         runtime = client.get("/workbench/runtime").json()
 
     assert 'private-mode.js' in task_page and 'private-mode.js' in workflow_page
+    assert login_page.status_code == 303 and login_page.headers["location"] == "/workbench"
+    assert 'id="workbench-logout"' in task_page and 'id="workbench-logout"' in workflow_page
+    assert "workbench/session" in bootstrap
     assert 'private-mode.css' in task_page and 'private-mode.css' in workflow_page
     assert private_style.status_code == 200 and "[hidden] { display: none !important; }" in private_style.text
     assert '<form id="connection-form" hidden' in task_page
@@ -72,13 +157,14 @@ def test_private_pages_bootstrap_only_project_and_never_credential(tmp_path):
     assert "X-Skybuild-Workbench" in task_script and "X-Skybuild-Workbench" in workflow_script
     assert runtime["private_mode"] is True and runtime["project"] == PROJECT
     assert TOKEN not in task_page + task_script + workflow_page + workflow_script + bootstrap + json.dumps(runtime)
+    assert PASSWORD not in login_page.text + task_page + workflow_page + bootstrap
     assert all(request.headers["authorization"] == f"Bearer {TOKEN}" for request in seen)
     assert all(request.url.path.startswith("/api/v1/projects/skybuild/tasks") or
                request.url.path.endswith("/workflow-board") for request in seen)
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node is needed to execute retained browser scripts")
-def test_private_browser_scripts_auto_load_real_records_without_login_or_bearer(tmp_path):
+def test_private_browser_scripts_auto_load_real_records_after_login_without_bearer(tmp_path):
     task = {"task_id": "SKYBUILD-REAL-1", "title": "Real task", "status": "in-progress",
             "phase": "implementation", "next_action": "Review result", "responsible": "owner",
             "revision": 4, "priority": 1, "dependencies": [], "blocked_dependencies": [],
@@ -98,15 +184,23 @@ def test_private_browser_scripts_auto_load_real_records_without_login_or_bearer(
         return httpx.Response(200, json={})
 
     with TestClient(private_app(handler, path), base_url="https://localhost:8443") as client:
+        assert login(client).status_code == 200
         task_script = client.get("/workbench/assets/tasks.js").text
         workflow_script = client.get("/workbench/assets/live-workflow.js").text
+        login_script = client.get("/workbench/assets/private-login.js").text
+        private_mode_script = client.get("/workbench/assets/private-mode.js").text
         task_page = client.get("/workbench/tasks").text
         workflow_page = client.get("/workbench/workflow").text
     task_file, workflow_file = tmp_path / "tasks.js", tmp_path / "workflow.js"
+    login_file, private_mode_file = tmp_path / "login.js", tmp_path / "private-mode.js"
     task_file.write_text(task_script)
     workflow_file.write_text(workflow_script)
+    login_file.write_text(login_script)
+    private_mode_file.write_text(private_mode_script)
     assert '<form id="connection-form" hidden' in task_page + workflow_page
-    for script in (task_file, workflow_file):
+    assert 'credentials: "same-origin"' in login_script
+    assert 'credentials: "same-origin"' in private_mode_script
+    for script in (task_file, workflow_file, login_file, private_mode_file):
         checked = subprocess.run(["node", "--check", str(script)], capture_output=True, text=True, timeout=10)
         assert checked.returncode == 0, checked.stderr
 
@@ -127,6 +221,7 @@ async function execute(script, workflow) {
   const requests=[];
   global.crypto={randomUUID:()=>"browser-operation"};
   global.fetch=async (url,options={})=>{requests.push({url,options});
+    assert.equal(options.credentials,"same-origin","private requests include the session cookie");
     assert.equal(options.headers["X-Skybuild-Workbench"],"1");
     assert.equal(Object.keys(options.headers).some(k=>k.toLowerCase()==="authorization"),false);
     if((options.method||"GET")==="POST") return {ok:true,status:200,json:async()=>({})};
@@ -166,6 +261,9 @@ def test_private_gateway_limits_routes_project_and_caller_credentials(tmp_path):
         return httpx.Response(200, json={})
 
     with TestClient(private_app(handler, path), base_url="https://localhost:8443") as client:
+        assert client.get("/api/v1/projects/skybuild/tasks", headers={
+            "X-Skybuild-Workbench": "1", "Sec-Fetch-Site": "same-origin"}).status_code == 401
+        assert login(client).status_code == 200
         intent = {"X-Skybuild-Workbench": "1", "Sec-Fetch-Site": "same-origin"}
         assert client.get("/api/v1/projects/skybuild/tasks", headers=intent).status_code == 200
         assert client.get("/api/v1/projects/skybuild/tasks", headers={**intent,
@@ -235,6 +333,7 @@ def test_private_mutation_requires_exact_same_origin_and_browser_intent(tmp_path
     path = token_file(tmp_path / "token")
     with TestClient(private_app(lambda request: pytest.fail("rejected mutation reached backend"), path),
                     base_url="https://localhost:8443") as client:
+        assert login(client).status_code == 200
         response = client.post("/api/v1/projects/skybuild/tasks/T-1/actions/defer",
                                json={"reason": "later"}, headers=headers)
     assert response.status_code == 403
@@ -256,6 +355,7 @@ def test_private_mutations_preserve_idempotency_and_revision_headers(tmp_path):
     assert not seen
 
     with TestClient(private_app(handler, path), base_url="https://localhost:8443") as client:
+        assert login(client).status_code == 200
         response = client.patch("/api/v1/projects/skybuild/tasks/T-1", content=b'{"title":"x"}', headers={
             "Origin": "https://localhost:8443", "X-Skybuild-Workbench": "1",
             "Sec-Fetch-Site": "same-origin", "If-Match": "9", "Idempotency-Key": "stable-key"})
@@ -274,6 +374,7 @@ def test_private_task_crud_actions_and_workflow_routes_inject_server_credential(
     headers = {"Origin": "https://localhost:8443", "X-Skybuild-Workbench": "1",
                "Sec-Fetch-Site": "same-origin", "Idempotency-Key": "stable"}
     with TestClient(private_app(handler, path), base_url="https://localhost:8443") as client:
+        assert login(client).status_code == 200
         assert client.post("/api/v1/projects/skybuild/tasks", json={"task_id": "T-2"}, headers=headers).status_code == 200
         assert client.post("/api/v1/projects/skybuild/tasks/T-1/actions/defer",
                            json={"reason": "later"}, headers={**headers, "If-Match": "4"}).status_code == 200
@@ -285,7 +386,7 @@ def test_private_task_crud_actions_and_workflow_routes_inject_server_credential(
 
 
 def test_private_mode_rejects_missing_or_unsafe_credential_configuration(tmp_path):
-    with pytest.raises(ValueError, match="requires both"):
+    with pytest.raises(ValueError, match="requires token, project, username, and password file"):
         runtime_ui.create_app(ui_checkout=ROOT / "ui", api_checkout=API, ca_file=CA,
                               backend_hostname=HOST, workbench_token_file=tmp_path / "missing")
     missing = tmp_path / "missing"
@@ -306,6 +407,14 @@ def test_private_mode_rejects_missing_or_unsafe_credential_configuration(tmp_pat
     with pytest.raises(ValueError, match="Invalid private Workbench project"):
         private_app(lambda request: httpx.Response(200), secret, "../skybuild")
 
+    password = token_file(tmp_path / "password", "private-test-password")
+    password.chmod(0o644)
+    with pytest.raises(ValueError, match="password file is not a protected regular file"):
+        runtime_ui.create_app(ui_checkout=ROOT / "ui", api_checkout=API, ca_file=CA,
+                              backend_hostname=HOST, workbench_token_file=secret,
+                              workbench_project=PROJECT, workbench_username=USERNAME,
+                              workbench_password_file=password)
+
 
 def test_private_gateway_redacts_backend_credential_echoes(tmp_path):
     path = token_file(tmp_path / "token")
@@ -314,6 +423,7 @@ def test_private_gateway_redacts_backend_credential_echoes(tmp_path):
         return httpx.Response(401, content=f"echo {TOKEN}".encode(), headers={"ETag": TOKEN})
 
     with TestClient(private_app(handler, path), base_url="https://localhost:8443") as client:
+        assert login(client).status_code == 200
         response = client.get("/api/v1/projects/skybuild/tasks", headers={"X-Skybuild-Workbench": "1"})
     assert response.status_code == 401
     assert TOKEN not in response.text
@@ -322,6 +432,7 @@ def test_private_gateway_redacts_backend_credential_echoes(tmp_path):
     def fail_with_secret(request):
         raise httpx.ConnectError(f"upstream rejected Bearer {TOKEN}", request=request)
     with TestClient(private_app(fail_with_secret, path), base_url="https://localhost:8443") as client:
+        assert login(client).status_code == 200
         failure = client.get("/api/v1/projects/skybuild/tasks", headers={"X-Skybuild-Workbench": "1"})
     assert failure.status_code == 502
     assert TOKEN not in failure.text
@@ -345,7 +456,7 @@ def test_default_gateway_keeps_bearer_behavior_without_private_mode():
 
 
 @pytest.mark.parametrize(("host", "tls", "container", "private", "allowed"), [
-    ("127.0.0.1", False, False, True, True),
+    ("127.0.0.1", False, False, True, False),
     ("100.80.1.2", True, False, True, True),
     ("fd7a:115c:a1e0::12", True, False, True, True),
     ("0.0.0.0", True, True, True, True),
