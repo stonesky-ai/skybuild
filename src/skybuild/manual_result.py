@@ -15,20 +15,115 @@ import threading
 import time
 
 from .client import Client, ClientError
-from .contracts import valid_identifier
+from .contracts import DomainError, valid_identifier
 from .fleet_preflight import _resolved_addresses, _token_from_file
 from .manual_assignment import AssignmentError, _path, verify_assignment
 from .manual_cord import ManualCordError, _private_write
 from .manual_dispatch import _private_endpoint
+from .workflow import TaskToken
 
 
 class ResultError(ValueError):
     pass
 
 
+def _task_token(task, project, task_id):
+    if (not isinstance(task, dict) or task.get('project_id') != project
+            or task.get('task_id') != task_id or type(task.get('revision')) is not int
+            or task['revision'] < 1 or not isinstance(task.get('metadata'), dict)):
+        raise ResultError('Current task identity is unavailable')
+    workflow = task['metadata'].get('_skybuild_workflow', {})
+    if not isinstance(workflow, dict):
+        raise ResultError('Current workflow metadata is invalid')
+    if 'petri' not in workflow:
+        return None
+    petri = workflow['petri']
+    if not isinstance(petri, dict) or petri.get('schema_version') != 1:
+        raise ResultError('Current workflow version is unsupported')
+    token = TaskToken.from_dict(petri.get('token')).to_dict()
+    if (token['project_id'] != project or token['task_id'] != task_id
+            or token['revision'] != task['revision']):
+        raise ResultError('Current task and token differ')
+    return token
+
+
+def _review_freshness(client, call, project, assignment, result, workflow_binding):
+    """Bind review to current REST authority, never to Git evidence alone."""
+    task_id = assignment['task_id']
+    if assignment.get('schema') != 'manual-work-v2':
+        raise ResultError('Review requires an API-bound assignment')
+    task = call(client.get_task, project, task_id)
+    current = _task_token(task, project, task_id)
+    if current is None:
+        if (task['revision'] != assignment['task_revision']
+                or task.get('status') != assignment['task_status']
+                or task.get('status') not in {'ready', 'in-progress'}):
+            raise ResultError('Legacy assignment is stale')
+        return
+    if workflow_binding is None:
+        raise ResultError('Petri review requires the durable worker binding')
+    state = _read_assignment(workflow_binding, private=True)
+    intent = _read_assignment(workflow_binding.with_name(workflow_binding.name + '.submit'), private=True)
+    pins = {'schema': 'manual-petri-claim-v1', 'project_id': project,
+            'worker': assignment['worker'], 'assignment_id': assignment['assignment_id'],
+            'task_id': task_id, 'expected_revision': assignment['task_revision'],
+            'assignment_sha256': hashlib.sha256(json.dumps(assignment, sort_keys=True).encode()).hexdigest()}
+    if not isinstance(state, dict) or any(state.get(key) != value for key, value in pins.items()):
+        raise ResultError('Petri assignment binding differs')
+    claimed = TaskToken.from_dict(state.get('token')).to_dict()
+    claim = state.get('claim')
+    if (not isinstance(claim, dict) or claim.get('held') is not True
+            or claim.get('holder') != assignment['worker'] or type(claim.get('fence')) is not int
+            or claim['fence'] != claimed['claim_fence'] or not claimed['attempt_id']
+            or claimed['project_id'] != project or claimed['task_id'] != task_id
+            or claimed['place'] != 'working' or claimed['pending_action'] is not None
+            or claimed['superseded'] or claimed['revision'] != claim.get('task_revision')
+            or claimed['revision'] <= assignment['task_revision']):
+        raise ResultError('Petri claim binding is invalid')
+    receipt = {name: claimed[name] for name in ('attempt_id', 'claim_fence', 'input_generation',
+                                               'definition_revision', 'policy_version')}
+    receipt.update(source_head=result['head_sha'], source_branch='refs/heads/' + assignment['branch'],
+                   target_base=assignment['base_sha'])
+    if (not isinstance(intent, dict) or intent.get('body') != receipt
+            or type(intent.get('expected_revision')) is not int
+            or intent['expected_revision'] < claimed['revision']):
+        raise ResultError('Petri submission intent differs')
+    # Submission can legitimately advance revision and input generation when
+    # publishing the author head. Read its immutable journal event rather than
+    # guessing the resulting generation from the pre-claim assignment.
+    history = call(client.task_history, project, task_id, limit=1, offset=intent['expected_revision'])
+    event = history[0] if isinstance(history, list) and len(history) == 1 else None
+    if (not isinstance(event, dict) or event.get('project_id') != project
+            or event.get('task_id') != task_id or event.get('actor') != assignment['worker']
+            or event.get('operation') != 'workflow.submit'
+            or event.get('revision') != intent['expected_revision'] + 1
+            or not isinstance(event.get('event_facts'), dict)
+            or event['event_facts'].get('author_output_receipt') != receipt):
+        raise ResultError('Petri submission is unconfirmed')
+    submitted = _task_token(event.get('after_state'), project, task_id)
+    if (submitted is None or submitted['place'] != 'validating'
+            or submitted['revision'] != event['revision']
+            or any(submitted[name] != receipt[name] for name in
+                   ('attempt_id', 'claim_fence', 'definition_revision', 'policy_version',
+                    'source_head', 'source_branch', 'target_base'))
+            or submitted['input_generation'] < claimed['input_generation']):
+        raise ResultError('Petri submitted attempt differs')
+    view = call(client.task_workflow, project, task_id)
+    current = TaskToken.from_dict(view.get('token') if isinstance(view, dict) else None).to_dict()
+    # A final task read detects changes during the journal/workflow reads.
+    latest = call(client.get_task, project, task_id)
+    if (_task_token(latest, project, task_id) != current or current['place'] != 'validating'
+            or current['pending_action'] is not None or current['superseded']
+            or current['revision'] < submitted['revision']
+            or any(current[name] != submitted[name] for name in
+                   ('project_id', 'task_id', 'attempt_id', 'claim_fence', 'input_generation',
+                    'definition_revision', 'policy_version', 'source_head', 'source_branch', 'target_base'))):
+        raise ResultError('Petri result is stale or pending reconciliation')
+
+
 def receive_result(client, project, checkout, *, assignment, assignment_id, task_id,
                    worker, dispatcher, base_sha, message_id, destination,
-                   approval_until, duration=120, max_pages=3,
+                   approval_until, duration=120, max_pages=3, workflow_binding=None,
                    clock=time.time, monotonic=time.monotonic, git_runner=None):
     """Persist verified evidence before receipt, without handling the message.
 
@@ -155,6 +250,15 @@ def receive_result(client, project, checkout, *, assignment, assignment_id, task
     remaining()
     _private_write(destination, (json.dumps(record, sort_keys=True, ensure_ascii=False) + '\n').encode('utf-8'))
     remaining()
+    freshness = None
+    if result['phase'] == 'ready-for-review':
+        try:
+            _review_freshness(client, call, project, assignment, result, workflow_binding)
+        except (ResultError, DomainError, ClientError, OSError, ValueError, TypeError, AttributeError):
+            # Keep independently verified Git/result evidence. Transport errors
+            # and malformed or absent bindings cannot authorize review.
+            freshness = 'Current task or durable submission binding is unavailable or stale'
+        remaining()
     key = 'manual-result-receipt-' + hashlib.sha256((project + '\n' + message_id).encode()).hexdigest()
     reply = call(client.message_action, project, message_id, 'receipt', idempotency_key=key)
     if not isinstance(reply, dict) or reply.get('message_id') != message_id or not reply.get('delivered_at'):
@@ -165,17 +269,22 @@ def receive_result(client, project, checkout, *, assignment, assignment_id, task
         'blocked': 'owner-attention',
         'ready-for-review': 'queue-independent-review',
     }[phase]
+    if freshness is not None:
+        routing = 'owner-attention'
     return {'saved': str(destination), 'message_id': message_id, 'assignment_id': assignment_id,
             'task_id': task_id, 'head_sha': head, 'phase': phase, 'receipted': True,
-            'routing': routing, 'review_required': phase == 'ready-for-review'}
+            'routing': routing, 'review_required': routing == 'queue-independent-review',
+            **({'freshness_reason': freshness} if freshness is not None else {})}
 
 
-def _read_assignment(path):
+def _read_assignment(path, *, private=False):
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 65536:
             raise ResultError("Assignment input must be a bounded ordinary file")
+        if private and (info.st_uid != os.getuid() or info.st_mode & 0o077):
+            raise ResultError('Workflow binding must be an owned private file')
         data = os.read(descriptor, 65537)
         if len(data) > 65536:
             raise ResultError("Assignment input exceeds its bound")
@@ -192,6 +301,7 @@ def _parse_args(argv):
     for name in ('token-file', 'checkout', 'assignment', 'destination'):
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--ca-file', type=Path)
+    parser.add_argument('--workflow-binding', type=Path)
     parser.add_argument('--duration', type=int, default=120)
     parser.add_argument('--max-pages', type=int, default=3)
     return parser.parse_args(argv)
@@ -228,7 +338,7 @@ def _run_cli(args, cutoff, started):
             assignment_id=args.assignment_id, task_id=args.task_id, worker=args.worker,
             dispatcher=args.dispatcher, base_sha=args.base_sha, message_id=args.message_id,
             destination=args.destination, approval_until=args.approval_until,
-            duration=duration, max_pages=args.max_pages)
+            duration=duration, max_pages=args.max_pages, workflow_binding=args.workflow_binding)
     print(json.dumps(output, sort_keys=True))
     return 0
 
