@@ -11,4 +11,6 @@ For repeated CPU-only sampling, use `--watch --duration-minutes <1–480>` and p
 
 For each candidate, inspect the specific failed tool result, then decide whether it was an expected negative test, an external condition or a preventable process error. Fix the underlying cause before adding general instructions. When a repeatable practice would have prevented it, write or tighten a narrowly triggered skill in `.claude/skills/`, add its `.agents/skills/` trigger and name it in `AGENTS.md`. Validate the skill with `quick_validate.py`. Do not create a new skill for a one-off typo that a code fix fully resolves.
 
+For local service startup, check the exact fixed container name before `compose up`; identify its owner and health before reusing it, and do not remove an unknown container to clear a name conflict. For HTTPS probes, use the hostname covered by the service certificate and its trusted CA bundle. Do not hide a hostname or trust-chain mismatch with `curl -k`.
+
 For regression tests, prove the test reaches the intended path: isolate unrelated DNS, service and credential prerequisites; bound calls that could hang; and, when practical, show the pre-fix behavior fails the test. A passing test caused by an earlier unrelated error is not evidence of the fix.
