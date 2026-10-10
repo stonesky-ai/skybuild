@@ -173,6 +173,7 @@ def promotion_preflight(checkout: Path, expected_sha: str, published_ref: str, *
                         api_container: str, db_container: str, api_image: str, system_id: str,
                         ca_pem_sha256: str, gateway_container: str | None = None,
                         gateway_image: str | None = None, compose_owner_path: Path | None = None,
+                        gateway_compose_owner_path: Path | None = None,
                         schema_transition: str = "011-to-012") -> dict:
     """Read-only, exact-identity preflight for an explicitly reviewed promotion.
 
@@ -186,7 +187,7 @@ def promotion_preflight(checkout: Path, expected_sha: str, published_ref: str, *
     import manual_pilot_tls as tls
     from skybuild.runtime_role import audit_runtime_role
 
-    gateway_values = (gateway_container, gateway_image, compose_owner_path)
+    gateway_values = (gateway_container, gateway_image, compose_owner_path, gateway_compose_owner_path)
     gateway_mode = any(value is not None for value in gateway_values)
     if (gateway_mode and not all(value is not None for value in gateway_values)
             or not re.fullmatch(r"[0-9a-f]{40}", current_sha)
@@ -208,6 +209,12 @@ def promotion_preflight(checkout: Path, expected_sha: str, published_ref: str, *
                 or compose_owner_path.name != "manual-pilot"
                 or compose_owner_path.parent.name != "ops"):
             raise ValueError("Require the explicitly retained Compose ownership path")
+        if not gateway_compose_owner_path.is_absolute():
+            raise ValueError("Require an absolute Workbench Compose ownership path")
+        supplied_gateway_owner_path = gateway_compose_owner_path
+        gateway_compose_owner_path = gateway_compose_owner_path.resolve(strict=True)
+        if supplied_gateway_owner_path != gateway_compose_owner_path:
+            raise ValueError("Require the exact Workbench Compose ownership path")
     tls.controller(checkout, expected_sha, state_dir, hostname, tailnet_ip,
                    expected_api_image=api_image, published_ref=published_ref,
                    compose_owner_path=compose_owner_path)
@@ -303,29 +310,28 @@ def promotion_preflight(checkout: Path, expected_sha: str, published_ref: str, *
             raise ValueError("API, PostgreSQL, and Workbench no longer share the pinned backend network")
         labels = gateway.get("Config", {}).get("Labels", {}) or {}
         if (labels.get("com.docker.compose.project") != "skybuild-pilot"
-                or labels.get("com.docker.compose.service") != "workbench"):
+                or labels.get("com.docker.compose.service") != "workbench"
+                or labels.get("com.docker.compose.project.working_dir") != str(gateway_compose_owner_path)):
             raise ValueError("Workbench ownership labels changed")
         gateway_command = gateway.get("Config", {}).get("Cmd", [])
-        required_gateway_args = (
-            ("--backend-connect-host", "api"), ("--backend-port", "8000"),
-            ("--ca-file", "/tls/ca.crt"), ("--ssl-certfile", "/tls/server.crt"),
-            ("--ssl-keyfile", "/tls/server.key"), ("--host", "0.0.0.0"),
-            ("--port", "8443"), ("--workbench-project", "skybuild"),
-            ("--workbench-token-file", "/run/secrets/skybuild-workbench-token"),
-            ("--workbench-password-file", "/run/secrets/skybuild-workbench-password"),
-        )
+        expected_gateway_command = [
+            "--ui-checkout", "/runtime-ui/ui", "--api-checkout", "/app",
+            "--ca-file", "/tls/ca.crt", "--backend-hostname", hostname,
+            "--backend-connect-host", "api", "--backend-port", "8000",
+            "--workbench-token-file", "/run/secrets/skybuild-workbench-token",
+            "--workbench-project", "skybuild", "--workbench-username", "user1",
+            "--workbench-password-file", "/run/secrets/skybuild-workbench-password",
+            "--host", "0.0.0.0", "--container-listener", "--port", "8443",
+            "--ssl-certfile", "/tls/server.crt", "--ssl-keyfile", "/tls/server.key",
+        ]
         if (gateway.get("Config", {}).get("Entrypoint") != ["python", "/runtime-ui/runtime_ui.py"]
-                or not isinstance(gateway_command, list)
-                or gateway_command.count("--container-listener") != 1
-                or any(gateway_command.count(flag) != 1
-                       or gateway_command.index(flag) + 1 >= len(gateway_command)
-                       or gateway_command[gateway_command.index(flag) + 1] != value
-                       for flag, value in required_gateway_args)
+                or gateway_command != expected_gateway_command
                 or gateway_host.get("Memory") != 256 * 1024**2
                 or gateway_host.get("PidsLimit") != 64
                 or gateway_host.get("RestartPolicy", {}).get("Name") != "unless-stopped"
                 or gateway_host.get("Privileged") is not False or gateway_host.get("CapAdd")
-                or gateway_host.get("NetworkMode") != network_name or gateway_host.get("PidMode") == "host"):
+                or gateway_host.get("NetworkMode") != network_name or gateway_host.get("PidMode") == "host"
+                or gateway_host.get("ReadonlyRootfs") is not True):
             raise ValueError("Workbench command, user, resource, or isolation boundary changed")
         expected_gateway_mounts = {
             (str(state_dir / "secrets/workbench-gateway-token"), "/run/secrets/skybuild-workbench-token", False),
@@ -426,6 +432,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--gateway-container-id")
     parser.add_argument("--gateway-image-id")
     parser.add_argument("--compose-owner-path", type=Path)
+    parser.add_argument("--gateway-compose-owner-path", type=Path)
     parser.add_argument("--database-system-id")
     parser.add_argument("--ca-pem-sha256")
     args = parser.parse_args(argv)
@@ -436,10 +443,11 @@ def main(argv: list[str] | None = None) -> int:
                         args.ca_pem_sha256)
             if not all(required):
                 raise ValueError("Promotion requires retained explicit identities")
-            gateway_values = (args.gateway_container_id, args.gateway_image_id, args.compose_owner_path)
+            gateway_values = (args.gateway_container_id, args.gateway_image_id, args.compose_owner_path,
+                              args.gateway_compose_owner_path)
             if any(value is not None for value in gateway_values) and not all(
                     value is not None for value in gateway_values):
-                raise ValueError("Gateway promotion requires container, image, and Compose owner pins")
+                raise ValueError("Gateway promotion requires container, image, API Compose owner, and gateway Compose owner pins")
             report = promotion_preflight(args.checkout, args.expected_sha, args.published_ref,
                                          current_sha=args.current_sha, state_dir=args.state_dir,
                                          hostname=args.hostname, tailnet_ip=args.tailnet_ip,
@@ -449,6 +457,7 @@ def main(argv: list[str] | None = None) -> int:
                                          gateway_container=args.gateway_container_id,
                                          gateway_image=args.gateway_image_id,
                                          compose_owner_path=args.compose_owner_path,
+                                         gateway_compose_owner_path=args.gateway_compose_owner_path,
                                          schema_transition=args.schema_transition)
         else:
             report = preflight(args.checkout, args.expected_sha, args.published_ref)

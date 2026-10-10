@@ -136,16 +136,18 @@ def _enable_gateway(arguments, data):
         provisioner._write_new(state / 'secrets' / name, 'f' * 64, 0o600)
     owner = arguments['checkout'] / 'ops/manual-pilot'
     owner.mkdir(parents=True)
-    args = ['--container-listener']
-    for flag, value in (
-        ('--backend-connect-host', 'api'), ('--backend-port', '8000'),
-        ('--ca-file', '/tls/ca.crt'), ('--ssl-certfile', '/tls/server.crt'),
-        ('--ssl-keyfile', '/tls/server.key'), ('--host', '0.0.0.0'), ('--port', '8443'),
-        ('--workbench-project', 'skybuild'),
-        ('--workbench-token-file', '/run/secrets/skybuild-workbench-token'),
-        ('--workbench-password-file', '/run/secrets/skybuild-workbench-password'),
-    ):
-        args.extend((flag, value))
+    gateway_owner = arguments['checkout'].parent / 'gateway-runtime-owner'
+    gateway_owner.mkdir()
+    args = [
+        '--ui-checkout', '/runtime-ui/ui', '--api-checkout', '/app',
+        '--ca-file', '/tls/ca.crt', '--backend-hostname', arguments['hostname'],
+        '--backend-connect-host', 'api', '--backend-port', '8000',
+        '--workbench-token-file', '/run/secrets/skybuild-workbench-token',
+        '--workbench-project', 'skybuild', '--workbench-username', 'user1',
+        '--workbench-password-file', '/run/secrets/skybuild-workbench-password',
+        '--host', '0.0.0.0', '--container-listener', '--port', '8443',
+        '--ssl-certfile', '/tls/server.crt', '--ssl-keyfile', '/tls/server.key',
+    ]
     api_ports = {'8000/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '8000'}]}
     data['api']['HostConfig']['PortBindings'] = api_ports
     data['api']['NetworkSettings']['Ports'] = api_ports
@@ -168,17 +170,18 @@ def _enable_gateway(arguments, data):
         'State': {'Running': True},
         'Config': {'User': str(os.getuid()), 'Entrypoint': ['python', '/runtime-ui/runtime_ui.py'],
                    'Cmd': args, 'Labels': {'com.docker.compose.project': 'skybuild-pilot',
-                                           'com.docker.compose.service': 'workbench'}},
+                                           'com.docker.compose.service': 'workbench',
+                                           'com.docker.compose.project.working_dir': str(gateway_owner)}},
         'HostConfig': {'PortBindings': gateway_ports, 'Memory': 256 * 1024**2, 'PidsLimit': 64,
                        'RestartPolicy': {'Name': 'unless-stopped'}, 'Privileged': False,
-                       'CapAdd': None, 'NetworkMode': 'skybuild-pilot_default'},
+                       'CapAdd': None, 'NetworkMode': 'skybuild-pilot_default', 'ReadonlyRootfs': True},
         'NetworkSettings': {'Ports': gateway_ports,
                             'Networks': {'skybuild-pilot_default': {'NetworkID': '4' * 64}}},
         'Mounts': [{'Source': str(source), 'Destination': destination, 'RW': False}
                    for source, destination in gateway_mounts],
     }
     arguments.update(gateway_container='5' * 64, gateway_image='sha256:' + '6' * 64,
-                     compose_owner_path=owner)
+                     compose_owner_path=owner, gateway_compose_owner_path=gateway_owner)
 
 
 def test_gateway_topology_checks_exact_compose_owner_and_split_bindings(promotion):
@@ -190,14 +193,17 @@ def test_gateway_topology_checks_exact_compose_owner_and_split_bindings(promotio
     assert report['gateway_image'] == arguments['gateway_image']
     assert report['api_gateway_topology'] == 'loopback API 8000 + pinned Workbench 8443'
     assert data['controller_kwargs']['compose_owner_path'] == arguments['compose_owner_path']
+    assert arguments['gateway_compose_owner_path'] != arguments['compose_owner_path']
     assert not any(args[:3] == ('docker', 'inspect', 'skybuild-pilot-workbench') for args in data['calls'])
 
 
 @pytest.mark.parametrize('boundary', [
     'gateway-id', 'gateway-image', 'api-public-bind', 'gateway-public-bind', 'extra-gateway-port',
     'gateway-network', 'missing-network-id', 'db-network', 'gateway-label', 'gateway-entrypoint',
-    'gateway-argument', 'argument-without-value', 'duplicate-argument', 'gateway-mount',
-    'writable-secret', 'gateway-memory', 'gateway-user',
+    'gateway-owner-label', 'gateway-backend-hostname', 'gateway-ui-checkout', 'gateway-api-checkout',
+    'gateway-username', 'gateway-extra-argument', 'gateway-argument', 'argument-without-value',
+    'duplicate-argument', 'gateway-mount', 'writable-secret', 'gateway-memory', 'gateway-user',
+    'writable-rootfs', 'gateway-owner-symlink',
     'gateway-not-ready', 'compose-owner-symlink', 'partial-gateway-pins',
 ])
 def test_gateway_topology_rejects_identity_and_boundary_changes(promotion, boundary):
@@ -214,18 +220,35 @@ def test_gateway_topology_rejects_identity_and_boundary_changes(promotion, bound
         del data['api']['NetworkSettings']['Networks']['skybuild-pilot_default']['NetworkID']
     elif boundary == 'db-network': data['db']['NetworkSettings']['Networks']['skybuild-pilot_default']['NetworkID'] = '8' * 64
     elif boundary == 'gateway-label': data['gateway']['Config']['Labels']['com.docker.compose.service'] = 'api'
+    elif boundary == 'gateway-owner-label': data['gateway']['Config']['Labels']['com.docker.compose.project.working_dir'] = str(
+        arguments['compose_owner_path'].parent)
     elif boundary == 'gateway-entrypoint': data['gateway']['Config']['Entrypoint'] = ['python', '-m', 'wrong']
+    elif boundary == 'gateway-backend-hostname': data['gateway']['Config']['Cmd'][
+        data['gateway']['Config']['Cmd'].index('--backend-hostname') + 1] = 'other.example'
+    elif boundary == 'gateway-ui-checkout': data['gateway']['Config']['Cmd'][
+        data['gateway']['Config']['Cmd'].index('--ui-checkout') + 1] = '/tmp/ui'
+    elif boundary == 'gateway-api-checkout': data['gateway']['Config']['Cmd'][
+        data['gateway']['Config']['Cmd'].index('--api-checkout') + 1] = '/tmp/api'
+    elif boundary == 'gateway-username': data['gateway']['Config']['Cmd'][
+        data['gateway']['Config']['Cmd'].index('--workbench-username') + 1] = 'other-user'
+    elif boundary == 'gateway-extra-argument': data['gateway']['Config']['Cmd'].append('--debug')
     elif boundary == 'gateway-argument': data['gateway']['Config']['Cmd'][data['gateway']['Config']['Cmd'].index('--backend-port') + 1] = '8443'
     elif boundary == 'argument-without-value': data['gateway']['Config']['Cmd'][-2:] = ['--workbench-password-file']
     elif boundary == 'duplicate-argument': data['gateway']['Config']['Cmd'].append('--port')
     elif boundary == 'gateway-mount': data['gateway']['Mounts'][0]['Source'] = str(arguments['state_dir'] / 'secrets/other')
     elif boundary == 'writable-secret': data['gateway']['Mounts'][0]['RW'] = True
     elif boundary == 'gateway-memory': data['gateway']['HostConfig']['Memory'] = 0
+    elif boundary == 'writable-rootfs': data['gateway']['HostConfig']['ReadonlyRootfs'] = False
     elif boundary == 'gateway-user': data['gateway']['Config']['User'] = '0' if os.getuid() else '999'
     elif boundary == 'gateway-not-ready': data['ready']['status'] = 'unavailable'
     elif boundary == 'compose-owner-symlink':
         owner = arguments['compose_owner_path']
         actual = owner.with_name('manual-pilot-real')
+        owner.rename(actual)
+        owner.symlink_to(actual, target_is_directory=True)
+    elif boundary == 'gateway-owner-symlink':
+        owner = arguments['gateway_compose_owner_path']
+        actual = owner.with_name('gateway-runtime-owner-real')
         owner.rename(actual)
         owner.symlink_to(actual, target_is_directory=True)
     elif boundary == 'partial-gateway-pins': arguments['compose_owner_path'] = None
@@ -321,6 +344,8 @@ def test_promotion_cli_hides_arbitrary_driver_errors(promotion, monkeypatch, cap
 
 def test_gateway_promotion_cli_dispatches_all_explicit_pins(promotion, monkeypatch, capsys):
     arguments, _ = promotion
+    gateway_owner = arguments['checkout'].parent / 'gateway-runtime-owner'
+    gateway_owner.mkdir()
     expected = dict(
         checkout=arguments['checkout'], expected_sha=arguments['expected_sha'],
         published_ref=arguments['published_ref'], current_sha=arguments['current_sha'],
@@ -329,6 +354,7 @@ def test_gateway_promotion_cli_dispatches_all_explicit_pins(promotion, monkeypat
         gateway_container='5' * 64, gateway_image='sha256:' + '6' * 64,
         api_image=arguments['api_image'], system_id=arguments['system_id'],
         ca_pem_sha256=arguments['ca_pem_sha256'], compose_owner_path=arguments['checkout'] / 'ops/manual-pilot',
+        gateway_compose_owner_path=gateway_owner,
         schema_transition=arguments['schema_transition'],
     )
     seen = {}
@@ -347,6 +373,7 @@ def test_gateway_promotion_cli_dispatches_all_explicit_pins(promotion, monkeypat
         '--gateway-container-id', expected['gateway_container'], '--gateway-image-id', expected['gateway_image'],
         '--database-system-id', expected['system_id'], '--ca-pem-sha256', expected['ca_pem_sha256'],
         '--compose-owner-path', str(expected['compose_owner_path']),
+        '--gateway-compose-owner-path', str(expected['gateway_compose_owner_path']),
         '--schema-transition', expected['schema_transition'],
     ]
     assert controller.main(flags) == 0
