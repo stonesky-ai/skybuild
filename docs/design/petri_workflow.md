@@ -1,10 +1,11 @@
 # Petri task workflow plan
 
-Project: **Petri**. Priority: **5**. Date: 2026-10-09. Parent task: `SKYBUILD-PETRI`.
+Project: **Petri**. Priority: **2**. Date: 2026-10-09. Parent task: `SKYBUILD-PETRI`.
 
 Source revision: `8890adb07930e3ce47d8075ed6da86b9f962a8c8`. Governing design: architecture A42, section 5.
 
-This document contains the design and the implementation plan. The software is not implemented by this document.
+This document contains the approved design and implementation plan. Implementation has started under priority 2.
+Task history records actual progress and acceptance. This document does not attest completion.
 The task API stores the current task records. PostgreSQL stores the authoritative task state and history.
 
 Use short sentences and consistent technical names. Use full place names in all descriptions, tables and diagrams.
@@ -315,11 +316,11 @@ Preserve the existing authentication boundary.
 ## Implementation tasks
 
 The API contains `SKYBUILD-PETRI-01` through `SKYBUILD-PETRI-12`.
-All tasks have priority 5 and a responsible owner.
+All tasks have priority 2 and a responsible owner.
 The parent waits for task 12. No child waits for parent completion.
 The task table references the API records. It is not another editable task queue.
 
-Aim for approximately 30 minutes of focused work per task.
+The owner authorizes implementation now. Aim for approximately 30 minutes of focused work per task.
 If a task needs more time, record a checkpoint or split at an interface.
 Tasks 04, 08, 09 and 12 can exceed this target.
 Each code task needs applicable checks and an independent review in a separate qualified session.

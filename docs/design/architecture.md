@@ -188,7 +188,7 @@ Initially, task assignment is a coordination hint for one manually selected exec
 
 ### Task workflow, append-only journal and control page
 
-Owner-confirmed on 2026-10-09: the project name is **Petri**, at **priority 5**.
+Owner-confirmed on 2026-10-09: the project name is **Petri**, at **priority 2**.
 Use exactly seven places: Ready, Working, Validating, Integrating, Done, Deferred and Hold.
 The normal path is Ready, Working, Validating, Integrating, Done.
 Unit tests, scans, long tests, code review and needs rebase are validation stages carried by the token.
@@ -198,7 +198,7 @@ Code completion alone does not mean accepted completion.
 
 [Task workflow](task_workflow.md) and the [Petri plan](petri_workflow.md) define transitions, evidence, dependencies and the workbench.
 [ADR 0031](../adr/tasks.md#adr-0031) retains the journal requirements.
-The owner requests design and simplicity analysis before implementation.
+The owner approves implementation through subtasks, in parallel where dependencies permit.
 The implementation and rollout remain proposed.
 
 Kernel behavior and persistence can generate in parallel after their shared interface is accepted.

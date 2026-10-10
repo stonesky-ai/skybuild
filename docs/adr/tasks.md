@@ -28,7 +28,7 @@ Proposed mechanics: commit mutations, journal events and invalidations together;
 ### Petri refinement, 2026-10-09
 
 **The seven-place requirement is accepted. The implementation remains proposed.**
-The owner names the project Petri and assigns priority 5.
+The owner names the project Petri and assigns priority 2.
 Use Ready, Working, Validating, Integrating, Done, Deferred and Hold.
 The token carries unit tests, scans, long tests, code review and needs-rebase evidence.
 Confirmed validation and integration failures return the task to Ready with the fault.
@@ -38,5 +38,5 @@ Historical records do not change.
 The [Petri plan](../design/petri_workflow.md) recommends four small classes and one fixed transition table.
 Existing Store transactions remain the application boundary.
 SNAKES remains an optional modeling library, not an initial runtime dependency.
-The owner requests design and simplicity analysis before implementation.
+The owner approves implementation through subtasks, in parallel where dependencies permit.
 Existing history, authority, fencing, review and deployment controls remain applicable.

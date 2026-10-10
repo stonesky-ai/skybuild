@@ -8,10 +8,10 @@ When architecture changes, update the affected work areas, dependencies, interfa
 
 The selected [bootstrap brief](implementation/bootstrap.md) fixes the first API/Store contract and manually assigned work scopes. Introduce migration or execution area plans when those boundaries are ready for sustained work and need independent review. Keep this parent plan as the sequence and boundary map, and link each area's governing architecture sections.
 
-## Petri workflow project (priority 5)
+## Petri workflow project (priority 2)
 
 Parent task: `SKYBUILD-PETRI`. Architecture section 5 governs the [Petri plan](petri_workflow.md).
-The owner requested design and simplicity analysis before implementation.
+The owner approved implementation through subtasks, in parallel where dependencies permit.
 Use seven places and carry validation results on the task token.
 Confirmed validation or integration failures return the task to Ready.
 Preserve the existing task API, journal, dependencies, claims and effect controls.
@@ -20,7 +20,7 @@ Implement four small classes and one transition table in the existing Store/API 
 Then connect existing producers and add the seven-column workbench.
 Keep SNAKES optional. Do not add another database, event bus or scheduler.
 
-The API contains 12 implementation tasks at priority 5.
+The API contains 12 implementation tasks at priority 2.
 Each task lists its author model, reviewer model and estimated generation time.
 Generation requires 3 hours 50 minutes to 6 hours of total model work.
 The serial build budget is approximately 8.5–14.5 hours, including review, tests, corrections and one combined gate.

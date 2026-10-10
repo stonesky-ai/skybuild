@@ -2,8 +2,8 @@
 
 This document derives from architecture A42, dated 2026-10-09.
 [Architecture section 5](architecture.md#5-bootstrap-rest-and-task-contract) governs the workflow.
-The project name is **Petri**. Its priority is **5**.
-The owner requested design and simplicity analysis before implementation.
+The project name is **Petri**. Its priority is **2**.
+The owner approved implementation through subtasks, in parallel where dependencies permit.
 
 The [Petri plan](petri_workflow.md) defines the current proposed workflow.
 It replaces the earlier proposal that used many phases.
