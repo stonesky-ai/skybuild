@@ -17,6 +17,7 @@ def create(store, principal, project, task_id, **fields):
     return store.create_task(principal, project, {"task_id": task_id, "title": "Work",
         "description": "Full task scope", **fields}, "create-" + task_id)
 from test_petri_store import author_receipt
+from test_manual_assignment import pinned as legacy_pinned  # noqa: F401
 
 
 
@@ -69,8 +70,7 @@ def test_new_task_in_any_project_can_claim_and_submit_without_profile_patch(stor
         assert token.place == Place.READY
         assert token.policy_version == DEFAULT_POLICY_VERSION
         assert token.requirements == DEFAULT_REQUIREMENTS
-        task = store.task_action(people["owner"], selected, "same-task", "ready", {"reason": "Reviewed"},
-                                 task["revision"], "ready-same")
+        assert task["status"] == task["phase"] == "ready"
         claim = store.claim_task(people["owner"], selected, "same-task", task["revision"], "claim-same")
         current = store.get_task(people["owner"], selected, "same-task")
         token = Store.workflow_token(current)
@@ -255,3 +255,48 @@ def test_actual_legacy_acceptance_migrates_to_diagnostic_hold_without_new_author
     assert not current_completion(view["task"])
     assert view["task"]["metadata"]["_skybuild_completion"] == accepted["metadata"]["_skybuild_completion"]
     assert store.task_history(people["owner"], project, accepted["task_id"])[:-1] == history
+
+
+
+def test_default_creation_dispatches_verified_assignment_without_legacy_ready_action(store, actors, legacy_pinned, tmp_path, monkeypatch):
+    import json
+    from skybuild import manual_dispatch
+    from skybuild.manual_assignment import verify_assignment
+    project, people = actors
+    repo, envelope = legacy_pinned
+    task = create(store, people["owner"], project, envelope["task_id"], acceptance_criteria=["Verify assigned work"])
+    assert task["status"] == task["phase"] == "ready" and task["revision"] == 1
+    assert Store.workflow_token(task).place == Place.READY
+    sent = []
+
+    class DispatcherClient:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return None
+        def request(self, method, path):
+            assert (method, path) == ("GET", "health/ready")
+            return {"status": "ready"}
+        def whoami(self):
+            return {"principal_id": envelope["dispatcher"], "is_admin": False,
+                    "grants": {project: ["cord:handle", "cord:read", "cord:send", "tasks:read"]}}
+        def get_task(self, selected, task_id):
+            assert (selected, task_id) == (project, task["task_id"])
+            return store.get_task(people["owner"], selected, task_id)
+        def send_message(self, selected, body, *, idempotency_key):
+            assert selected == project
+            sent.append(json.loads(body["body"]))
+            return {"message_id": "verified-assignment"}
+
+    token_file = tmp_path / "dispatcher-token"
+    token_file.write_text("x" * 32)
+    token_file.chmod(0o600)
+    monkeypatch.setattr(manual_dispatch, "_published_head", lambda *args: envelope["base_sha"])
+    result = manual_dispatch.dispatch(repo, envelope["brief_path"], worker=envelope["worker"],
+        dispatcher=envelope["dispatcher"], project=project, principal=envelope["dispatcher"],
+        url="https://controller.ts.net", token_file=token_file, state_dir=tmp_path / "dispatch-state",
+        resolve=lambda host: ["100.101.102.103"], client_factory=lambda *args, **kwargs: DispatcherClient())
+    assert result["status"] == "sent" and len(sent) == 1
+    assert sent[0]["task_status"] == "ready" and sent[0]["task_revision"] == 1
+    assert verify_assignment(sent[0], repo, worker=envelope["worker"])["verified"] is True
+    assert store.get_task(people["owner"], project, task["task_id"]) == task

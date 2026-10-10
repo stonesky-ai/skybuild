@@ -468,8 +468,14 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
                 self._dependencies(connection, project_id, task_id, values['dependencies'])
                 result = self._task(connection, project_id, task_id)
                 metadata = self._new_task_metadata(result)
-                connection.execute('UPDATE tasks SET metadata = %s WHERE project_id = %s AND task_id = %s',
-                                   (Jsonb(metadata), project_id, task_id))
+                place = metadata.get('_skybuild_workflow', {}).get('petri', {}).get('token', {}).get('place')
+                # Ready remains readable by the existing dispatcher and assignment
+                # envelope. This definition assessment grants no launch permission.
+                compatibility_status = 'ready' if place == 'ready' else result['status']
+                compatibility_phase = 'ready' if place == 'ready' else result['phase']
+                connection.execute('UPDATE tasks SET metadata = %s, status = %s, phase = %s '
+                                   'WHERE project_id = %s AND task_id = %s',
+                                   (Jsonb(metadata), compatibility_status, compatibility_phase, project_id, task_id))
                 result = self._task(connection, project_id, task_id)
                 self._journal(connection, principal, result)
                 if self._petri(result) and self.workflow_token(result).place.value == 'ready':

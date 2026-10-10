@@ -22,7 +22,7 @@ The Task 12 branch contains the following pinned implementation parents:
 
 The default requirement profile is `petri-checks-v1`. It requires all five validation stages.
 A stage omission needs a current not-applicable result with an explicit policy reason.
-New tasks use the profile automatically. A sufficient definition starts in Ready.
+New tasks use the profile automatically. A sufficient definition starts in Ready, with legacy status and phase both set to ready.
 Incomplete definitions start in Hold. A definition edit retains Hold until explicit release.
 Creation and claim do not grant spending or external launch permission.
 The Petri storage schema is version 1 in migration `013_petri_workflow.sql`.
@@ -56,7 +56,7 @@ Reuse the existing Reassessment and Publication models for their unchanged requi
 The final targeted source checks pass: 234 tests, with 18 PostgreSQL cases skipped because no disposable DSN was selected.
 These checks include enrollment, cross-project identity, integration observations, exclusions, the transition catalogue and claim capability.
 The disposable PostgreSQL acceptance includes a real API creation, atomic claim, submission, five validation stages and explicit no-publication acceptance.
-It also checks incomplete definition release, legacy snapshot enrollment, old accepted completion and journal receipts.
+It also checks default creation through the real manual dispatcher and assignment verifier, incomplete definition release, legacy snapshot enrollment, old accepted completion and journal receipts.
 The existing compatibility fixtures construct pre-Petri tasks by replacing only a pure enrollment helper.
 They do not edit journal snapshots, disable triggers or add a production bypass.
 Legacy completion without matching Petri inputs and stage evidence enters diagnostic Hold; its completion record remains unchanged.
