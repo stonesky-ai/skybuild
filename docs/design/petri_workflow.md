@@ -354,9 +354,14 @@ These choices reflect task risk. They are not measured model-speed comparisons.
 ## Parallel generation
 
 Dependencies identify required interfaces, not a preferred serial order.
-Accept the prerequisite contract and pin its source revision before downstream generation.
+The owner explicitly authorizes stacked task branches before prerequisite integration.
+Fix the prerequisite contract and pin its source revision before downstream generation.
+Create each dependent branch from its prerequisite branch.
+When a task has several prerequisites, combine their pinned heads in the dependent branch.
+Record the parent heads and resolve interface conflicts before generation.
 Independent tasks can generate in separate worktrees.
-Final integration still requires all relevant dependencies and reviews.
+Generation does not attest prerequisite completion or permit deployment.
+Final integration still requires all relevant dependencies, exact-head reviews and the combined gate.
 
 | Group | Tasks | Prerequisite |
 | --- | --- | --- |
