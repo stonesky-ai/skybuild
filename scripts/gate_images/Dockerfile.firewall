@@ -8,3 +8,4 @@ COPY firewall-rootfs/ /
 ARG FIREWALL_POLICY_SHA256
 LABEL org.skybuild.full-test.firewall-policy-sha256=${FIREWALL_POLICY_SHA256}
 ENV PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+ENV LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
