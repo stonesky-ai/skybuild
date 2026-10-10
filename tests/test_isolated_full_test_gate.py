@@ -167,6 +167,10 @@ def test_postgres_inspection_requires_exact_tmpfs_and_no_extra_mounts():
 
     gate._check_postgres_inspect(row, name="postgres-run", run_id="run",
                                  container_id=container_id, image_id=image_id, network=network)
+    row["Mounts"] = []
+    row["HostConfig"]["SecurityOpt"] = ["no-new-privileges"]
+    gate._check_postgres_inspect(row, name="postgres-run", run_id="run",
+                                 container_id=container_id, image_id=image_id, network=network)
     row["Mounts"].append({"Type": "bind", "Destination": "/host", "RW": False})
     with pytest.raises(gate.GateError):
         gate._check_postgres_inspect(row, name="postgres-run", run_id="run",
@@ -182,6 +186,13 @@ def test_attestation_key_preflight_requires_owned_mode_0600_key(tmp_path):
     key.chmod(0o640)
     with pytest.raises(gate.GateError, match="mode 0600"):
         gate._validate_attestation_key(key, "runner-key-1")
+
+
+def test_security_options_recognize_docker_normalized_no_new_privileges():
+    assert gate._has_no_new_privileges(["no-new-privileges"])
+    assert gate._has_no_new_privileges(["no-new-privileges:true"])
+    assert not gate._has_no_new_privileges(["no-new-privileges:false"])
+    assert not gate._has_no_new_privileges("no-new-privileges")
 
 
 def test_signer_receives_keyword_key_arguments(monkeypatch, tmp_path):
