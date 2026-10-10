@@ -561,7 +561,7 @@ def test_journal_mutation_is_blocked_in_database(store, actors, statement):
     project, people = actors
     create(store, people['worker'], project)
     with psycopg.connect(store.dsn) as connection:
-        with pytest.raises(psycopg.errors.RaiseException, match='append-only'):
+        with pytest.raises(psycopg.errors.RaiseException, match='^Task journal is append-only'):
             connection.execute(statement, (project,) if '%s' in statement else None)
         connection.rollback()
     assert len(store.task_history(people['worker'], project, 'T1')) == 1
