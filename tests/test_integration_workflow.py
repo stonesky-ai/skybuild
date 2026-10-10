@@ -300,3 +300,24 @@ def test_publication_completion_becomes_stale_when_petri_inputs_change(field, va
     assert current_completion(after)
     after["metadata"]["_skybuild_workflow"]["petri"]["token"][field] = value
     assert not current_completion(after)
+
+
+
+def test_adapter_records_unknown_progress_and_verified_exclusion():
+    from skybuild.store import Store as ActualStore
+    value = task(Place.INTEGRATING)
+    value["metadata"]["_skybuild_workflow"]["petri"]["token"]["bundle_id"] = "bundle-1"
+    store = Store(value)
+    adapter = IntegrationWorkflow(store, lambda *args: {
+        "bundle_id": "bundle-1", "integration_observation_verified": True,
+        "publication_outcome": "unknown"})
+    observed = adapter.transition("admin", "project", "task", "integration_progress", reason="Response missing",
+                                 evidence={"outcome": "unknown"}, expected_revision=1, idempotency_key="unknown-progress")
+    assert observed.place == Place.INTEGRATING
+    adapter = IntegrationWorkflow(store, lambda *args: {
+        "bundle_id": "bundle-1", "exclusion_verified": True, "validation_verified": True,
+        "publication_outcome": "unpublished"})
+    excluded = adapter.transition("admin", "project", "task", "exclude_from_bundle", reason="Confirmed unpublished",
+                                 evidence={"outcome": "unpublished"}, expected_revision=2, idempotency_key="exclude")
+    assert excluded.place == Place.VALIDATING and excluded.bundle_id is None
+    assert excluded.evidence == ActualStore.workflow_token(value).evidence

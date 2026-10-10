@@ -39,6 +39,8 @@ def test_atomic_claim_moves_working_and_preserves_readiness(store, actors):
 def test_claim_journal_failure_rolls_back_task_and_claim(store, actors, monkeypatch):
     project, people = actors
     task = enrolled(store, people, project)
+    persisted_before = store.get_task(people["owner"], project, task["task_id"])
+    projection_before = store.task_workflow(people["owner"], project, task["task_id"])
     original = store._journal
     def fail(*args, **kwargs):
         original(*args, **kwargs)
@@ -46,7 +48,8 @@ def test_claim_journal_failure_rolls_back_task_and_claim(store, actors, monkeypa
     monkeypatch.setattr(store, "_journal", fail)
     with pytest.raises(RuntimeError):
         store.claim_task(people["worker"], project, task["task_id"], task["revision"], "claim")
-    assert store.get_task(people["owner"], project, task["task_id"]) == task
+    assert store.get_task(people["owner"], project, task["task_id"]) == persisted_before
+    assert store.task_workflow(people["owner"], project, task["task_id"]) == projection_before
     assert store.claim_history(people["owner"], project, task["task_id"]) == []
 
 
@@ -207,12 +210,15 @@ def test_submission_rejects_stale_former_worker_and_forged_snapshot(store, actor
 def test_verified_adapter_rejects_nonadmin_and_input_fact_replacement(store, actors):
     project, people = actors
     task = enrolled(store, people, project)
+    persisted_before = store.get_task(people["owner"], project, task["task_id"])
+    projection_before = store.task_workflow(people["owner"], project, task["task_id"])
     for principal, facts in ((people["worker"], {}), (people["owner"], {"effects_resolved": True})):
         with pytest.raises(DomainError):
             store.verified_workflow_transition(principal, project, task["task_id"], "freeze", {}, task["revision"],
                                                uuid4().hex, evidence={"receipt": "ref"},
                                                verifier=lambda *args: facts)
-    assert store.get_task(people["owner"], project, task["task_id"]) == task
+    assert store.get_task(people["owner"], project, task["task_id"]) == persisted_before
+    assert store.task_workflow(people["owner"], project, task["task_id"]) == projection_before
 
 
 def test_full_failed_result_survives_compact_token_journal(store, actors):

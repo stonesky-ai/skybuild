@@ -72,7 +72,9 @@ def synchronize_token(before, values, *, operation, reason):
 
 def replacement_token(project_id, task_id, values):
     """Create a replacement identity without inheriting execution or evidence."""
-    token = TaskToken(project_id, task_id, Place.READY, title=values["title"],
+    from .enrollment import DEFAULT_POLICY_VERSION, DEFAULT_REQUIREMENTS
+    token = TaskToken(project_id, task_id, Place.READY, policy_version=DEFAULT_POLICY_VERSION,
+                      requirements=DEFAULT_REQUIREMENTS, title=values["title"],
                       priority=values["priority"], dependencies=tuple(values["dependencies"]),
                       definition_revision=1, input_generation=1, revision=1,
                       responsible=values["responsible"], next_action="Reassess replacement requirements and dependencies")

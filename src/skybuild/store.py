@@ -467,9 +467,34 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
                 connection.execute(sql.SQL('INSERT INTO tasks (project_id, task_id, {}) VALUES (%s, %s, {})').format(sql.SQL(', ').join(map(sql.Identifier, columns)), sql.SQL(', ').join(sql.Placeholder() for _ in columns)), (project_id, task_id, *parameters))
                 self._dependencies(connection, project_id, task_id, values['dependencies'])
                 result = self._task(connection, project_id, task_id)
+                metadata = self._new_task_metadata(result)
+                place = metadata.get('_skybuild_workflow', {}).get('petri', {}).get('token', {}).get('place')
+                # Ready remains readable by the existing dispatcher and assignment
+                # envelope. This definition assessment grants no launch permission.
+                compatibility_status = 'ready' if place == 'ready' else result['status']
+                compatibility_phase = 'ready' if place == 'ready' else result['phase']
+                connection.execute('UPDATE tasks SET metadata = %s, status = %s, phase = %s '
+                                   'WHERE project_id = %s AND task_id = %s',
+                                   (Jsonb(metadata), compatibility_status, compatibility_phase, project_id, task_id))
+                result = self._task(connection, project_id, task_id)
                 self._journal(connection, principal, result)
+                if self._petri(result) and self.workflow_token(result).place.value == 'ready':
+                    connection.execute('UPDATE task_readiness SET assessed_generation = input_generation '
+                                       'WHERE project_id = %s AND task_id = %s', (project_id, task_id))
                 return result
             return self._idempotent(connection, principal, project_id, 'task.create', idempotency_key, body, mutation)
+
+    @staticmethod
+    def _new_task_metadata(task):
+        """Enroll new tasks. Legacy test fixtures replace only this pure helper."""
+        from .enrollment import enrollment_token, install_token
+        metadata = json.loads(json.dumps(task['metadata']))
+        token = enrollment_token(task, input_generation=1, revision=task['revision'], new=True)
+        install_token(metadata, token)
+        metadata['_skybuild_workflow']['readiness'] = {
+            'input_generation': 1, 'assessed_generation': 1 if token.place.value == 'ready' else 0}
+        _validate_metadata(metadata)
+        return metadata
 
     def list_tasks(self, principal, project_id, *, limit=100, offset=0, after_task_id=None, by_id=False) -> list[dict]:
         self._page(limit, offset)
@@ -517,7 +542,8 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
                    ('source_head', 'target_base', 'definition_revision', 'input_generation', 'policy_version')}
         readiness = connection.execute('SELECT * FROM task_readiness WHERE project_id = %s AND task_id = %s',
                                        (task['project_id'], task['task_id'])).fetchone()
-        context['current_inputs'] = bool(task.get('acceptance_criteria') and readiness
+        context['definition_sufficient'] = bool(task.get('title') and task.get('description') and task.get('acceptance_criteria'))
+        context['current_inputs'] = bool(context['definition_sufficient'] and readiness
                                          and readiness['input_generation'] == token.input_generation
                                          and readiness['assessed_generation'] == token.input_generation)
         context['effects_resolved'] = not connection.execute(
@@ -635,28 +661,21 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
                 if task['revision'] != expected_revision:
                     raise DomainError('stale_revision', 'Task revision has changed', 409)
                 if self._petri(task):
-                    raise DomainError('workflow_conflict', 'Task already has Petri workflow', 409)
+                    return self._workflow_view(connection, principal, task)
                 self._require_no_effect_exposure(connection, project_id, task_id)
-                place = (Place.DONE if current_completion(task) else Place.DEFERRED if task['status'] == 'deferred'
-                         else Place.READY if task['status'] == 'ready' else Place.HOLD)
                 readiness = connection.execute('SELECT input_generation FROM task_readiness WHERE project_id = %s AND task_id = %s',
                                                (project_id, task_id)).fetchone()
-                trigger = task['metadata'].get('_skybuild_workflow', {}).get('deferral', {})
-                token = TaskToken(project_id, task_id, place, definition_revision=task['revision'],
-                                  input_generation=readiness['input_generation'], revision=task['revision'] + 1,
-                                  hold_reason=(trigger.get('reason') or task['blocker']) if place == Place.DEFERRED else
-                                  'Review legacy task definition and evidence' if place == Place.HOLD else None,
-                                  deferred_until=trigger.get('until') if place == Place.DEFERRED else None,
-                                  milestone_task_id=trigger.get('milestone_task_id') if place == Place.DEFERRED else None,
-                                  superseded=task['status'] == 'superseded')
+                from .enrollment import enrollment_token, install_token
+                token = enrollment_token(task, input_generation=readiness['input_generation'], revision=task['revision'] + 1)
                 metadata = json.loads(json.dumps(task['metadata']))
-                metadata.setdefault('_skybuild_workflow', {})['petri'] = {
-                    'schema_version': 1, 'token': token.to_dict(), 'place_entered_at': datetime.now(timezone.utc).isoformat()}
+                install_token(metadata, token)
                 _validate_metadata(metadata)
                 connection.execute('UPDATE tasks SET metadata = %s, revision = revision + 1 WHERE project_id = %s AND task_id = %s',
                                    (Jsonb(metadata), project_id, task_id))
                 after = self._task(connection, project_id, task_id)
                 self._journal(connection, principal, after, task, operation='workflow_initialized', reason='Initialize Petri workflow')
+                if current_completion(task) and not current_completion(after):
+                    self._invalidate_dependents(connection, principal, project_id, task_id)
                 return self._workflow_view(connection, principal, after)
             return self._idempotent(connection, principal, project_id, 'workflow.initialize', idempotency_key,
                                     {'task_id': task_id, 'revision': expected_revision}, mutation)
@@ -676,7 +695,7 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
             after_token = replace(after_token, input_generation=values['metadata']['_skybuild_workflow']['readiness']['input_generation'])
         facts = kernel.journal_facts(token, after_token, event)
         if receipt is not None:
-            facts['author_output_receipt'] = receipt
+            facts['author_output_receipt' if event['event'] == 'submit' else 'integration_receipt'] = receipt
         metadata = json.loads(json.dumps(before['metadata']))
         metadata['_skybuild_workflow']['petri']['token'] = after_token.to_dict()
         if event['event'] in {'reopen', 'release_hold', 'resume_deferred'}:
@@ -837,7 +856,8 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
                 allowed = {'submission_verified', 'result_authorized', 'validation_verified', 'integration_fixed',
                            'bundle_id', 'publication_required', 'acceptance_verified', 'publication_verified',
                            'task_included', 'policy_reason', 'failure_confirmed', 'completion_evidence',
-                           'publication_policy_version', 'acceptance_policy'}
+                           'publication_policy_version', 'acceptance_policy', 'integration_observation_verified',
+                           'exclusion_verified', 'publication_outcome'}
                 if set(checked) - allowed:
                     _invalid('Receipt cannot replace database input or ownership facts')
                 context.update({key: value for key, value in checked.items() if key != 'completion_evidence'})
@@ -864,7 +884,8 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
                     from .completion import freeze_without_publication_policy
                     prepared = freeze_without_publication_policy(before, context)
                 after = self._apply_workflow_event(connection, principal, prepared, request, context,
-                                                   journal_before=before)
+                                                   journal_before=before,
+                                                   receipt=evidence if event in {'integration_progress', 'exclude_from_bundle'} else None)
                 if event == 'accept':
                     self._invalidate_dependents(connection, principal, project_id, task_id)
                 return self._workflow_view(connection, principal, after)
@@ -949,7 +970,7 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
         if token.superseded or token.pending_action:
             raise DomainError('workflow_conflict', 'Resolve the pending or retired task before reassessment', 409)
         if action == 'ready':
-            if (token.place != Place.HOLD or not before['acceptance_criteria'] or
+            if (token.place not in {Place.HOLD, Place.READY} or not before['acceptance_criteria'] or
                     self._has_started_history(connection, project_id, before['task_id'])):
                 raise DomainError('workflow_conflict', 'Readiness requires acceptance and no started history', 409)
         elif action == 'rework':
@@ -1001,11 +1022,11 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
         _body(body, {'reason', 'generation', 'source_head', 'author', 'policy_ref',
                      'acceptance', 'checks', 'review', 'publication'})
         def changes(before, connection):
-            if self._petri(before):
-                raise DomainError('workflow_conflict', 'Petri completion requires verified workflow acceptance', 409)
             current = self._principal(connection, principal.principal_id)
             if not current.is_admin:
                 raise DomainError('authorization', 'Only an owner/admin may attest completion', 403)
+            if self._petri(before):
+                raise DomainError('workflow_conflict', 'Petri completion requires verified workflow acceptance', 409)
             self._require_current_dependencies(connection, project_id, before)
             return completion_change(before, body, current.principal_id)
         return self._change_task(principal, project_id, task_id, expected_revision, idempotency_key,

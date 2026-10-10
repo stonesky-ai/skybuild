@@ -51,7 +51,7 @@ class IntegrationWorkflow:
 
     def transition(self, principal, project_id, task_id, event, *, evidence,
                    expected_revision, idempotency_key, reason=None):
-        if event not in {"freeze", "integration_failure", "accept"}:
+        if event not in {"freeze", "integration_failure", "accept", "integration_progress", "exclude_from_bundle"}:
             raise DomainError("validation", "Unsupported integration event", 422)
         if self.verify_receipt is None:
             raise DomainError("workflow_conflict", "Integration producer is not qualified", 409)
@@ -60,14 +60,14 @@ class IntegrationWorkflow:
         def verify(connection, before, context, supplied):
             from .store import Store
             token = Store.workflow_token(before)
-            if event in {"freeze", "accept"} and not satisfactory_validation(token):
+            if event in {"freeze", "accept", "exclude_from_bundle"} and not satisfactory_validation(token):
                 raise DomainError("stale_evidence", "Required validation is not current and satisfactory", 409)
             if event == "freeze" and context.get("dependencies_satisfied") is not True:
                 raise DomainError("workflow_conflict", "Current dependencies are required for bundle freeze", 409)
             facts = self.verify_receipt(connection, before, context, supplied)
             if not isinstance(facts, dict):
                 raise DomainError("workflow_conflict", "Integration receipt was not verified", 409)
-            if supplied.get("outcome") == "unknown":
+            if supplied.get("outcome") == "unknown" and event != "integration_progress":
                 raise DomainError("workflow_conflict", "Publication is unresolved; retain integration ownership", 409)
             if event == "freeze":
                 facts = {**facts, "validation_verified": True}
