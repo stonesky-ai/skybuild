@@ -10,6 +10,7 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 from uuid import uuid4
@@ -138,6 +139,45 @@ def stage_firewall_payload(root: Path) -> dict:
     return manifest
 
 
+def _copy_pinned_package(source: Path, destination: Path, expected_sha256: str) -> Path:
+    """Copy through a no-follow descriptor and return only verified private bytes."""
+    try:
+        source_fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as error:
+        raise BuildError("trusted Git package input cannot be opened safely") from error
+    complete = False
+    try:
+        if not stat.S_ISREG(os.fstat(source_fd).st_mode):
+            raise BuildError("trusted Git package input is not a regular file")
+        try:
+            destination_fd = os.open(
+                destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o400
+            )
+        except OSError as error:
+            raise BuildError("private Git package staging file cannot be created safely") from error
+        digest = hashlib.sha256()
+        try:
+            while block := os.read(source_fd, 1024 * 1024):
+                digest.update(block)
+                view = memoryview(block)
+                while view:
+                    view = view[os.write(destination_fd, view):]
+            os.fchmod(destination_fd, 0o400)
+            os.fsync(destination_fd)
+        finally:
+            os.close(destination_fd)
+        if digest.hexdigest() != expected_sha256:
+            raise BuildError("trusted Git package hash differs from the reviewed Debian payload")
+        complete = True
+        return destination
+    except OSError as error:
+        raise BuildError("trusted Git package could not be staged safely") from error
+    finally:
+        os.close(source_fd)
+        if not complete:
+            destination.unlink(missing_ok=True)
+
+
 def stage_git_payload(root: Path, package_dir: Path) -> dict:
     """Unpack only the SHA-pinned Git/runtime packages bootstrapped from Debian trixie."""
     manifest = json.loads(GIT_PACKAGE_MANIFEST.read_bytes())
@@ -155,22 +195,27 @@ def stage_git_payload(root: Path, package_dir: Path) -> dict:
             or any(not path.is_file() or path.is_symlink() for path in package_dir.iterdir())):
         raise BuildError("offline Git package directory differs from the exact package allowlist")
     root.mkdir(mode=0o700, parents=True, exist_ok=False)
+    staged_packages = root / ".trusted-package-staging"
+    staged_packages.mkdir(mode=0o700)
     package_rows = []
-    for row in manifest["packages"]:
-        if (set(row) != {"file", "name", "version", "architecture", "sha256"}
-                or not re.fullmatch(r"[A-Za-z0-9.+_%~-]+\.deb", row["file"])
-                or not re.fullmatch(r"[0-9a-f]{64}", row["sha256"])):
-            raise BuildError("trusted Git package record is malformed")
-        package = package_dir / row["file"]
-        if _digest(package) != row["sha256"]:
-            raise BuildError("trusted Git package hash differs from the reviewed Debian payload")
-        for field in ("Package", "Version", "Architecture"):
-            actual = _run(["dpkg-deb", "-f", str(package), field], timeout=10).stdout.strip()
-            expected = row["name" if field == "Package" else field.lower()]
-            if actual != expected:
-                raise BuildError("trusted Git package metadata differs from the reviewed Debian payload")
-        _run(["dpkg-deb", "-x", str(package), str(root)], timeout=30)
-        package_rows.append(dict(row))
+    try:
+        for row in manifest["packages"]:
+            if (set(row) != {"file", "name", "version", "architecture", "sha256"}
+                    or not re.fullmatch(r"[A-Za-z0-9.+_%~-]+\.deb", row["file"])
+                    or not re.fullmatch(r"[0-9a-f]{64}", row["sha256"])):
+                raise BuildError("trusted Git package record is malformed")
+            source = package_dir / row["file"]
+            staged = staged_packages / row["file"]
+            _copy_pinned_package(source, staged, row["sha256"])
+            for field in ("Package", "Version", "Architecture"):
+                actual = _run(["dpkg-deb", "-f", str(staged), field], timeout=10).stdout.strip()
+                expected = row["name" if field == "Package" else field.lower()]
+                if actual != expected:
+                    raise BuildError("trusted Git package metadata differs from the reviewed Debian payload")
+            _run(["dpkg-deb", "-x", str(staged), str(root)], timeout=30)
+            package_rows.append(dict(row))
+    finally:
+        shutil.rmtree(staged_packages)
     if (not (root / "usr/bin/git").is_file()
             or not any((root / "usr/lib/git-core").glob("git-upload-pack*"))
             or not (root / "usr/share/git-core/templates").is_dir()):
