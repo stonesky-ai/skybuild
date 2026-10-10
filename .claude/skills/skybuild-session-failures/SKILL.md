@@ -1,11 +1,15 @@
 ---
 name: skybuild-session-failures
-description: Review recent SkyBuild coding-session tool failures every 30 minutes and turn demonstrated preventable repeats into a narrow guard or skill. Use during sustained autonomous coding, not for ordinary one-off answers.
+description: Audit SkyBuild session transcripts, repeated tool errors or failed exit(2) messages, and review failures every 30 minutes during sustained coding. Identify reusable automation only when repeated use saves tokens.
 ---
 
 # SkyBuild session failure review
 
-During a sustained coding session, run `python3 scripts/session_failure_scan.py` from the SkyBuild checkout for a single bounded review. It uses ripgrep to select recent Codex JSONL logs and emits only failure categories and agent paths; never paste raw logs, credentials or prompts into reports. Inspect recent results every 30 minutes while continuing assigned work and processing coordination messages.
+During a sustained coding session, run `rtk proxy scripts/project_python scripts/session_failure_scan.py` from the exact SkyBuild checkout for a single bounded review. It uses ripgrep to select recent Codex JSONL logs and emits only failure categories and agent paths; never paste raw logs, credentials or prompts into reports. Inspect recent results every 30 minutes while continuing assigned work and processing coordination messages.
+
+For requests such as “audit session transcripts,” “repeated tool errors,” or “failed exit(2),” add `--minutes 2880 --details` for the last two days, or select the requested window. This single Python invocation combines log selection, invocation/result pairing, exit counts, fixed diagnostic labels and at most three event locations per label. It never prints raw commands or error text. Labels can overlap and indicate candidates, not established causes; inspect the referenced invocation and result privately before calling a failure preventable. Script errors without a structured exit code remain `script_error`, rather than guessing an exit code from quoted text. Detailed mode is a one-shot audit; do not combine it with watch mode.
+
+Before adding automation, compare its implementation, validation and discovery cost against tokens saved per repeated sequence. Prefer extending an existing helper and trigger. Record the break-even repetition count; skip a new skill when existing tools already cover the sequence or expected use cannot repay its cost.
 
 For repeated CPU-only sampling, use `--watch --duration-minutes <1–480>` and pass `--approval-deadline <ISO-8601 timestamp with timezone>` when the session has an approval cutoff. Watch mode requires an explicit duration or deadline, uses the earlier bound, and never runs longer than eight hours. A monotonic cutoff prevents wall-clock rollback from extending that lifetime. An expired deadline performs no scan. Run the watcher in the background with a task-owned output file or managed process handle; record that ownership for cancellation. Never keep the reasoning session in a `write_stdin` or other wait loop until the watcher finishes. Read bounded output only when a review is due, then return to useful work and queued messages. Do not restart a watcher automatically at its cutoff. End only the owned watcher with SIGTERM or SIGINT when the session ends; cancellation interrupts its wait and parsing, with an in-flight ripgrep call bounded by its timeout.
 
