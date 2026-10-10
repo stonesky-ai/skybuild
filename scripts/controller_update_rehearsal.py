@@ -688,12 +688,21 @@ def execute(checkout: Path, evidence_path: Path, go_path: Path, evidence_output:
                    execution_host)
     expected_plan_sha256 = plan_digest(plan)
     go = _read_go_record(go_path)
-    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    evidence_bytes = evidence_path.read_bytes()
+    if hashlib.sha256(evidence_bytes).hexdigest() != plan["runtime_provenance"]["runtime_audit_sha256"]:
+        raise PreparationError("Accepted runtime audit changed after the reviewed plan was prepared")
+    evidence = json.loads(evidence_bytes)
     pg_rows = [row for row in evidence["containers"] if row.get("name") == "/skybuild-pilot-pg"]
     api_rows = [row for row in evidence["containers"] if row.get("name") == "/skybuild-pilot-api"]
     if len(pg_rows) != 1 or len(api_rows) != 1:
         raise PreparationError("Accepted runtime evidence lacks exact API/PostgreSQL identities")
     pg_image = pg_rows[0]["image"]
+    provenance = plan["runtime_provenance"]
+    if (api_rows[0].get("id") != provenance["accepted_api_container_id"]
+            or api_rows[0].get("image") != provenance["accepted_api_image_id"]
+            or pg_rows[0].get("id") != provenance["accepted_postgres_container_id"]
+            or pg_image != provenance["accepted_postgres_image_id"]):
+        raise PreparationError("Accepted runtime audit identities changed after the reviewed plan was prepared")
     if (go.get("decision") != "GO" or go.get("task_id") != plan["task_id"]
             or go.get("plan_sha256") != expected_plan_sha256
             or go.get("accepted_image") != ACCEPTED_IMAGE

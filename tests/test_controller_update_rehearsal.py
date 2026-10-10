@@ -62,12 +62,38 @@ def test_runtime_go_record_is_required_before_docker(monkeypatch, tmp_path):
         {"name": "/skybuild-pilot-api", "id": "a" * 64, "image": rehearsal.ACCEPTED_IMAGE},
         {"name": "/skybuild-pilot-pg", "id": "b" * 64, "image": "sha256:" + "c" * 64},
     ]}))
+    audit = json.loads(evidence_path.read_text())
     monkeypatch.setattr(rehearsal, "prepare", lambda *_args: {
         "task_id": go["task_id"], "accepted_controller": {"image": rehearsal.ACCEPTED_IMAGE},
-        "candidate": {"source": rehearsal.CANDIDATE_SOURCE, "tree": rehearsal.CANDIDATE_TREE}})
+        "candidate": {"source": rehearsal.CANDIDATE_SOURCE, "tree": rehearsal.CANDIDATE_TREE},
+        "runtime_provenance": {
+            "runtime_audit_sha256": hashlib.sha256(evidence_path.read_bytes()).hexdigest(),
+            "accepted_api_container_id": audit["containers"][0]["id"],
+            "accepted_api_image_id": audit["containers"][0]["image"],
+            "accepted_postgres_container_id": audit["containers"][1]["id"],
+            "accepted_postgres_image_id": audit["containers"][1]["image"],
+        }})
     monkeypatch.setattr(rehearsal, "_docker", lambda *_args, **_kwargs: pytest.fail("Docker must not run"))
     with pytest.raises(rehearsal.PreparationError, match="matching independent-review and root GO"):
         rehearsal.execute(tmp_path, evidence_path, path, tmp_path / "out.jsonl")
+
+
+def test_execution_rejects_audit_changed_after_plan_before_docker(monkeypatch, tmp_path):
+    evidence_path = tmp_path / "runtime-audit.json"
+    evidence_path.write_text('{"containers": []}')
+    planned = '{"containers": [{"id": "' + "a" * 64 + '"}]}\n'
+    plan = {"task_id": "task", "runtime_provenance": {
+        "runtime_audit_sha256": hashlib.sha256(planned.encode()).hexdigest(),
+        "accepted_api_container_id": "a" * 64,
+        "accepted_api_image_id": rehearsal.ACCEPTED_IMAGE,
+        "accepted_postgres_container_id": "b" * 64,
+        "accepted_postgres_image_id": "sha256:" + "c" * 64,
+    }}
+    monkeypatch.setattr(rehearsal, "prepare", lambda *_args: plan)
+    monkeypatch.setattr(rehearsal, "_read_go_record", lambda _path: {})
+    monkeypatch.setattr(rehearsal, "_docker", lambda *_args, **_kwargs: pytest.fail("Docker must not run"))
+    with pytest.raises(rehearsal.PreparationError, match="changed after the reviewed plan"):
+        rehearsal.execute(tmp_path, evidence_path, tmp_path / "go.json", tmp_path / "out.jsonl")
 
 
 def _private_journal(tmp_path):
