@@ -130,9 +130,14 @@ def _source_manifest(checkout: Path, revision: str) -> dict[str, str]:
     return manifest
 
 
-SCHEMA_TRANSITIONS = {
-    "011-to-012": (11, 12, "migrations/012_api_task_authority.sql"),
-    "012-to-013": (12, 13, "migrations/013_petri_workflow.sql"),
+SCHEMA_TRANSITIONS: dict[str, tuple[int, int, tuple[str, ...]]] = {
+    "011-to-012": (11, 12, ("migrations/012_api_task_authority.sql",)),
+    "012-to-013": (12, 13, ("migrations/013_petri_workflow.sql",)),
+    "013-to-016": (13, 16, (
+        "migrations/014_real_cpu_dispatch.sql",
+        "migrations/015_trusted_integration.sql",
+        "migrations/016_task_usage_history.sql",
+    )),
 }
 
 
@@ -140,14 +145,20 @@ def _verify_schema_transition(current: dict[str, str], candidate: dict[str, str]
                               transition: str) -> tuple[int, int]:
     if transition not in SCHEMA_TRANSITIONS:
         raise ValueError("Require an explicit reviewed schema transition")
-    current_version, candidate_version, migration = SCHEMA_TRANSITIONS[transition]
+    current_version, candidate_version, migrations = SCHEMA_TRANSITIONS[transition]
     old = {name: digest for name, digest in current.items() if name.startswith("migrations/")}
     new = {name: digest for name, digest in candidate.items() if name.startswith("migrations/")}
     versions = sorted(int(Path(name).name.split("_", 1)[0]) for name in old)
+    registered_versions = [int(Path(name).name.split("_", 1)[0]) for name in migrations]
+    expected_versions = list(range(current_version + 1, candidate_version + 1))
     if (versions != list(range(1, current_version + 1))
             or any(new.get(name) != digest for name, digest in old.items())
-            or set(new) - set(old) != {migration}):
-        raise ValueError(f"Require unchanged schema 001-{current_version:03} and only reviewed migration {candidate_version:03}")
+            or registered_versions != expected_versions
+            or set(new) - set(old) != set(migrations)):
+        raise ValueError(
+            f"Require unchanged schema 001-{current_version:03} and only the exact reviewed "
+            f"migration set through {candidate_version:03}"
+        )
     return current_version, candidate_version
 
 

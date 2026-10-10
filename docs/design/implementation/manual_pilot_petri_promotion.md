@@ -1,10 +1,68 @@
-# Controlled schema-012-to-013 Petri promotion
+# Controlled schema-013-to-016 MVP promotion
 
-This is a preparation and operator runbook for a partial tranche of `SKYBUILD-MVP-CONTROLLER-UPDATE`. Repository integration does not authorize its live commands. The accepted schema-012 API remains the task authority until an explicitly authorized operator performs and verifies promotion. Existing tasks are not automatically enrolled by migration 013.
+This runbook prepares the reviewed MVP migration bundle for a controlled runtime promotion. The accepted schema-013 API remains task authority until an explicitly authorized operator completes and verifies promotion. Repository integration and this procedure do not authorize live execution.
 
-The older [011-to-012 procedure](manual_pilot_promotion.md) remains a historical record. This procedure adds one explicit migration contract to the same guarded controller path. It does not provide another executor, credential provisioner, authority importer, or automatic deployment service.
+The controller accepts only `--schema-transition 013-to-016` for this promotion. It requires the exact unchanged migration prefix 001–013 and exactly these ordered additions: `014_real_cpu_dispatch.sql`, `015_trusted_integration.sql`, and `016_task_usage_history.sql`. Historical `011-to-012` and `012-to-013` transitions remain separately pinned. Unknown transitions, changed prefix digests, missing files, renamed files, and extra migrations fail closed.
 
-## Source preparation and isolated qualification
+The source candidate must come from a frozen, independently reviewed integration bundle, pass its full combined gate, and be published at the exact selected `refs/heads/dev-NNN` or `refs/heads/main` SHA. Verify per-task inclusion before promotion. The 109-test disposable-PG composition qualification for `c64cef4311bfb16382ace031e3d9b09cebe8b98d` covers the combined migration transaction semantics; it does not replace qualification of the final frozen candidate or runtime evidence.
+
+Rehearse the exact 013-to-016 transition with the existing disposable PostgreSQL gate before promotion. Keep the accepted API, database, and private runtime state intact during preparation. At execution, pin the reviewed candidate source/ref, current installed source, full API/database container IDs, current/candidate image IDs, PostgreSQL system identifier, private hostname/IP, CA digest, and private state directory from retained deployment evidence. Do not infer identities from names, tags, or ports.
+
+Require a fresh clear host-watch sample, the owner's 8 GiB reserve, at least 10 GiB available before preparation/build, sufficient disk, nice level 10, and a separately qualified memory-bounded builder. Preserve the accepted image/tag. Build only after explicit runtime-promotion authority; verify all candidate package files against the approved source manifest with the existing isolated image probe in [the historical controller promotion procedure](manual_pilot_promotion.md#later-build-and-recovery-evidence).
+
+Create a fresh identity-bound backup with `scripts/create_pilot_backup.py` immediately before maintenance. Retain its dump/evidence hashes, byte count, database name, and system identifier in private evidence. A dump alone is not tested restore recovery.
+
+Run the full read-only preflight with `--promotion --schema-transition 013-to-016` from the stable deployment checkout. Save its successful, unfiltered JSON report in a new mode-0600 `SKYBUILD_PROMOTION_REPORT`. Require `schema_transition=013-to-016`, `current_schema=13`, `candidate_schema=16`, exact published source/ref, and all retained API/database/cluster/TLS/CA/package/role/resource checks. The report must be less than two minutes old when migration starts. Confirm backup evidence still matches before stopping the API.
+
+## Authorized atomic 013-to-016 migration
+
+After explicit promotion authority and verified preparation, stop only the retained API container. Leave PostgreSQL and its storage running. Keep workers parked and reconcile pending assignments/results before maintenance.
+
+Use one administrator transaction, not separate `migrate` and role-provisioning commands. Reuse the preflight report checks and transaction settings from the historical procedure below, then apply only the exact candidate files in this order:
+
+```python
+migrations = (
+    root / "src/skybuild/migrations/014_real_cpu_dispatch.sql",
+    root / "src/skybuild/migrations/015_trusted_integration.sql",
+    root / "src/skybuild/migrations/016_task_usage_history.sql",
+)
+assert controller._verify_schema_transition(old, candidate, "013-to-016") == (13, 16)
+expected = sorted((int(Path(name).name.split("_", 1)[0]), digest)
+                  for name, digest in old.items() if name.startswith("migrations/"))
+assert expected == connection.execute(
+    "SELECT version, digest FROM schema_migrations ORDER BY version"
+).fetchall()
+for migration in migrations:
+    version = int(migration.name.split("_", 1)[0])
+    digest = hashlib.sha256(migration.read_bytes()).hexdigest()
+    assert candidate["migrations/" + migration.name] == digest
+    connection.execute(migration.read_text())
+    connection.execute("INSERT INTO schema_migrations VALUES (%s, %s)", (version, digest))
+assert connection.execute("SELECT version, digest FROM schema_migrations ORDER BY version").fetchall() == [
+    *expected,
+    *((14, candidate["migrations/014_real_cpu_dispatch.sql"]),
+      (15, candidate["migrations/015_trusted_integration.sql"]),
+      (16, candidate["migrations/016_task_usage_history.sql"])),
+]
+assert provision_runtime_role(connection, provisioner.DATABASE, provisioner.ROLE)["ok"]
+assert audit_runtime_role(connection, provisioner.DATABASE, provisioner.ROLE)["ok"]
+```
+
+Run this inside the existing transaction that verifies the fresh report, stopped API identity, still-running pinned database container, PostgreSQL system identifier, exact applied 001–013 digests, and absence of runtime-role sessions. Apply all three DDL files, their version/digest rows, and runtime-role qualification in that same transaction. A lost commit acknowledgment is unconfirmed; inspect exact schema digests and role state before deciding whether commit occurred. Never rerun blindly.
+
+After confirmed schema-016 commit and role audit, use the schema-independent guarded candidate replacement block in [the historical controller promotion procedure](manual_pilot_promotion.md#start-the-pinned-candidate-and-requalify). It removes only the retained stopped API ID, creates under an exclusive name, and starts only the returned candidate ID. Keep runtime environment, TLS, database storage, credentials, authority, and network configuration unchanged.
+
+Verify pinned-CA HTTP readiness, exact candidate container/image/source/package identity, unchanged binds/mounts/UID/resources, PostgreSQL system identifier, full migration digests through 016, restricted-role audit, authenticated `/api/v1/me`, and a declared read-only workflow route. HTTP readiness does not prove the schema version. Preserve task/journal/Cord records. Record the source/image/container/cluster identities and private verification evidence. Do not enable controls or start workers as part of promotion.
+
+After schema 016 commits, the accepted schema-013 API image is incompatible and is not a qualified binary rollback. Candidate failure requires evidence preservation and reviewed forward repair, or separately authorized isolated recovery with explicit loss/effect reconciliation. Do not delete migration records or objects, disable constraints, restore over current writes, or rotate credentials to force readiness.
+
+## Historical schema-012-to-013 Petri promotion
+
+The following procedure records the earlier schema-012-to-013 stage. Do not replay it against the current schema-013 API.
+
+The older [011-to-012 procedure](manual_pilot_promotion.md) remains a historical record. This stage added one explicit migration contract to the same guarded controller path. It did not provide another executor, credential provisioner, authority importer, or automatic deployment service.
+
+### Historical source preparation and isolated qualification
 
 Freeze an independently reviewed candidate from a passed integration bundle at an exact published `refs/heads/dev-NNN` or `refs/heads/main` SHA. The selected ref must itself resolve to that SHA; publication on another ref is insufficient. `scripts/manual_pilot_controller.py --promotion --schema-transition 012-to-013` requires the exact unchanged 001–012 prefix and only `013_petri_workflow.sql`. Its default transition remains historical `011-to-012`.
 
@@ -26,7 +84,7 @@ The exact 012-to-013 rehearsal uses a unique disposable database/role, canonical
 
 The fixture is not the actual accepted container binary. This rehearsal does not qualify a captured live snapshot, external service responsiveness, an image build, operator recovery from storage loss, or managed workers. Rehearse the current captured task snapshot separately in isolated PostgreSQL before a live enrollment operation. Ambiguous records and legacy completion without matching current Petri evidence enter diagnostic Hold; preserve stable identities, old completion evidence and all journal events. Never replay effects or renew authority from a snapshot.
 
-## Reviewable operator inputs
+### Historical reviewable operator inputs
 
 Use the stable deployment checkout named by the retained Compose ownership labels, not an author worktree. Pin the reviewed candidate source and published ref; current installed source; full API/database container IDs; immutable current and candidate image IDs; PostgreSQL system identifier; approved private hostname/IP; CA PEM digest; and private state directory. Independently reconcile any mismatch with retained deployment receipts. Do not adopt whatever currently owns a name, tag or port.
 
@@ -56,7 +114,7 @@ rtk proxy nice -n 10 scripts/project_python scripts/manual_pilot_controller.py \
 
 Immediately before stopping the API, repeat the full preflight and save its successful, unfiltered JSON in a new mode-0600 `SKYBUILD_PROMOTION_REPORT` file. Confirm `schema_transition=012-to-013`, `current_schema=12`, `candidate_schema=13`, the exact approved ref/source, and every retained identity. Capture command exit status; a printed failure object is not readiness. The report must be less than two minutes old when the transaction begins. Confirm the private backup and its evidence file still match the retained SHA-256/byte-count/database/system-identifier manifest.
 
-## Authorized atomic migration
+### Historical authorized atomic migration
 
 After explicit runtime-promotion authority and the verified preparation, stop only the retained API container. Leave PostgreSQL and storage running.
 
@@ -133,7 +191,7 @@ print(json.dumps({"migration_committed": True, "schema_version": 13, "runtime_ro
 
 Keep errors private and sanitize operator-facing failures; driver tracebacks can contain sensitive details. A lost commit acknowledgment is unconfirmed. Inspect exact schema digests and role state before deciding what committed. If the transaction definitely rolled back and schema 012 plus its role policy remain verified, the retained old API can recover with unchanged TLS. Never blindly rerun the transaction.
 
-## Candidate startup and verification
+### Historical candidate startup and verification
 
 After confirmed schema-013 commit and full role qualification, use the existing guarded Python replacement block under [Start the pinned candidate and requalify](manual_pilot_promotion.md#start-the-pinned-candidate-and-requalify). The block is schema-independent and consumes the same retained container/image/source report and verified `SKYBUILD_PROMOTION_IMAGE_ID`. Execute it through `scripts/project_python` at nice level 10. It rechecks exact stopped/API/database/network ownership, removes only the retained stopped API ID, creates with an exclusive name, and starts only the returned full candidate ID. A foreign replacement or collision stops the procedure. Do not run the historical migration or authority-cutover blocks.
 
@@ -141,6 +199,6 @@ Verify pinned-CA HTTP readiness, exact installed candidate package/image/contain
 
 Keep workers parked while reconciling existing tasks. Legacy four-grant worker relay credentials do not gain claim/transition capability through this schema update. Any later six-grant worker qualification or credential expansion needs its own authority and evidence. After the runtime and worker path are qualified, run the owner-selected README task through actual author, validation, review, bundle publication and confirmed dev inclusion.
 
-## Recovery boundary
+### Historical recovery boundary
 
 The old controller requires exactly schema 012. After confirmed 013 commit, restarting the old image is not a qualified rollback. Candidate failure requires evidence preservation and reviewed forward repair, or separately authorized isolated recovery with loss/effect reconciliation. Do not delete migration rows/objects, disable constraints, restore over current writes, replace credentials or renew authority to force readiness. A passing source rehearsal and an old dump are not production disaster recovery proof.
