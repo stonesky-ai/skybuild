@@ -56,9 +56,14 @@ def private_file(path: Path) -> None:
         raise TLSError("Require owned mode-0600 TLS files, not symlinks")
 
 
+def valid_publication_ref(value: str) -> bool:
+    """Restrict runtime candidates to a selected development cycle or main."""
+    return bool(re.fullmatch(r"refs/heads/(?:main|dev-(?!000)[0-9]{3})", value))
+
+
 def controller(checkout: Path, expected_sha: str, state_dir: Path,
                hostname: str, tailnet_ip: str, *,
-               expected_api_image: str | None = None) -> None:
+               expected_api_image: str | None = None, published_ref: str | None = None) -> None:
     """Require reviewed source and owned pilot containers with pinned images."""
     if os.getuid() == 0:
         raise TLSError("Run TLS preparation as the non-root pilot state owner")
@@ -77,10 +82,14 @@ def controller(checkout: Path, expected_sha: str, state_dir: Path,
             or command("git", "-C", str(checkout), "status", "--porcelain",
                        "--untracked-files=all")):
         raise TLSError("Require the clean reviewed checkout")
-    published = command("git", "-C", str(checkout), "ls-remote", "origin",
-                        "refs/heads/dev-002", "refs/heads/main")
-    if not any(row.split("\t")[0] == expected_sha for row in published.splitlines()):
-        raise TLSError("Reviewed source is not published at dev-002 or main")
+    if published_ref is not None and not valid_publication_ref(published_ref):
+        raise TLSError("Require an approved dev-NNN or main publication ref")
+    refs = (published_ref,) if published_ref is not None else ("refs/heads/dev-002", "refs/heads/main")
+    published = command("git", "-C", str(checkout), "ls-remote", "origin", *refs)
+    if (published_ref is not None and published != f"{expected_sha}\t{published_ref}") or (
+            published_ref is None and not any(row == f"{expected_sha}\t{ref}"
+                                             for row in published.splitlines() for ref in refs)):
+        raise TLSError("Reviewed source differs from the approved publication ref")
     private_directory(state_dir)
     if not state_dir.is_absolute() or checkout == state_dir or checkout in state_dir.parents:
         raise TLSError("Keep the private pilot state outside the checkout")

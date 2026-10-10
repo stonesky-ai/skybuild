@@ -125,8 +125,9 @@ def test_controller_guards_before_certificate_generation(tmp_path, monkeypatch, 
     assert not (state / "tls").exists()
 
 
+@pytest.mark.parametrize("published_ref", [None, "refs/heads/dev-004", "refs/heads/main"])
 @pytest.mark.parametrize("matches", [True, False])
-def test_controller_can_pin_current_api_image_for_promotion(tmp_path, monkeypatch, matches):
+def test_controller_can_pin_current_api_image_for_promotion(tmp_path, monkeypatch, matches, published_ref):
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     state = tmp_path / "state"
@@ -155,7 +156,7 @@ def test_controller_can_pin_current_api_image_for_promotion(tmp_path, monkeypatc
             if "--show-toplevel" in args: return str(checkout)
             if "rev-parse" in args: return sha
             if "status" in args: return ""
-            if "ls-remote" in args: return sha + "\trefs/heads/dev-002"
+            if "ls-remote" in args: return sha + "\t" + (published_ref or "refs/heads/dev-002")
             if "get-url" in args: return "https://github.com/stonesky-ai/skybuild.git"
         if args[:2] == ("tailscale", "status"):
             return json.dumps(snapshot())
@@ -168,11 +169,51 @@ def test_controller_can_pin_current_api_image_for_promotion(tmp_path, monkeypatc
 
     monkeypatch.setattr(tls, "command", command)
     if matches:
-        tls.controller(checkout, sha, state, HOST, IP, expected_api_image=api_image)
+        tls.controller(checkout, sha, state, HOST, IP, expected_api_image=api_image, published_ref=published_ref)
     else:
         with pytest.raises(tls.TLSError, match="expected local image"):
-            tls.controller(checkout, sha, state, HOST, IP, expected_api_image=api_image)
+            tls.controller(checkout, sha, state, HOST, IP, expected_api_image=api_image, published_ref=published_ref)
     assert not any(args[:4] == ("docker", "image", "inspect", "skybuild-pilot-api:local") for args in calls)
+
+
+@pytest.mark.parametrize("selected,observed", [
+    ("refs/heads/dev-004", "refs/heads/main"),
+    ("refs/heads/dev-004", "refs/heads/task/candidate"),
+    ("refs/heads/task/candidate", "refs/heads/task/candidate"),
+])
+def test_controller_requires_the_selected_publication_ref(tmp_path, monkeypatch, selected, observed):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    sha = "a" * 40
+    calls = []
+
+    def command(*args):
+        calls.append(args)
+        if args[0] != "git":
+            raise AssertionError("Publication failure must precede runtime inspection")
+        if "--show-toplevel" in args: return str(checkout)
+        if "rev-parse" in args: return sha
+        if "status" in args: return ""
+        if "get-url" in args: return "https://github.com/stonesky-ai/skybuild.git"
+        if "ls-remote" in args:
+            assert args[-1] == selected
+            return sha + "\t" + observed
+        raise AssertionError(args)
+
+    monkeypatch.setattr(tls, "command", command)
+    with pytest.raises(tls.TLSError, match="publication ref"):
+        tls.controller(checkout, sha, tmp_path / "state", HOST, IP, published_ref=selected)
+    assert all(args[0] == "git" for args in calls)
+
+
+@pytest.mark.parametrize("ref,expected", [
+    ("refs/heads/dev-004", True), ("refs/heads/dev-999", True), ("refs/heads/main", True),
+    ("refs/heads/dev-000", False), ("refs/heads/dev-04", False),
+    ("refs/heads/dev-004/other", False), ("refs/tags/dev-004", False),
+    ("refs/heads/task/candidate", False), ("refs/heads/dev-004\n", False),
+])
+def test_publication_ref_is_bounded(ref, expected):
+    assert tls.valid_publication_ref(ref) is expected
 
 
 def test_overlay_only_tailnet_bind_leaf_mounts_and_native_flags():

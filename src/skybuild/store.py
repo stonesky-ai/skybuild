@@ -885,7 +885,7 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
                     prepared = freeze_without_publication_policy(before, context)
                 after = self._apply_workflow_event(connection, principal, prepared, request, context,
                                                    journal_before=before,
-                                                   receipt=evidence if event in {'integration_progress', 'exclude_from_bundle'} else None)
+                                                   receipt=evidence)
                 if event == 'accept':
                     self._invalidate_dependents(connection, principal, project_id, task_id)
                 return self._workflow_view(connection, principal, after)

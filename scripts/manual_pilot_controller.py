@@ -47,6 +47,8 @@ def _port_free(port: int) -> bool:
 
 def preflight(checkout: Path, expected_sha: str, published_ref: str) -> dict:
     """Return actionable checks without mutating the host or printing secrets."""
+    from manual_pilot_tls import valid_publication_ref
+
     checks: dict[str, dict] = {}
 
     def add(name: str, ok: bool, detail: str) -> None:
@@ -63,12 +65,11 @@ def preflight(checkout: Path, expected_sha: str, published_ref: str) -> dict:
     head = _command("git", "-C", str(checkout), "rev-parse", "HEAD")
     status = _command("git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=all")
     published = _command("git", "-C", str(checkout), "ls-remote", "--exit-code", "origin", published_ref)
-    pinned = bool(re.fullmatch(r"[0-9a-f]{40}", expected_sha)) and published_ref in {
-        "refs/heads/dev-002", "refs/heads/main"}
+    pinned = bool(re.fullmatch(r"[0-9a-f]{40}", expected_sha)) and valid_publication_ref(published_ref)
     add("published_clean_head", pinned and head.returncode == 0 and head.stdout.strip() == expected_sha
         and status.returncode == 0 and not status.stdout
         and published.returncode == 0 and published.stdout.strip() == f"{expected_sha}\t{published_ref}",
-        "Require clean checkout at the exact approved, published dev-002 or main SHA")
+        "Require clean checkout at the exact approved, published dev-NNN or main SHA")
 
     available = _available_gib()
     add("memory", available >= MIN_AVAILABLE_GIB,
@@ -129,22 +130,38 @@ def _source_manifest(checkout: Path, revision: str) -> dict[str, str]:
     return manifest
 
 
-def _verify_schema_011_to_012(current: dict[str, str], candidate: dict[str, str]) -> None:
+SCHEMA_TRANSITIONS = {
+    "011-to-012": (11, 12, "migrations/012_api_task_authority.sql"),
+    "012-to-013": (12, 13, "migrations/013_petri_workflow.sql"),
+}
+
+
+def _verify_schema_transition(current: dict[str, str], candidate: dict[str, str],
+                              transition: str) -> tuple[int, int]:
+    if transition not in SCHEMA_TRANSITIONS:
+        raise ValueError("Require an explicit reviewed schema transition")
+    current_version, candidate_version, migration = SCHEMA_TRANSITIONS[transition]
     old = {name: digest for name, digest in current.items() if name.startswith("migrations/")}
     new = {name: digest for name, digest in candidate.items() if name.startswith("migrations/")}
     versions = sorted(int(Path(name).name.split("_", 1)[0]) for name in old)
-    if (versions != list(range(1, 12))
+    if (versions != list(range(1, current_version + 1))
             or any(new.get(name) != digest for name, digest in old.items())
-            or set(new) - set(old) != {"migrations/012_api_task_authority.sql"}):
-        raise ValueError("Require unchanged schema 001-011 and only reviewed authority migration 012")
+            or set(new) - set(old) != {migration}):
+        raise ValueError(f"Require unchanged schema 001-{current_version:03} and only reviewed migration {candidate_version:03}")
+    return current_version, candidate_version
+
+
+def _verify_schema_011_to_012(current: dict[str, str], candidate: dict[str, str]) -> None:
+    """Preserve the historical operator contract."""
+    _verify_schema_transition(current, candidate, "011-to-012")
 
 
 
 def promotion_preflight(checkout: Path, expected_sha: str, published_ref: str, *,
                         current_sha: str, state_dir: Path, hostname: str, tailnet_ip: str,
                         api_container: str, db_container: str, api_image: str, system_id: str,
-                        ca_pem_sha256: str) -> dict:
-    """Read-only, exact-identity preflight for the reviewed 011-to-012 promotion.
+                        ca_pem_sha256: str, schema_transition: str = "011-to-012") -> dict:
+    """Read-only, exact-identity preflight for an explicitly reviewed promotion.
 
     Expected identities come from retained deployment evidence, not from blindly
     accepting whatever happens to own a container name or a loopback listener.
@@ -161,11 +178,11 @@ def promotion_preflight(checkout: Path, expected_sha: str, published_ref: str, *
             or not re.fullmatch(r"sha256:[0-9a-f]{64}", api_image)
             or not system_id.isdigit() or not re.fullmatch(r"[0-9a-f]{64}", ca_pem_sha256)):
         raise ValueError("Require retained exact source/container/image/cluster identities")
-    if published_ref not in {"refs/heads/dev-002", "refs/heads/main"}:
+    if not tls.valid_publication_ref(published_ref):
         raise ValueError("Require the approved publication ref")
     checkout = checkout.absolute()
     tls.controller(checkout, expected_sha, state_dir, hostname, tailnet_ip,
-                   expected_api_image=api_image)
+                   expected_api_image=api_image, published_ref=published_ref)
     if tls.command("git", "-C", str(checkout), "ls-remote", "--exit-code", "origin", published_ref) != \
             f"{expected_sha}\t{published_ref}":
         raise ValueError("Candidate differs from the exact approved published ref")
@@ -181,7 +198,7 @@ def promotion_preflight(checkout: Path, expected_sha: str, published_ref: str, *
         raise ValueError("Unexpected Serve/Funnel configuration needs separate reconciliation")
     current = _source_manifest(checkout, current_sha)
     candidate = _source_manifest(checkout, expected_sha)
-    _verify_schema_011_to_012(current, candidate)
+    current_version, candidate_version = _verify_schema_transition(current, candidate, schema_transition)
     old_migrations = {name: digest for name, digest in current.items() if name.startswith("migrations/")}
     old_names = sorted(old_migrations)
 
@@ -264,7 +281,7 @@ def promotion_preflight(checkout: Path, expected_sha: str, published_ref: str, *
         applied = connection.execute('SELECT version, digest FROM skybuild.schema_migrations ORDER BY version').fetchall()
         expected = [(int(Path(name).name.split('_', 1)[0]), old_migrations[name]) for name in old_names]
         if applied != expected:
-            raise ValueError("Applied schema is not the exact retained 011 prefix")
+            raise ValueError(f"Applied schema is not the exact retained {current_version:03} prefix")
         audit = audit_runtime_role(connection, provisioner.DATABASE, provisioner.ROLE)
         if audit['findings']:
             raise ValueError("Current restricted-role policy is not fully qualified")
@@ -272,7 +289,8 @@ def promotion_preflight(checkout: Path, expected_sha: str, published_ref: str, *
             'candidate_source': expected_sha, 'current_source': current_sha,
             'api_container': api_container, 'database_container': db_container, 'api_image': api_image,
             'database': provisioner.DATABASE, 'database_system_id': system_id,
-            'current_schema': 11, 'candidate_schema': 12,
+            'current_schema': current_version, 'candidate_schema': candidate_version,
+            'schema_transition': schema_transition, 'published_ref': published_ref,
             'current_role_audit': 'passed',
             'candidate_role_audit_required': True, 'tls': tls_report,
             'ca_pem_sha256': ca_pem_sha256,
@@ -283,8 +301,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkout", type=Path, required=True)
     parser.add_argument("--expected-sha", required=True)
-    parser.add_argument("--published-ref", choices=("refs/heads/dev-002", "refs/heads/main"), required=True)
-    parser.add_argument("--promotion", action="store_true", help="Inspect the retained schema-011 controller; never apply changes")
+    parser.add_argument("--published-ref", required=True, help="Exact approved refs/heads/dev-NNN or refs/heads/main")
+    parser.add_argument("--promotion", action="store_true", help="Inspect the retained controller; never apply changes")
+    parser.add_argument("--schema-transition", choices=tuple(SCHEMA_TRANSITIONS), default="011-to-012")
     parser.add_argument("--current-sha")
     parser.add_argument("--state-dir", type=Path)
     parser.add_argument("--hostname")
@@ -307,7 +326,8 @@ def main(argv: list[str] | None = None) -> int:
                                          hostname=args.hostname, tailnet_ip=args.tailnet_ip,
                                          api_container=args.api_container_id, db_container=args.db_container_id,
                                          api_image=args.api_image_id, system_id=args.database_system_id,
-                                         ca_pem_sha256=args.ca_pem_sha256)
+                                         ca_pem_sha256=args.ca_pem_sha256,
+                                         schema_transition=args.schema_transition)
         else:
             report = preflight(args.checkout, args.expected_sha, args.published_ref)
     except Exception:
