@@ -82,8 +82,11 @@ def completion_change(task, body, actor):
         _text(publication[field])
     if publication["source_head"] != head or publication["result"] != "confirmed":
         raise DomainError("workflow_conflict", "Publication must confirm exact task inclusion", 409)
+    petri_inputs = _publication_token_binding(task, body)
     evidence = {"schema_version": 1, "kind": "owner_attestation", "actor": actor,
                 "input_revision": task["revision"], "definition": definition(task), **deepcopy(body)}
+    if petri_inputs is not None:
+        evidence["petri_inputs"] = petri_inputs
     metadata = deepcopy(task["metadata"])
     metadata.setdefault("_skybuild_workflow", {"generation": generation(task)})
     metadata[RESERVED_KEY] = evidence
@@ -91,6 +94,33 @@ def completion_change(task, body, actor):
 
 
 
+
+
+_PUBLICATION_INPUTS = ("source_head", "target_base", "definition_revision", "input_generation", "policy_version",
+                       "attempt_id", "claim_fence")
+
+
+def _has_petri(task):
+    return "petri" in task.get("metadata", {}).get("_skybuild_workflow", {})
+
+
+def _publication_token_binding(task, evidence, *, current=False):
+    """Bind publication evidence to Petri inputs; preserve the legacy contract."""
+    if not _has_petri(task):
+        return None
+    from .store import Store
+    from .workflow import Place
+    from .integration_workflow import satisfactory_validation
+    token = Store.workflow_token(task)
+    inputs = {name: getattr(token, name) for name in _PUBLICATION_INPUTS}
+    if (token.place != (Place.DONE if current else Place.INTEGRATING)
+            or evidence.get("source_head") != token.source_head
+            or evidence.get("publication", {}).get("base_commit") != token.target_base
+            or evidence.get("policy_ref") != token.policy_version or not token.policy_version
+            or evidence.get("generation") != generation(task) or not satisfactory_validation(token)
+            or current and evidence.get("petri_inputs") != inputs):
+        raise DomainError("stale_evidence", "Publication evidence does not match current Petri inputs", 409)
+    return inputs
 
 def freeze_without_publication_policy(task, context):
     """Persist a checked policy during the internal admin-only freeze transaction."""
@@ -205,8 +235,9 @@ def current_completion(task):
     try:
         return (task["status"] == "done" and isinstance(evidence, dict)
                 and evidence.get("schema_version") == 1
-                and (evidence.get("kind") == "owner_attestation" or
-                     evidence.get("kind") == "without_publication" and _current_without_publication(task, evidence))
+                and (evidence.get("kind") == "owner_attestation"
+                     and (not _has_petri(task) or _publication_token_binding(task, evidence, current=True) is not None)
+                     or evidence.get("kind") == "without_publication" and _current_without_publication(task, evidence))
                 and evidence.get("definition") == definition(task)
                 and evidence.get("generation") == generation(task))
     except (KeyError, TypeError, AttributeError, DomainError):
