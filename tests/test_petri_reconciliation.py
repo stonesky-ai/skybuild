@@ -87,3 +87,19 @@ def test_explicit_deferral_keeps_new_owner_next_action():
     synchronize_token(before, values, operation="defer", reason="New owner decision")
     token = TaskToken.from_dict(values["metadata"]["_skybuild_workflow"]["petri"]["token"])
     assert token.next_action == "Check the new milestone"
+
+
+def test_owner_control_counts_held_claim_without_changing_worker_context():
+    from skybuild.contracts import Principal
+    from test_petri_store import token_task
+    task = token_task(TaskToken("project", "task", Place.WORKING, input_generation=7))
+    class Connection:
+        def execute(self, query, parameters):
+            self.result = {"held": True} if "task_claims" in query else {"input_generation": 7}
+            return self
+        def fetchone(self):
+            return self.result
+    original = {"effects_resolved": True, "current_inputs": True}
+    checked = Store("unused", "unused")._workflow_control_context(Connection(), Principal("owner", True, {}), task, original)
+    assert checked["effects_resolved"] is False
+    assert original["effects_resolved"] is True
