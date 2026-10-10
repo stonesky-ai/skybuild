@@ -13,6 +13,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import shlex
 from uuid import uuid4
 
 import isolated_full_test_gate as gate
@@ -39,14 +40,68 @@ class BuildError(RuntimeError):
     """Local helper image inputs are incomplete or do not match the reviewed gate."""
 
 
+_DIAGNOSTIC_LIMIT = 2000
+_URL_USER_INFO = re.compile(r"(?i)\b(https?://)[^/@:\s]+:[^/@\s]+@([^/\s]+)")
+_JSON_AUTHORIZATION_VALUE = re.compile(
+    r"(?i)([\"']authorization[\"']\s*:\s*[\"'](?:[a-z]+\s+)?)([^\"']+)([\"'])"
+)
+_AUTHORIZATION_VALUE = re.compile(
+    r"(?i)\b(authorization\s*[:=]\s*(?:[a-z]+\s+)?)([^\s,;]+)"
+)
+_SECRET_VALUE = re.compile(
+    r"(?i)([\"']?(?:api[_-]?key|access[_-]?key|private[_-]?key|key|token|secret|password|passwd)"
+    r"[\"']?\s*[:=]\s*[\"']?)([^\"'\s,;}\]]+)"
+    r"|\b(bearer\s+)([^\s,;]+)"
+)
+
+
+def _safe_diagnostic(value: str) -> str:
+    value = _URL_USER_INFO.sub(r"\1[REDACTED]@\2", value)
+    value = _JSON_AUTHORIZATION_VALUE.sub(r"\1[REDACTED]\3", value)
+    value = _AUTHORIZATION_VALUE.sub(r"\1[REDACTED]", value)
+    value = _SECRET_VALUE.sub(
+        lambda match: (match.group(1) or match.group(3)) + "[REDACTED]", value
+    )
+    if len(value) > _DIAGNOSTIC_LIMIT:
+        value = "[truncated]\n" + value[-_DIAGNOSTIC_LIMIT:]
+    return value
+
+
+def _command_failure(arguments: list[str], *, returncode: int | str,
+                     stderr: str | bytes = "") -> BuildError:
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    safe_arguments = []
+    redact_next = False
+    for argument in arguments:
+        if redact_next:
+            safe_arguments.append("[REDACTED]")
+            redact_next = False
+            continue
+        safe_arguments.append(argument)
+        if argument.lower() in {
+            "--token", "--secret", "--password", "--authorization", "--key",
+            "--api-key", "--access-key", "--private-key", "--user", "-u",
+        }:
+            redact_next = True
+    command = _safe_diagnostic(shlex.join(safe_arguments))
+    detail = _safe_diagnostic(stderr.strip()) or "[no stderr]"
+    return BuildError(
+        f"local image preparation command failed: command={command!r}; "
+        f"returncode={returncode}; stderr={detail!r}"
+    )
+
+
 def _run(arguments: list[str], *, timeout: int = 120, check: bool = True) -> subprocess.CompletedProcess:
     try:
         result = subprocess.run(arguments, capture_output=True, text=True, timeout=timeout,
                                 check=False, env={**os.environ, "DOCKER_CLI_HINTS": "false"})
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise BuildError("local image preparation command failed") from error
+    except subprocess.TimeoutExpired as error:
+        raise _command_failure(arguments, returncode="timeout", stderr=error.stderr or "") from error
+    except OSError as error:
+        raise _command_failure(arguments, returncode=f"os-error:{error.errno}") from error
     if check and result.returncode:
-        raise BuildError("local image preparation command failed: " + Path(arguments[0]).name)
+        raise _command_failure(arguments, returncode=result.returncode, stderr=result.stderr)
     return result
 
 

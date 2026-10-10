@@ -5,12 +5,63 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 from types import SimpleNamespace
 
 import pytest
 
 import build_isolated_gate_images as builder
 from gate_images.write_runner_environment import write_environment
+
+
+def test_run_failure_preserves_bounded_redacted_command_and_stderr(monkeypatch):
+    def fake_run(command, **kwargs):
+        return SimpleNamespace(
+            returncode=17,
+            stderr=("x" * 3000 + "\nuseful failure detail"
+                    + " Authorization: Bearer auth-secret"
+                    + " Authorization: Basic basic-secret"
+                    + " Bearer bearer-secret token=token-secret"
+                    + " api_key=key-secret password=password-secret"
+                    + ' {"token":"SYN-json", "authorization":"Basic json-basic"}'
+                    + " https://user:SYN-pass@example.invalid/error"),
+        )
+
+    monkeypatch.setattr(builder.subprocess, "run", fake_run)
+    with pytest.raises(builder.BuildError) as caught:
+        builder._run(["docker", "build", "--token", "private-value", "."])
+
+    message = str(caught.value)
+    assert "command=\"docker build --token '[REDACTED]' .\"" in message
+    assert "returncode=17" in message
+    assert "[truncated]" in message
+    assert "useful failure detail" in message
+    assert "Authorization: Bearer [REDACTED]" in message
+    assert "Authorization: Basic [REDACTED]" in message
+    assert "Bearer [REDACTED]" in message
+    assert "token=[REDACTED]" in message
+    assert "api_key=[REDACTED]" in message
+    assert "password=[REDACTED]" in message
+    assert '"token":"[REDACTED]"' in message
+    assert '"authorization":"Basic [REDACTED]"' in message
+    assert "https://[REDACTED]@example.invalid/error" in message
+    assert not any(secret in message for secret in (
+        "auth-secret", "basic-secret", "bearer-secret", "token-secret",
+        "key-secret", "password-secret", "private-value", "SYN-json", "json-basic", "SYN-pass",
+    ))
+
+
+def test_run_timeout_preserves_and_redacts_timeout_stderr(monkeypatch):
+    def fake_run(command, **kwargs):
+        raise subprocess.TimeoutExpired(command, 1, stderr=b"secret=private-value")
+
+    monkeypatch.setattr(builder.subprocess, "run", fake_run)
+    with pytest.raises(builder.BuildError) as caught:
+        builder._run(["docker", "run"])
+
+    assert "returncode=timeout" in str(caught.value)
+    assert "secret=[REDACTED]" in str(caught.value)
+    assert "private-value" not in str(caught.value)
 
 
 def test_debian_git_package_manifest_is_pinned_to_the_python_base():
