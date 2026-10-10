@@ -1,0 +1,26 @@
+{
+  "schema": "manual-work-brief-v1",
+  "assignment_id": "MWP-20261010-RESULT-COLLECTOR-001",
+  "task_id": "SKYBUILD-PILOT-RESULT-COLLECTOR",
+  "worker": "local_worker_01",
+  "dispatcher": "pilot_dispatcher",
+  "branch": "task/pilot-result-collector-local-01",
+  "owned_paths": [
+    "src/skybuild/manual_result.py",
+    "tests/test_manual_result.py"
+  ],
+  "checks": [
+    "Fix receive_result rejecting legitimate pilot_dispatcher credentials: current collector requires three Cord-only grants, while dispatch/preflight require tasks:read plus three Cord grants. Change only owned collector code and its focused tests.",
+    "Accept exactly project skybuild tasks:read, cord:read, cord:send and cord:handle for the expected non-admin dispatcher. Reject admin, foreign/additional projects, missing, extra, malformed or duplicate scopes. Do not permit arbitrary extra grants.",
+    "Test result collection with the same narrow four-grant dispatcher profile accepted by current dispatch/preflight. Preserve authenticated sender, assignment pins, bounded collection, private transport, exact-head/path evidence and receipt/handling controls.",
+    "Run rtk pytest -q tests/test_manual_result.py tests/test_manual_dispatch.py tests/test_manual_cord.py tests/test_fleet_preflight.py through the correct checkout interpreter. Record exact command, import path, counts and exit status; dispatcher runs full combined gate once.",
+    "Read AGENTS.md, architecture working contract and relevant plan. Preparation base is e8c58d7109382c0efdf68281326f412aa6df46b6 (A41); staged local scope is in PR #66. Verify its published revision before work; reconcile conflicting source rather than editing architecture or plan.",
+    "Await SKYBUILD-BOOTSTRAP, dispatcher qualification and a committed, hashed manual-work-v2 assignment with current API task status/revision. Verify trusted pilot_dispatcher sender, exact worker, brief, base, branch and owned paths before receipt or worktree preparation.",
+    "Use only an owned worktree and the assigned branch/path. Preserve private TLS, pinned CA, scoped tokens and the sole API task authority. Never print secrets or message bodies. Stop on stale source, ownership conflict, failed qualification or uncertain live assignment.",
+    "When reusing the primary checkout Python environment, set PYTHONPATH to the owned worktree absolute src and verify skybuild.__file__ resolves there before accepting focused test evidence.",
+    "Observe memory without broad cleanup. Owner direction permits these lightweight focused checks; run no local heavy gate or service. Any full PostgreSQL gate retains its separately enforced 6 GiB admission floor on Wonko.",
+    "Run rtk git diff --check. Commit and push only the two owned files; return exact head/check evidence through validated Cord result. No task PR, merge, task completion or bundle mutation. Require separate qualified exact-head adversarial review before frozen-bundle integration."
+  ],
+  "model_limit": "One manually started sol or luna worker using authorized subscription allowance only. No paid API, Brodson, subagents, daemon, automatic model launch or service start. Retain host memory reserve.",
+  "next_action": "Await SKYBUILD-BOOTSTRAP and scoped first-local dispatch. Validate the pinned manual-work-v2 assignment and current API task revision, prepare the owned worktree, fix only the collector scope bug and tests, run focused checks, commit and push, then return exact head/evidence for separate qualified review and bundled integration."
+}

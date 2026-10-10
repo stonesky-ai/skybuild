@@ -1,0 +1,23 @@
+{
+  "schema": "manual-work-brief-v1",
+  "assignment_id": "MWP-20261010-STAGED-RUNBOOK-001",
+  "task_id": "SKYBUILD-PILOT-STAGED-RUNBOOK",
+  "worker": "local_worker_01",
+  "dispatcher": "pilot_dispatcher",
+  "branch": "task/pilot-staged-runbook-local-01",
+  "owned_paths": [
+    "docs/design/implementation/manual_worker_pilot.md"
+  ],
+  "checks": [
+    "Replace stale Wonko-first/both-boxes-only instructions with owner-approved stages: prove one local worker first, then two local workers concurrently on disjoint tasks, then one remote Wonko worker. No stage advances merely because elapsed time or access proof passes.",
+    "Document local_worker_01, local_worker_02 and wonko with pilot_dispatcher. Dispatcher and workers require only project skybuild tasks:read, cord:read, cord:send and cord:handle. Preserve pinned briefs/current revisions, owned worktrees, private access and recovery constraints.",
+    "Keep accurate one-shot preflight, receive, prepare and result commands. Distinguish access evidence, assignment receipt, work/check evidence, independent exact-head review and bundled integration. Preserve all existing scope, offline, duplicate-delivery and billing controls.",
+    "Read AGENTS.md, architecture working contract and relevant plan. Preparation base is e8c58d7109382c0efdf68281326f412aa6df46b6 (A41); staged local scope is in PR #66. Verify its published revision before work; reconcile conflicting source rather than editing architecture or plan.",
+    "Await SKYBUILD-BOOTSTRAP, dispatcher qualification and a committed, hashed manual-work-v2 assignment with current API task status/revision. Verify trusted pilot_dispatcher sender, exact worker, brief, base, branch and owned paths before receipt or worktree preparation.",
+    "Use only an owned worktree and the assigned branch/path. Preserve private TLS, pinned CA, scoped tokens and the sole API task authority. Never print secrets or message bodies. Stop on stale source, ownership conflict, failed qualification or uncertain live assignment.",
+    "Run rtk git diff --check. Check every documented command against current source/CLI help and resolve relative references. Record exact checks, changed paths and limitations; docs-only work needs no full PostgreSQL gate. Dispatcher runs the combined integration gate once.",
+    "Commit and push only the owned document. Return exact pushed head and evidence through validated Cord result; no task PR, merge, completion attestation or bundle mutation. Require separate qualified exact-head review and verified frozen-bundle inclusion before acceptance."
+  ],
+  "model_limit": "One manually started sol or luna worker using authorized subscription allowance only. No paid API, Brodson, subagents, daemon, automatic model launch or service start. Retain host memory reserve.",
+  "next_action": "Later useful documentation followup after substantive concurrent stage-two code tasks SKYBUILD-PILOT-RESULT-FRESHNESS and SKYBUILD-IMPORT-WORKFLOW-FIDELITY pass and prior worker ownership is reconciled. Await SKYBUILD-BOOTSTRAP and scoped fresh API-bound dispatch; update only the owned document, verify command/source fidelity, commit/push and return exact head for independent review and bundled integration."
+}
