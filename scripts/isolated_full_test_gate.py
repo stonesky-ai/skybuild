@@ -793,6 +793,10 @@ def _has_no_new_privileges(options: object) -> bool:
     )
 
 
+def _has_exact_net_admin(capabilities: object) -> bool:
+    return capabilities in (["NET_ADMIN"], ["CAP_NET_ADMIN"])
+
+
 def _container_info(name: str, run_id: str, expected_id: str | None, kind: str,
                     image_id: str | None = None) -> dict | None:
     target = expected_id or name
@@ -1122,7 +1126,7 @@ def _check_firewall_inspect(row: dict, *, name: str, run_id: str, container_id: 
     log_config = host.get("LogConfig", {})
     mounts = row.get("Mounts", [])
     if (host.get("NetworkMode") != "container:" + namespace_id
-            or host.get("CapAdd") != ["NET_ADMIN"] or "ALL" not in host.get("CapDrop", [])
+            or not _has_exact_net_admin(host.get("CapAdd")) or "ALL" not in host.get("CapDrop", [])
             or host.get("Privileged") is not False or host.get("ReadonlyRootfs") is not True
             or not _tmpfs_matches_options(host.get("Tmpfs"), "/run",
                                       {"rw", "nosuid", "nodev", "size=1m", "mode=0755"})

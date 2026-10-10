@@ -134,11 +134,19 @@ def test_firewall_sidecar_requires_a_bounded_writable_lock_tmpfs():
                                  postgres_namespace=False)
     row["Mounts"] = []
     row["HostConfig"]["SecurityOpt"] = ["no-new-privileges"]
+    row["HostConfig"]["CapAdd"] = ["CAP_NET_ADMIN"]
     gate._check_firewall_inspect(row, name="candidate-firewall", run_id="run",
                                  container_id="a" * 64, kind="candidate_firewall",
                                  image_id="sha256:" + "b" * 64, namespace_id="c" * 64,
                                  postgres_ip="172.18.0.2", candidate_ip="172.18.0.3",
                                  postgres_namespace=False)
+    row["HostConfig"]["CapAdd"] = ["CAP_NET_ADMIN", "CAP_NET_RAW"]
+    with pytest.raises(gate.GateError):
+        gate._check_firewall_inspect(row, name="candidate-firewall", run_id="run",
+                                     container_id="a" * 64, kind="candidate_firewall",
+                                     image_id="sha256:" + "b" * 64, namespace_id="c" * 64,
+                                     postgres_ip="172.18.0.2", candidate_ip="172.18.0.3",
+                                     postgres_namespace=False)
     row["HostConfig"]["Tmpfs"] = {}
     with pytest.raises(gate.GateError, match="identity, capabilities, command, or caps"):
         gate._check_firewall_inspect(row, name="candidate-firewall", run_id="run",
