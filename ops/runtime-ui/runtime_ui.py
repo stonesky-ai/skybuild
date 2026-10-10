@@ -11,6 +11,7 @@ import argparse
 from contextlib import asynccontextmanager
 from html import escape
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -131,6 +132,25 @@ def _same_origin_mutation(request: Request) -> bool:
     fetch_site = request.headers.get("sec-fetch-site")
     return (origin == expected and request.headers.get("x-skybuild-workbench") == "1" and
             fetch_site in {None, "same-origin"})
+
+
+def _listener_error(host: str, tls: bool, container_listener: bool, private_mode: bool) -> str | None:
+    if not tls and host not in {"127.0.0.1", "::1"}:
+        return "Non-loopback listeners require TLS"
+    if host in {"0.0.0.0", "::"} and not container_listener:
+        return "Bind an explicit loopback or private interface"
+    if private_mode and host not in {"127.0.0.1", "::1", "0.0.0.0", "::"}:
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            return "Private Workbench mode requires loopback, a Tailscale address, or an approved container listener"
+        tailscale = (address.version == 4 and address in ipaddress.ip_network("100.64.0.0/10")) or (
+            address.version == 6 and address in ipaddress.ip_network("fd7a:115c:a1e0::/48"))
+        if not tailscale:
+            return "Private Workbench mode requires loopback, a Tailscale address, or an approved container listener"
+    if private_mode and host in {"0.0.0.0", "::"} and not container_listener:
+        return "Private Workbench wildcard bind requires the approved container listener"
+    return None
 
 
 def _replace_once(source: str, before: str, after: str, label: str) -> str:
@@ -273,6 +293,10 @@ def create_app(*, ui_checkout: Path, api_checkout: Path, ca_file: Path,
             '<form id="connection-form" hidden', "workflow page connection form")
         workflow_html = _replace_once(workflow_html, 'Enter a project and token to load tasks.',
             'Loading SkyBuild tasks and workflow…', "workflow page initial status")
+        tasks_html = _replace_once(tasks_html, '</head>',
+            '<link rel="stylesheet" href="/workbench/assets/private-mode.css"></head>', "task page private style")
+        workflow_html = _replace_once(workflow_html, '</head>',
+            '<link rel="stylesheet" href="/workbench/assets/private-mode.css"></head>', "workflow page private style")
         tasks_js = _private_tasks_script(tasks_js)
         workflow_script = _private_workflow_script((api_static / "workbench.js").read_text())
     else:
@@ -312,6 +336,7 @@ def create_app(*, ui_checkout: Path, api_checkout: Path, ca_file: Path,
     }
     if private_mode:
         assets["private-mode.js"] = (private_bootstrap.encode(), "text/javascript")
+        assets["private-mode.css"] = (b"[hidden] { display: none !important; }\n", "text/css")
         assets["live-workflow.js"] = (workflow_script.encode(), "text/javascript")
 
     @app.get("/workbench/assets/{name}")
@@ -342,21 +367,29 @@ def create_app(*, ui_checkout: Path, api_checkout: Path, ca_file: Path,
                 return JSONResponse({"detail": "Request too large"}, status_code=413, headers=HEADERS)
         private_task_request = False
         if private_mode:
-            if request.headers.get("authorization") is not None:
-                return JSONResponse({"detail": "Caller credentials are not accepted in private Workbench mode"},
-                                    status_code=403, headers=HEADERS)
             if request.url.path.startswith("/api/v1/"):
-                if not _private_route(request, workbench_project, bytes(data)):
-                    return JSONResponse({"detail": "Route unavailable in private Workbench mode"},
-                                        status_code=404, headers=HEADERS)
-                if (request.headers.get("x-skybuild-workbench") != "1" or
-                        request.headers.get("sec-fetch-site") not in {None, "same-origin"}):
-                    return JSONResponse({"detail": "Same-origin Workbench intent required"},
-                                        status_code=403, headers=HEADERS)
-                if request.method not in {"GET", "HEAD"} and not _same_origin_mutation(request):
-                    return JSONResponse({"detail": "Same-origin Workbench intent required"},
-                                        status_code=403, headers=HEADERS)
-                private_task_request = True
+                caller_auth = request.headers.get("authorization") is not None
+                browser_intent = request.headers.get("x-skybuild-workbench") is not None
+                if caller_auth:
+                    if browser_intent:
+                        return JSONResponse({"detail": "Caller credentials and private Workbench intent cannot be combined"},
+                                            status_code=403, headers=HEADERS)
+                else:
+                    if not _private_route(request, workbench_project, bytes(data)):
+                        return JSONResponse({"detail": "Route unavailable in private Workbench mode"},
+                                            status_code=404, headers=HEADERS)
+                    if (request.headers.get("x-skybuild-workbench") != "1" or
+                            request.headers.get("sec-fetch-site") not in {None, "same-origin"}):
+                        return JSONResponse({"detail": "Same-origin Workbench intent required"},
+                                            status_code=403, headers=HEADERS)
+                    if request.method in {"GET", "HEAD"} and request.headers.get("origin") not in {
+                            None, f"{request.url.scheme}://{request.url.netloc}"}:
+                        return JSONResponse({"detail": "Same-origin Workbench intent required"},
+                                            status_code=403, headers=HEADERS)
+                    if request.method not in {"GET", "HEAD"} and not _same_origin_mutation(request):
+                        return JSONResponse({"detail": "Same-origin Workbench intent required"},
+                                            status_code=403, headers=HEADERS)
+                    private_task_request = True
             elif request.url.path not in {"/health/live", "/health/ready"}:
                 return JSONResponse({"detail": "Route unavailable in private Workbench mode"},
                                     status_code=404, headers=HEADERS)
@@ -426,10 +459,10 @@ def main():
     args = parser.parse_args()
     if bool(args.ssl_certfile) != bool(args.ssl_keyfile):
         parser.error("Supply both TLS certificate and key")
-    if args.host not in {"127.0.0.1", "::1"} and not args.ssl_certfile:
-        parser.error("Non-loopback listeners require TLS")
-    if args.host in {"0.0.0.0", "::"} and not args.container_listener:
-        parser.error("Bind an explicit loopback or private interface")
+    listener_error = _listener_error(args.host, bool(args.ssl_certfile), args.container_listener,
+                                     args.workbench_token_file is not None)
+    if listener_error:
+        parser.error(listener_error)
     import uvicorn
     app = create_app(ui_checkout=args.ui_checkout, api_checkout=args.api_checkout,
                      ca_file=args.ca_file, backend_hostname=args.backend_hostname,

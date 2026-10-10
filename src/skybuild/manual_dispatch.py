@@ -150,7 +150,8 @@ def dispatch(repo: Path, brief_path: str, *, worker: str, dispatcher: str, proje
              principal: str, url: str, token_file: Path, state_dir: Path,
              ca_file: Path | None = None, base_ref: str = "refs/heads/dev-003",
              resolve: Callable[[str], Iterable[str]] = _resolved_addresses,
-             client_factory: Callable[..., Client] = Client) -> dict:
+             client_factory: Callable[..., Client] = Client,
+             expected_envelope: dict | None = None) -> dict:
     """Record intent before I/O; retry only the same Cord body and key."""
     repo = repo.resolve()
     if not valid_identifier(project) or not valid_identifier(principal):
@@ -192,6 +193,12 @@ def dispatch(repo: Path, brief_path: str, *, worker: str, dispatcher: str, proje
             if envelope.get("schema") == "manual-work-v1" and state.get("status") == "sending":
                 raise DispatchError("Legacy sending intent needs manual reconciliation")
             mode = "pinned_retry" if state.get("status") == "sending" else "prepared_retry"
+        if expected_envelope is not None:
+            expected_initial = {key: value for key, value in expected_envelope.items()
+                                if key not in {"task_status", "task_revision"}}
+            expected_initial["schema"] = "manual-work-v1"
+            if expected_envelope.get("schema") != "manual-work-v2" or envelope not in (expected_initial, expected_envelope):
+                raise DispatchError("Selected assignment differs from approved exact envelope")
         identity = hashlib.sha256(f"{project}\0{envelope['assignment_id']}".encode()).hexdigest()
         key = f"manual-work-v1:{identity}"
         body = {"recipient": worker, "subject": f"Manual assignment {envelope['assignment_id']}",
@@ -242,6 +249,8 @@ def dispatch(repo: Path, brief_path: str, *, worker: str, dispatcher: str, proje
                         _require_dispatchable_place(task)
                         envelope = {**envelope, "schema": "manual-work-v2",
                                     "task_status": task["status"], "task_revision": task["revision"]}
+                        if expected_envelope is not None and envelope != expected_envelope:
+                            raise DispatchError("Current task differs from approved exact envelope")
                         try:
                             verify_assignment(envelope, repo, worker=worker)
                         except AssignmentError as error:

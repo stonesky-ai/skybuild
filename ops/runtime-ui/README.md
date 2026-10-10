@@ -60,9 +60,13 @@ responses and logs. The browser receives only the configured project ID.
 
 Private mode injects the server token only for the configured project's task CRUD,
 task-action, history, lineage, task workflow, and workflow-board routes. It denies
-Cord, claim, reconcile, split/merge, other projects and unrelated API routes.
-Caller-supplied Authorization headers are rejected in this mode. Every private API
-fetch requires `X-Skybuild-Workbench: 1`; every mutation also requires an exact
+Cord, claim, reconcile, split/merge, other projects and unrelated API routes when
+the caller is using the tokenless browser path. Existing API clients and workers
+may continue to send their own bearer credential through the gateway; those
+requests bypass the private Workbench allowlist and never receive the configured
+server token. A request cannot combine caller Authorization with the private
+Workbench intent header. Every tokenless private API fetch requires
+`X-Skybuild-Workbench: 1`; every mutation also requires an exact
 same-origin `Origin` and same-origin Fetch Metadata when the browser supplies it.
 Revision and idempotency headers remain unchanged. The
 gateway redacts the configured credential if an upstream response echoes it.
