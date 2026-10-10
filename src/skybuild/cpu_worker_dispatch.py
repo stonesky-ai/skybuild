@@ -249,7 +249,8 @@ class CPUWorkerDispatch:
             self._require_usage_clear(connection, project_id, dispatch['task_id'])
             if not self._still_live(connection, reservation):
                 raise DomainError('claim_conflict', 'Claim expired before worker launch authorization', 409)
-            if connection.execute('SELECT %s > clock_timestamp()', (dispatch['approved_until'],)).fetchone()[0] is not True:
+            if connection.execute('SELECT %s > clock_timestamp() AS live',
+                                  (dispatch['approved_until'],)).fetchone()['live'] is not True:
                 raise DomainError('control_conflict', 'CPU approval interval expired before worker launch', 409)
             connection.execute("UPDATE cpu_worker_dispatches SET state = 'launch-intent' WHERE operation_id = %s",
                                (operation_id,))
