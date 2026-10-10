@@ -69,6 +69,8 @@ A passing bounded model is not proof of SQL or remote publication correctness.
 The final record must identify the frozen branch heads, independent exact-head review, combined gate receipt and published task inclusion.
 Keep runtime promotion separate from repository integration.
 
+The bounded [schema-012-to-013 promotion procedure](manual_pilot_petri_promotion.md) extends the existing read-only guard with an explicit migration pair and exact selected dev-NNN/main publication ref. The historical 011-to-012 contract remains available. The exact disposable 012-to-013 rehearsal covers atomic role-audit failure rollback, strict old-schema refusal, candidate failure/recovery, task/Cord preservation, conservative legacy enrollment and default new-task Petri access under the restricted role. Its accepted server is a fixture modeling the deployed schema-012 write contract, not the actual accepted container. Captured live snapshot enrollment, immutable image/build qualification, complete live preflight, current backup and explicit runtime authority remain separate prerequisites. This source tranche does not complete the overarching controller-update task or authorize a live service change.
+
 
 ## First combined gate and correction batch
 
