@@ -57,7 +57,10 @@ def _setup(tmp_path, monkeypatch, *, fail_at=None):
     monkeypatch.setattr(controller, "check_source", lambda *_args: events.append("source"))
     monkeypatch.setattr(controller, "check_weekly_usage", lambda *_args: events.append("usage"))
     monkeypatch.setattr(controller, "resource_admission", lambda *_args, **_kwargs: events.append("host"))
-    monkeypatch.setattr(controller, "probe_private_api", lambda *_args, **_kwargs: events.append("worker_token"))
+    def probe_worker(*_args, **kwargs):
+        assert kwargs.get("cpu_claim") is True and not kwargs.get("workflow", False)
+        events.append("worker_token")
+    monkeypatch.setattr(controller, "probe_private_api", probe_worker)
     monkeypatch.setattr(controller, "_approved_task", lambda _task, envelope, _digest:
                         events.append("ready:" + envelope["task_id"]))
 
