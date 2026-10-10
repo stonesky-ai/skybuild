@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import stat
+from types import SimpleNamespace
 
 import pytest
 
@@ -70,6 +71,28 @@ def test_runner_image_copies_prepared_environment_at_entrypoint_path():
 
     assert "COPY runner-environment/skybuild-venv/ /opt/skybuild-venv/" in dockerfile
     assert "COPY runner-environment/ /opt/skybuild-venv/" not in dockerfile
+
+
+def test_image_build_is_offline_and_memory_cpu_bounded(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        if command[1:3] == ["image", "inspect"]:
+            return SimpleNamespace(stdout=json.dumps([{"Id": "sha256:" + "a" * 64}]))
+        return SimpleNamespace(stdout="")
+
+    monkeypatch.setattr(builder, "_run", fake_run)
+    digest = builder._build_image(tmp_path, "Dockerfile.runner", "runner:test",
+                                  builder.PYTHON_BASE_ID, {})
+
+    assert digest == "sha256:" + "a" * 64
+    command, kwargs = calls[0]
+    assert command[:2] == ["docker", "build"]
+    assert "--pull=false" in command and "--network=none" in command
+    assert "--memory=2g" in command and "--memory-swap=2g" in command
+    assert "--cpu-period=100000" in command and "--cpu-quota=100000" in command
+    assert kwargs["timeout"] == 1800
 
 
 def test_runner_environment_metadata_is_static_and_binds_exact_project_lock(tmp_path):

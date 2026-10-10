@@ -241,7 +241,9 @@ def _image_digest(image_id: str) -> str:
 
 def _build_image(context: Path, dockerfile: str, tag: str, base_id: str,
                  build_args: dict[str, str]) -> str:
-    command = ["docker", "build", "--pull=false", "--network=none", "--tag", tag,
+    command = ["docker", "build", "--pull=false", "--network=none",
+               "--memory=2g", "--memory-swap=2g", "--cpu-period=100000", "--cpu-quota=100000",
+               "--tag", tag,
                "--file", str(context / dockerfile), "--build-arg", "BASE_IMAGE=" + base_id]
     for name, value in sorted(build_args.items()):
         command.extend(("--build-arg", name + "=" + value))
