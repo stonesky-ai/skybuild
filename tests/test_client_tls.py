@@ -238,7 +238,7 @@ def test_preflight_cli_passes_ca_file(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["preflight", "--url", "https://controller.ts.net:8443", "--project", "project",
                                     "--token-file", "unused", "--principal", "worker", "--ca-file", str(ca)])
     assert fleet_preflight.main() == 0
-    assert captured == [{"ca_file": ca}]
+    assert captured == [{"ca_file": ca, "workflow": False}]
     capsys.readouterr()
 
 

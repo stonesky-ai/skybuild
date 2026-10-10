@@ -9,7 +9,7 @@ from skybuild.store import Store
 from skybuild.workflow import Place
 from test_store import actors, create, store
 from test_petri_store import enrolled
-from test_dependency_readiness import completed_fixture
+from test_petri_acceptance_store import completed_petri_fixture
 
 
 def test_edit_preserves_hold_and_matches_actual_generation(store, actors):
@@ -47,6 +47,8 @@ def test_deferred_edit_preserves_trigger_and_due_resume_is_cpu_only(store, actor
 
 
 def test_milestone_done_label_without_current_completion_cannot_resume(store, actors):
+    from skybuild.completion import current_completion
+
     project, people = actors
     owner = people["owner"]
     create(store, owner, project, "milestone")
@@ -54,10 +56,19 @@ def test_milestone_done_label_without_current_completion_cannot_resume(store, ac
     task = store.task_action(owner, project, "waiting", "defer", {"reason": "Wait", "milestone_task_id": "milestone"},
                              task["revision"], "defer")
     task = store.initialize_workflow(owner, project, "waiting", task["revision"], "initialize")["task"]
+    persisted = store.get_task(owner, project, "waiting")
+    projection = Store.workflow_projection(persisted)
+    assert {key: task[key] for key in projection} == projection
+    generation = Store.workflow_token(persisted).input_generation
+    history = store.task_history(owner, project, "waiting")
     with store._connection() as connection:
         connection.execute("UPDATE tasks SET status = 'done' WHERE project_id = %s AND task_id = 'milestone'", (project,))
+    assert not current_completion(store.get_task(owner, project, "milestone"))
     assert store.reconcile_due_deferrals(owner, project, "sweep")["reassessed"] == []
-    assert store.get_task(owner, project, "waiting") == task
+    after = store.get_task(owner, project, "waiting")
+    assert after == persisted
+    assert Store.workflow_token(after).input_generation == generation
+    assert store.task_history(owner, project, "waiting") == history
 
 
 def test_ready_can_show_unmet_dependency_but_claim_cannot_start(store, actors):
@@ -98,9 +109,8 @@ def test_reopen_invalidates_dependency_and_keeps_accepted_history(store, actors)
     from skybuild.completion import current_completion
     project, people = actors
     owner = people["owner"]
-    task = completed_fixture(store, owner, project, "accepted")
+    task = completed_petri_fixture(store, people, project, "accepted")
     create(store, owner, project, "dependent", dependencies=["accepted"])
-    task = store.initialize_workflow(owner, project, "accepted", task["revision"], "initialize")["task"]
     old_generation = Store.workflow_token(task).input_generation
     changed = store.workflow_transition(owner, project, "accepted", "reopen", {"reason": "Acceptance changed"},
                                         task["revision"], "reopen")["task"]
@@ -116,9 +126,10 @@ def test_ready_resume_does_not_admit_incomplete_definition(store, actors):
     owner = people["owner"]
     task = create(store, owner, project)
     task = store.initialize_workflow(owner, project, task["task_id"], task["revision"], "initialize")["task"]
-    task = store.workflow_transition(owner, project, task["task_id"], "release_hold", {"reason": "Reassess definition"},
-                                     task["revision"], "release")["task"]
-    assert Store.workflow_token(task).place == Place.READY
+    with pytest.raises(DomainError):
+        store.workflow_transition(owner, project, task["task_id"], "release_hold", {"reason": "Reassess definition"},
+                                  task["revision"], "release")
+    assert Store.workflow_token(store.get_task(owner, project, task["task_id"])).place == Place.HOLD
     with pytest.raises(DomainError):
         store.claim_task(people["worker"], project, task["task_id"], task["revision"], "claim")
 
@@ -127,8 +138,7 @@ def test_reassess_current_done_does_not_destroy_acceptance(store, actors):
     from skybuild.completion import current_completion
     project, people = actors
     owner = people["owner"]
-    task = completed_fixture(store, owner, project, "accepted")
-    task = store.initialize_workflow(owner, project, "accepted", task["revision"], "initialize")["task"]
+    task = completed_petri_fixture(store, people, project, "accepted")
     generation = Store.workflow_token(task).input_generation
     changed = store.task_action(owner, project, "accepted", "reassess", {"reason": "Acceptance remains current"},
                                 task["revision"], "reassess")
@@ -190,13 +200,12 @@ def test_live_claim_submission_and_result_preserve_pending_hold(store, actors):
 def test_current_done_reassessment_does_not_invalidate_or_block_dependents(store, actors):
     project, people = actors
     owner = people["owner"]
-    prerequisite = completed_fixture(store, owner, project, "accepted-a")
-    completed_fixture(store, owner, project, "accepted-b", dependencies=["accepted-a"])
+    prerequisite = completed_petri_fixture(store, people, project, "accepted-a")
+    completed_petri_fixture(store, people, project, "accepted-b", dependencies=["accepted-a"])
     dependent = create(store, owner, project, "ready-c", dependencies=["accepted-a"], acceptance_criteria=["Check"])
     dependent = store.task_action(owner, project, "ready-c", "ready", {"reason": "Ready"}, dependent["revision"], "ready")
     dependent = store.initialize_workflow(owner, project, "ready-c", dependent["revision"], "initialize-c")["task"]
     store.claim_task(people["worker"], project, "ready-c", dependent["revision"], "claim-c")
-    prerequisite = store.initialize_workflow(owner, project, "accepted-a", prerequisite["revision"], "initialize-a")["task"]
     before = {task_id: store.get_task(owner, project, task_id) for task_id in ("accepted-b", "ready-c")}
     store.task_action(owner, project, "accepted-a", "reassess", {"reason": "Acceptance unchanged"},
                       prerequisite["revision"], "reassess-a")

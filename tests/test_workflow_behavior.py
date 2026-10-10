@@ -20,8 +20,10 @@ def token(place=Place.VALIDATING):
 def context(current, **changes):
     facts = {name: getattr(current, name) for name in
              ("source_head", "target_base", "definition_revision", "input_generation", "policy_version")}
-    facts.update(current_inputs=True, effects_resolved=True, result_authorized=True,
-                 control_authorized=True, failure_confirmed=True,
+    facts.update(current_inputs=True, definition_sufficient=True, effects_resolved=True, result_authorized=True,
+                 control_authorized=True, failure_confirmed=True, integration_observation_verified=True,
+                 exclusion_verified=True, validation_verified=True, bundle_id=current.bundle_id,
+                 publication_outcome="pending",
                  now=datetime(2026, 10, 10, tzinfo=timezone.utc))
     facts.update(changes)
     return facts
@@ -57,13 +59,14 @@ def test_every_control_source(place, spec):
         with pytest.raises(DomainError):
             apply(current, spec.event, **details)
     else:
-        after = apply(current, spec.event, **details)
+        facts = context(current, publication_outcome="unpublished") if spec.event == "exclude_from_bundle" else context(current)
+        after = apply(current, spec.event, facts, **details)
         assert after.place == (spec.destination or place)
         assert after.revision == current.revision + 1
         assert after.task_id == current.task_id
         assert after.attempt_id == current.attempt_id
         assert after.claim_fence == current.claim_fence
-        assert after.bundle_id == current.bundle_id
+        assert after.bundle_id == (None if spec.event == "exclude_from_bundle" else current.bundle_id)
 
 
 @pytest.mark.parametrize("stage", list(ValidationStage))

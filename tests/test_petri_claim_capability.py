@@ -87,6 +87,7 @@ def test_preview_rejects_each_real_claim_blocker(case):
 def test_actual_store_and_api_offer_claim_only_to_eligible_principal(store, actors):
     project, people = actors
     task = enrolled(store, people, project)
+    persisted_before = store.get_task(people['owner'], project, task['task_id'])
     client = TestClient(create_app(store))
     path = f'/api/v1/projects/{project}/tasks/{task["task_id"]}/workflow'
     response = client.get(path, headers={'Authorization': 'Bearer ' + people['worker_token']})
@@ -94,7 +95,8 @@ def test_actual_store_and_api_offer_claim_only_to_eligible_principal(store, acto
     assert 'claim' in response.json()['available_actions']
     assert 'claim' in response.json()['task']['enabled_actions']
     assert store.claim_history(people['owner'], project, task['task_id']) == []
-    assert store.get_task(people['owner'], project, task['task_id']) == task
+    assert store.get_task(people['owner'], project, task['task_id']) == persisted_before
+    assert store.task_workflow(people['worker'], project, task['task_id']) == response.json()
 
     reader_id, reader_token = 'reader-' + uuid4().hex, uuid4().hex + uuid4().hex
     store.provision_principal(reader_id, reader_token, grants={project: {'tasks:read'}})
