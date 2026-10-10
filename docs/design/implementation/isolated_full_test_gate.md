@@ -18,6 +18,16 @@ The runner uses the pinned local test image with `UV_OFFLINE=1` and
 `pyproject.toml`, `uv.lock`, and frozen gate policy. Docker uses
 `--pull=never`; missing images stop before execution.
 
+The image also pins uv version `0.11.22` with label
+`org.skybuild.full-test.uv-version`. It supplies installed dependencies and
+static SkyBuild editable metadata beneath `/opt/skybuild-venv`, including
+`.skybuild-environment.json` with exactly these fields: schema
+`skybuild.full-test.environment.v1`, `uv_version`, `pyproject_sha256`, and
+`uv_lock_sha256`. The project and lock hashes must match the candidate bytes.
+Image preparation installs approved dependency wheels and constructs root
+project metadata as data; it must never execute candidate build backends or
+hooks in a credentialed host or signing context.
+
 ## Candidate boundary
 
 The supervisor verifies a clean trusted checkout and candidate checkout, the
@@ -42,6 +52,26 @@ code, checks connectivity denial, and executes the unchanged full test command.
 The trusted Python launcher starts in isolated mode. No candidate module runs
 before the fixed command exec. Scratch permits executable test fixtures while
 retaining its 2 GiB tmpfs size, UID, nosuid, nodev, and resource limits.
+
+The trusted launcher copies at most 256 MiB and 100,000 entries from the
+preinstalled image environment into scratch `.venv`. Both the full command and
+the unchanged project launcher use that writable copy. The launcher rebases
+editable source URL/path and uv's cache metadata as data. This is necessary
+because an existing test invokes `scripts/project_python`, clears
+`UV_NO_SYNC`, and supplies an empty cache. The pinned uv protocol records file
+ctime and source-directory creation time (or inode when creation time is
+unavailable). The copied cache metadata must reflect those new filesystem
+identities, so nested uv can audit the existing installation without building
+or downloading packages. The image requires GNU `/usr/bin/stat` for this
+nonexecuting metadata inspection. Dynamic project metadata, custom uv cache
+keys, and setup.py/setup.cfg require separate environment qualification.
+
+The protocol follows uv's [file timestamp implementation](https://github.com/astral-sh/uv/blob/main/crates/uv-cache-info/src/timestamp.rs)
+and [directory cache implementation](https://github.com/astral-sh/uv/blob/main/crates/uv-cache-info/src/cache_info.rs),
+and must be checked against the exact installed uv version with the focused
+offline regression before image qualification. Changing uv requires a new
+protocol review. No candidate module or build backend runs during this
+preparation.
 
 Existing ledger tests require two frozen source commits:
 `6d96075f88493d0b54577a2a8c9526f19a78a5ed` and
@@ -116,7 +146,8 @@ is never mounted into a container.
 Focused tests cover policy binding, environment and mount rejection, bounded
 archive production, deterministic sanitized history and local Git fetch,
 hostile pre-exec imports, firewall rule parsing, key checks, cleanup
-reconciliation, and chunk-boundary log redaction. A Docker model interprets the
+reconciliation, chunk-boundary log redaction, and the unchanged project launcher
+using copied installed dependencies with an empty offline cache. A Docker model interprets the
 actual builder arguments and feeds the actual inspect verifiers. The modeled
 execution signs and verifies its real assembled receipt, and rejects deliberate
 IP, helper-label, log-format, preflight, test-exit, cleanup, and receipt changes.

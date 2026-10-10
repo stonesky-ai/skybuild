@@ -32,6 +32,7 @@ TASK_ID = "SKYBUILD-ISOLATED-CANDIDATE-FULL-TEST-GATE"
 DEFAULT_GATE_COMMAND = ["uv", "run", "--extra", "test", "python", "-m", "pytest", "-q"]
 DEFAULT_GATE_COMMAND_SHA256 = hashlib.sha256(json.dumps(DEFAULT_GATE_COMMAND).encode()).hexdigest()
 RUNNER_VERSION = "skybuild-isolated-full-test-gate-v1"
+UV_VERSION = "0.11.22"
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
 MAX_HISTORY_PACK_BYTES = 64 * 1024 * 1024
 HISTORY_COMMITS = [
@@ -478,6 +479,7 @@ def _validate_runner_image(image: dict, predicate: dict, archive_root: Path,
         "org.skybuild.full-test.command-sha256": DEFAULT_GATE_COMMAND_SHA256,
         "org.skybuild.full-test.entrypoint-sha256": entrypoint_sha256,
         "org.skybuild.full-test.network-probe-sha256": predicate["network_probe_sha256"],
+        "org.skybuild.full-test.uv-version": UV_VERSION,
     }
     if any(labels.get(key) != value for key, value in expected.items()):
         raise GateError("Pinned runner image labels do not match frozen gate policy/dependencies/entrypoint")
@@ -549,7 +551,7 @@ def _candidate_environment(password: str) -> dict[str, str]:
         "PYTHONNOUSERSITE": "1", "PYTHONUNBUFFERED": "1",
         "PYTEST_ADDOPTS": "--basetemp=/scratch/pytest-tmp -o cache_dir=/scratch/pytest-cache",
         "TMPDIR": scratch + "/tmp", "UV_CACHE_DIR": scratch + "/uv-cache",
-        "UV_NO_SYNC": "1", "UV_OFFLINE": "1", "UV_PROJECT_ENVIRONMENT": "/opt/skybuild-venv",
+        "UV_NO_SYNC": "1", "UV_OFFLINE": "1", "UV_PROJECT_ENVIRONMENT": "/scratch/workspace/.venv",
         "SKYBUILD_TEST_DSN": _dsn(password, "skybuild_test"),
         "SKYBUILD_HTTP_TEST_DSN": _dsn(password, "skybuild_http_test"),
         "SKYBUILD_IMPORT_TEST_DSN": _dsn(password, "skybuild_import_test"),
@@ -1511,6 +1513,7 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path, key_path: Path,
             "GATE_FIREWALL_RELEASE=verified",
             "GATE_CANDIDATE_ARCHIVE_READONLY=true",
             "GATE_CANDIDATE_COPY=complete",
+            "GATE_OFFLINE_ENVIRONMENT=prepared",
             "GATE_PREFLIGHT_SOURCE_PATH=/scratch/workspace/src/skybuild/__init__.py",
             "GATE_COMMAND_LAUNCH=trusted_exec",
             "GATE_HOST_GATEWAY_PROBE=blocked",
