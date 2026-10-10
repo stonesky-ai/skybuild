@@ -5,7 +5,26 @@ from pathlib import Path
 
 import pytest
 
+import build_isolated_gate_images as builder
 from gate_images.write_runner_environment import write_environment
+
+
+def test_debian_git_package_manifest_is_pinned_to_the_python_base():
+    manifest = json.loads(builder.GIT_PACKAGE_MANIFEST.read_bytes())
+    assert manifest["schema"] == "skybuild.isolated-gate-debian-git-packages.v1"
+    assert manifest["base_image_id"] == builder.PYTHON_BASE_ID
+    assert manifest["repository_suite"] == "Debian trixie"
+    assert {row["name"] for row in manifest["packages"]} >= {"git", "git-man", "perl-base"}
+    assert all(len(row["sha256"]) == 64 for row in manifest["packages"])
+
+
+def test_git_package_payload_rejects_unpinned_or_missing_archives(tmp_path):
+    package_dir = tmp_path / "packages"
+    package_dir.mkdir()
+    (package_dir / "git.deb").write_bytes(b"untrusted")
+
+    with pytest.raises(builder.BuildError, match="exact package allowlist"):
+        builder.stage_git_payload(tmp_path / "rootfs", package_dir)
 
 
 def test_runner_environment_metadata_is_static_and_binds_exact_project_lock(tmp_path):

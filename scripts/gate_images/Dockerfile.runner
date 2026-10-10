@@ -5,6 +5,7 @@ FROM ${BASE_IMAGE} AS python_base
 # image environment variables that the candidate environment allowlist forbids.
 FROM scratch
 COPY --from=python_base / /
+COPY runner-git-rootfs/ /
 ARG GATE_POLICY_SHA256
 ARG UV_LOCK_SHA256
 ARG PYPROJECT_SHA256
