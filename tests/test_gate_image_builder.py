@@ -64,6 +64,14 @@ def test_runner_python_link_is_checked_against_pinned_image_path(tmp_path):
     assert not builder._has_pinned_runner_python(tmp_path)
 
 
+def test_runner_image_copies_prepared_environment_at_entrypoint_path():
+    checkout = Path(builder.__file__).resolve().parents[1]
+    dockerfile = (checkout / "scripts/gate_images/Dockerfile.runner").read_text()
+
+    assert "COPY runner-environment/skybuild-venv/ /opt/skybuild-venv/" in dockerfile
+    assert "COPY runner-environment/ /opt/skybuild-venv/" not in dockerfile
+
+
 def test_runner_environment_metadata_is_static_and_binds_exact_project_lock(tmp_path):
     project = tmp_path / "project"
     environment = tmp_path / "environment"
