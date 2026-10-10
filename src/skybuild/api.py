@@ -409,6 +409,10 @@ def create_app(store: Any) -> FastAPI:
         tasks = store.list_tasks(actor, project_id, limit=limit, offset=offset, after_task_id=after_task_id, by_id=by_id)
         return [{**task, **Store.workflow_projection(task)} for task in tasks]
 
+    @app.get(base + "/workflow-board")
+    def workflow_board(project_id: ProjectPath, actor: Actor, limit: Limit = 100, offset: Offset = 0) -> dict:
+        return store.workflow_board(actor, project_id, limit=limit, offset=offset)
+
     @app.get(base + "/tasks/{task_id}")
     def get_task(project_id: ProjectPath, task_id: RecordPath, actor: Actor) -> dict:
         from .store import Store

@@ -27,6 +27,18 @@
       <p id="notice" role="status" aria-live="polite">Enter a project and token to load tasks.</p>
     </section>
 
+    <section class="panel" aria-labelledby="board-title">
+      <div class="section-heading"><h2 id="board-title">Task workflow</h2>
+        <button id="refresh-board" type="button" disabled>Refresh workflow</button></div>
+      <p class="hint">Normal progress: Ready, Working, Validating, Integrating, Done. Deferred and Hold pause work.</p>
+      <p class="hint">Counts cover the complete project. Cards show one priority page. Dependency completion does not authorize execution.</p>
+      <p id="board-summary" role="status">Not connected</p>
+      <label for="board-view">Workflow view</label>
+      <select id="board-view"><option value="columns">Seven columns</option><option value="list">Simple list</option></select>
+      <div id="workflow-board" class="workflow-board"></div>
+      <div class="actions"><button id="first-board" type="button" disabled>First workflow page</button><button id="next-board" type="button" disabled>Next workflow page</button></div>
+    </section>
+
     <div class="workspace">
       <aside>
         <section class="panel" aria-labelledby="tasks-title">
