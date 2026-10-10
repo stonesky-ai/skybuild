@@ -122,7 +122,7 @@ def test_firewall_sidecar_requires_a_bounded_writable_lock_tmpfs():
             "Tmpfs": {"/run": "rw,nosuid,nodev,size=1048576,mode=493"},
             "Memory": 128 * 1024**2, "MemorySwap": 128 * 1024**2,
             "NanoCpus": 250_000_000, "PidsLimit": 32, "PortBindings": {},
-            "LogConfig": {"Type": "local", "Config": {"max-size": "4m", "max-file": "1"}},
+        "LogConfig": {"Type": "local", "Config": {"max-size": "4m", "max-file": "2"}},
         },
         "Mounts": [{"Type": "tmpfs", "Destination": "/run", "RW": True}],
     }
@@ -153,7 +153,7 @@ def test_postgres_inspection_requires_exact_tmpfs_and_no_extra_mounts():
             "NetworkMode": network, "Memory": 1536 * 1024**2,
             "MemorySwap": 1536 * 1024**2, "NanoCpus": 1_000_000_000,
             "PidsLimit": 128, "PortBindings": {}, "ReadonlyRootfs": True,
-            "LogConfig": {"Type": "local", "Config": {"max-size": "32m", "max-file": "1"}},
+            "LogConfig": {"Type": "local", "Config": {"max-size": "32m", "max-file": "2"}},
             "CapAdd": [], "CapDrop": ["ALL"], "SecurityOpt": ["no-new-privileges:true"],
             "Tmpfs": {
                 destinations[0]: "rw,nosuid,nodev,noexec,size=1073741824,uid=999,gid=999,mode=448",
@@ -250,7 +250,7 @@ def _candidate_row(tmp_path):
                        "Memory": 4 * 1024**3, "MemorySwap": 4 * 1024**3,
                        "NanoCpus": 2_000_000_000, "PidsLimit": 256,
                        "ShmSize": 256 * 1024**2, "Privileged": False,
-                       "LogConfig": {"Type": "local", "Config": {"max-size": "128m", "max-file": "1"}},
+                       "LogConfig": {"Type": "local", "Config": {"max-size": "128m", "max-file": "2"}},
                        "PidMode": "private", "IpcMode": "private", "PortBindings": {},
                        "Tmpfs": {"/scratch": "rw,exec,nosuid,nodev,size=2147483648,uid=10001,gid=10001,mode=448"},
                        "ExtraHosts": ["db:172.18.0.3"],
@@ -316,6 +316,26 @@ def test_container_create_inspection_error_does_not_claim_absence(monkeypatch):
     with pytest.raises(gate.GateError, match="cannot be reconciled"):
         gate._container_info("owned-name", "run", None, "candidate")
     assert len(calls) == 1
+
+
+def test_container_info_recognizes_docker_29_absence_by_name(monkeypatch):
+    def docker(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args, 1, "", "Error response from daemon: No such container: owned-name"
+        )
+
+    monkeypatch.setattr(gate, "_docker", docker)
+    assert gate._container_info("owned-name", "run", None, "candidate") is None
+
+
+def test_network_info_recognizes_docker_29_absence(monkeypatch):
+    def docker(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args, 1, "", "Error response from daemon: network owned-network not found"
+        )
+
+    monkeypatch.setattr(gate, "_docker", docker)
+    assert gate._network_info("owned-network", "run", None) is None
 
 
 def test_container_cleanup_reconciles_by_name_after_unknown_create(monkeypatch):
