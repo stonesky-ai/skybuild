@@ -17,6 +17,18 @@ class Claims:
                 claim['holder'] != principal.principal_id or claim['fence'] != fence):
             raise DomainError('claim_conflict', 'Effect requires current ownership holder, lease and fence', 409)
 
+    def _require_claim_eligible(self, connection, project_id, task, claim):
+        """Shared ownership predicates; caller owns authorization and locking."""
+        if claim and claim['held']:
+            raise DomainError('claim_conflict', 'Ownership remains held, including after lease expiry', 409)
+        if task['status'] != 'ready' and not self._petri(task):
+            raise DomainError('workflow_conflict', 'Only ready tasks may be claimed', 409)
+        self._require_current_dependencies(connection, project_id, task)
+        self._require_no_effect_exposure(connection, project_id, task['task_id'])
+        if claim and claim['fence'] == 2**63 - 1:
+            raise DomainError('claim_conflict', 'Ownership fence exhausted', 409)
+        return claim['fence'] + 1 if claim else 1
+
     def claim_task(self, principal, project_id, task_id, expected_revision, idempotency_key, *, lease_seconds=60):
         return self._claim_transition(principal, project_id, task_id, 'claim', expected_revision,
                                       idempotency_key, lease_seconds=lease_seconds)
@@ -62,14 +74,7 @@ class Claims:
                                             'WHERE project_id = %s AND task_id = %s FOR UPDATE',
                                             (project_id, task_id)).fetchone()
                 if action == 'claim':
-                    if before and before['held']:
-                        raise DomainError('claim_conflict', 'Ownership remains held, including after lease expiry', 409)
-                    if task['status'] != 'ready' and not self._petri(task):
-                        raise DomainError('workflow_conflict', 'Only ready tasks may be claimed', 409)
-                    self._require_current_dependencies(connection, project_id, task)
-                    self._require_no_effect_exposure(connection, project_id, task_id)
-                    if before and before['fence'] == 2**63 - 1:
-                        raise DomainError('claim_conflict', 'Ownership fence exhausted', 409)
+                    next_fence = self._require_claim_eligible(connection, project_id, task, before)
                     claim_task_revision = expected_revision
                     if self._petri(task):
                         from .workflow import Place
@@ -78,7 +83,7 @@ class Claims:
                             raise DomainError('workflow_conflict', 'Petri task is not ready for work', 409)
                         context = self._workflow_context(connection, principal, task)
                         context.update(admission_permitted=True, claim_live=True,
-                                       attempt_id=uuid4().hex, claim_fence=before['fence'] + 1 if before else 1,
+                                       attempt_id=uuid4().hex, claim_fence=next_fence,
                                        responsible=principal.principal_id)
                         task = self._apply_workflow_event(connection, principal, task,
                             {'event': 'claim', 'operation_id': key, 'expected_revision': expected_revision}, context)

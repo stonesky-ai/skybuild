@@ -592,12 +592,38 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
             checked['current_inputs'] = bool(marker and marker['input_generation'] == self.workflow_token(task).input_generation)
         return checked
 
+    def _claim_preview_context(self, connection, principal, task, context):
+        """Preview ownership only. Recompute all guards in the claim transaction.
+
+        The fixed attempt label and next fence are prospective display facts.
+        This read neither allocates an attempt nor grants execution admission.
+        """
+        from .workflow import Place
+        token = self.workflow_token(task)
+        checked = {**context, 'admission_permitted': False}
+        if (token.place != Place.READY or token.pending_action is not None or token.superseded
+                or not (principal.is_admin or 'tasks:claim' in principal.grants.get(task['project_id'], ()))):
+            return checked
+        try:
+            self._require_api_authority(connection, task['project_id'])
+            claim = connection.execute('SELECT * FROM task_claims WHERE project_id = %s AND task_id = %s',
+                                       (task['project_id'], task['task_id'])).fetchone()
+            next_fence = self._require_claim_eligible(connection, task['project_id'], task, claim)
+        except DomainError as error:
+            if error.code not in {'authority', 'claim_conflict', 'workflow_conflict', 'effect_conflict', 'capacity_conflict'}:
+                raise
+            return checked
+        return {**checked, 'admission_permitted': True, 'claim_live': True,
+                'attempt_id': 'claim-capability-preview', 'claim_fence': next_fence,
+                'responsible': principal.principal_id}
+
     def _workflow_view(self, connection, principal, task):
         from .workflow import TaskWorkflow, TRANSITIONS
         token = self.workflow_token(task)
         context = self._workflow_context(connection, principal, task)
         names = {'hold', 'defer', 'release_hold', 'resume_deferred', 'reopen', 'update_control'}
-        enabled = tuple(name for name in TaskWorkflow().enabled(token, context) if name not in names)
+        preview = self._claim_preview_context(connection, principal, task, context)
+        enabled = tuple(name for name in TaskWorkflow().enabled(token, preview) if name not in names)
         controls = self._workflow_control_context(connection, principal, task, context)
         enabled += tuple(name for name in TaskWorkflow().enabled(token, controls) if name in names)
         return {'task': {**task, **self.workflow_projection(task), 'enabled_actions': list(enabled)},
