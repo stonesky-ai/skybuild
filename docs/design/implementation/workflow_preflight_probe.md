@@ -25,3 +25,11 @@ Expected values are optional when selecting a task. If an expected value is supp
 The probe does not require `Ready`, claim the task, or grant execution permission. Its `execution_authorized` result is always `false`. A successful response verifies only workflow identity and supplied input pins. The existing `--workflow` flag remains separate: it checks the explicit Petri worker credential profile, including claim and write grants. Omit that flag when using this read-only probe with the existing worker read scopes.
 
 Without `--task-id` or expected workflow values, existing preflight requests and output remain unchanged.
+
+## Validation and handoff
+
+This task branch is based on `2629fe60f15fd389f5bd53b5076eb1a1a79feb6d`. Implementation commit `44c7b53` adds the probe, focused tests, and this operator note. The checkout-local package import resolved to `src/skybuild/__init__.py`.
+
+The focused check `rtk proxy scripts/project_python -m pytest -q tests/test_fleet_preflight.py` passed all 28 tests. `rtk proxy git diff --check` passed. The tests cover unchanged default behavior, successful `Working`-task verification, stale pins, malformed or mismatched workflow identity, bounded GET-only access, and secret-safe failure output.
+
+Independent exact-head review, the required frozen combined gate, and confirmed development-branch inclusion remain pending. This implementation does not attest task completion or integration.
