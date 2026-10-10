@@ -171,7 +171,10 @@ def _verify_schema_011_to_012(current: dict[str, str], candidate: dict[str, str]
 def promotion_preflight(checkout: Path, expected_sha: str, published_ref: str, *,
                         current_sha: str, state_dir: Path, hostname: str, tailnet_ip: str,
                         api_container: str, db_container: str, api_image: str, system_id: str,
-                        ca_pem_sha256: str, schema_transition: str = "011-to-012") -> dict:
+                        ca_pem_sha256: str, gateway_container: str | None = None,
+                        gateway_image: str | None = None, compose_owner_path: Path | None = None,
+                        gateway_compose_owner_path: Path | None = None,
+                        schema_transition: str = "011-to-012") -> dict:
     """Read-only, exact-identity preflight for an explicitly reviewed promotion.
 
     Expected identities come from retained deployment evidence, not from blindly
@@ -184,16 +187,37 @@ def promotion_preflight(checkout: Path, expected_sha: str, published_ref: str, *
     import manual_pilot_tls as tls
     from skybuild.runtime_role import audit_runtime_role
 
-    if (not re.fullmatch(r"[0-9a-f]{40}", current_sha)
+    gateway_values = (gateway_container, gateway_image, compose_owner_path, gateway_compose_owner_path)
+    gateway_mode = any(value is not None for value in gateway_values)
+    if (gateway_mode and not all(value is not None for value in gateway_values)
+            or not re.fullmatch(r"[0-9a-f]{40}", current_sha)
             or not all(re.fullmatch(r"[0-9a-f]{64}", value) for value in (api_container, db_container))
             or not re.fullmatch(r"sha256:[0-9a-f]{64}", api_image)
+            or (gateway_mode and (not re.fullmatch(r"[0-9a-f]{64}", gateway_container)
+                                  or not re.fullmatch(r"sha256:[0-9a-f]{64}", gateway_image)))
             or not system_id.isdigit() or not re.fullmatch(r"[0-9a-f]{64}", ca_pem_sha256)):
         raise ValueError("Require retained exact source/container/image/cluster identities")
     if not tls.valid_publication_ref(published_ref):
         raise ValueError("Require the approved publication ref")
     checkout = checkout.absolute()
+    if gateway_mode:
+        if not compose_owner_path.is_absolute():
+            raise ValueError("Require an absolute retained Compose ownership path")
+        supplied_owner_path = compose_owner_path
+        compose_owner_path = compose_owner_path.resolve(strict=True)
+        if (supplied_owner_path != compose_owner_path
+                or compose_owner_path.name != "manual-pilot"
+                or compose_owner_path.parent.name != "ops"):
+            raise ValueError("Require the explicitly retained Compose ownership path")
+        if not gateway_compose_owner_path.is_absolute():
+            raise ValueError("Require an absolute Workbench Compose ownership path")
+        supplied_gateway_owner_path = gateway_compose_owner_path
+        gateway_compose_owner_path = gateway_compose_owner_path.resolve(strict=True)
+        if supplied_gateway_owner_path != gateway_compose_owner_path:
+            raise ValueError("Require the exact Workbench Compose ownership path")
     tls.controller(checkout, expected_sha, state_dir, hostname, tailnet_ip,
-                   expected_api_image=api_image, published_ref=published_ref)
+                   expected_api_image=api_image, published_ref=published_ref,
+                   compose_owner_path=compose_owner_path)
     if tls.command("git", "-C", str(checkout), "ls-remote", "--exit-code", "origin", published_ref) != \
             f"{expected_sha}\t{published_ref}":
         raise ValueError("Candidate differs from the exact approved published ref")
@@ -214,7 +238,10 @@ def promotion_preflight(checkout: Path, expected_sha: str, published_ref: str, *
     old_names = sorted(old_migrations)
 
     inspected = {}
-    for name, identifier in (("skybuild-pilot-api", api_container), (DATABASE_CONTAINER, db_container)):
+    pinned_containers = [("skybuild-pilot-api", api_container), (DATABASE_CONTAINER, db_container)]
+    if gateway_mode:
+        pinned_containers.append(("skybuild-workbench", gateway_container))
+    for name, identifier in pinned_containers:
         row = json.loads(tls.command("docker", "inspect", name))[0]
         if row.get("Id") != identifier:
             raise ValueError("Pilot container identity changed")
@@ -222,17 +249,22 @@ def promotion_preflight(checkout: Path, expected_sha: str, published_ref: str, *
     api = inspected["skybuild-pilot-api"]
     if api.get("Image") != api_image:
         raise ValueError("Pinned current API image changed")
-    ports = {"8000/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8000"},
-                           {"HostIp": tailnet_ip, "HostPort": "8443"}]}
-    def matching_ports(observed):
-        if not isinstance(observed, dict) or set(observed) != {"8000/tcp"}:
+    ports = {"8000/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8000"}]}
+    if not gateway_mode:
+        ports["8000/tcp"].append({"HostIp": tailnet_ip, "HostPort": "8443"})
+
+    def matching_ports(observed, expected):
+        if not isinstance(observed, dict) or set(observed) != set(expected):
             return False
-        bindings = observed["8000/tcp"]
-        return (isinstance(bindings, list) and len(bindings) == 2
-                and all(isinstance(binding, dict) and set(binding) == {"HostIp", "HostPort"}
-                        for binding in bindings)
-                and sorted((b["HostIp"], b["HostPort"]) for b in bindings)
-                == sorted((b["HostIp"], b["HostPort"]) for b in ports["8000/tcp"]))
+        for port, bindings_expected in expected.items():
+            bindings = observed[port]
+            if (not isinstance(bindings, list)
+                    or any(not isinstance(binding, dict)
+                           or set(binding) != {"HostIp", "HostPort"} for binding in bindings)
+                    or sorted((b["HostIp"], b["HostPort"]) for b in bindings)
+                    != sorted((b["HostIp"], b["HostPort"]) for b in bindings_expected)):
+                return False
+        return True
 
     mounts = {(str(state_dir / "tls" / name), "/run/skybuild-tls/" + name, False)
               for name in ("server.crt", "server.key")}
@@ -242,14 +274,106 @@ def promotion_preflight(checkout: Path, expected_sha: str, published_ref: str, *
     host = api.get("HostConfig", {})
     if (api.get("Config", {}).get("User") != str(os.getuid())
             or api.get("Config", {}).get("Cmd") != command
-            or not matching_ports(api.get("NetworkSettings", {}).get("Ports"))
-            or not matching_ports(host.get("PortBindings")) or actual_mounts != mounts or len(api.get("Mounts", [])) != 2
+            or not matching_ports(api.get("NetworkSettings", {}).get("Ports"), ports)
+            or not matching_ports(host.get("PortBindings"), ports)
+            or actual_mounts != mounts or len(api.get("Mounts", [])) != 2
             or not 0 < host.get("Memory", 0) <= 512 * 1024**2
             or not 0 < host.get("PidsLimit", 0) <= 128
             or host.get("RestartPolicy", {}).get("Name") != "unless-stopped"
             or host.get("Privileged") is not False or host.get("NetworkMode") == "host"
             or host.get("PidMode") == "host" or host.get("CapAdd")):
         raise ValueError("Pinned API TLS/bind/user/resource boundary changed")
+
+    gateway_report = {}
+    if gateway_mode:
+        gateway = inspected["skybuild-workbench"]
+        expected_gateway_ports = {"8443/tcp": [
+            {"HostIp": "127.0.0.1", "HostPort": "8443"},
+            {"HostIp": tailnet_ip, "HostPort": "8443"},
+        ]}
+        gateway_host = gateway.get("HostConfig", {})
+        api_networks = api.get("NetworkSettings", {}).get("Networks", {})
+        db_networks = inspected[DATABASE_CONTAINER].get("NetworkSettings", {}).get("Networks", {})
+        gateway_networks = gateway.get("NetworkSettings", {}).get("Networks", {})
+        if (gateway.get("Image") != gateway_image or gateway.get("State", {}).get("Running") is not True
+                or gateway.get("Config", {}).get("User") != str(os.getuid())
+                or not matching_ports(gateway.get("NetworkSettings", {}).get("Ports"), expected_gateway_ports)
+                or not matching_ports(gateway_host.get("PortBindings"), expected_gateway_ports)
+                or len(api_networks) != 1 or set(gateway_networks) != set(api_networks)
+                or set(db_networks) != set(api_networks)):
+            raise ValueError("Pinned Workbench gateway image, state, bind, or shared network changed")
+        network_name, api_network = next(iter(api_networks.items()))
+        if (gateway_networks[network_name].get("NetworkID") != api_network.get("NetworkID")
+                or db_networks[network_name].get("NetworkID") != api_network.get("NetworkID")
+                or not re.fullmatch(r"[0-9a-f]{64}", str(api_network.get("NetworkID", "")))
+                or "api" not in api_network.get("Aliases", [])):
+            raise ValueError("API, PostgreSQL, and Workbench no longer share the pinned backend network")
+        labels = gateway.get("Config", {}).get("Labels", {}) or {}
+        if (labels.get("com.docker.compose.project") != "skybuild-pilot"
+                or labels.get("com.docker.compose.service") != "workbench"
+                or labels.get("com.docker.compose.project.working_dir") != str(gateway_compose_owner_path)):
+            raise ValueError("Workbench ownership labels changed")
+        expected_gateway_env = {
+            "PATH": "/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONUNBUFFERED": "1",
+        }
+        env_rows = gateway.get("Config", {}).get("Env", [])
+        observed_gateway_env = {}
+        if not isinstance(env_rows, list):
+            raise ValueError("Workbench environment boundary changed")
+        for item in env_rows:
+            if not isinstance(item, str) or "=" not in item:
+                raise ValueError("Workbench environment boundary changed")
+            key, value = item.split("=", 1)
+            if key in observed_gateway_env:
+                raise ValueError("Workbench environment boundary changed")
+            observed_gateway_env[key] = value
+        if observed_gateway_env != expected_gateway_env or gateway_host.get("Tmpfs") not in (None, {}):
+            raise ValueError("Workbench environment or temporary filesystem boundary changed")
+        gateway_command = gateway.get("Config", {}).get("Cmd", [])
+        expected_gateway_command = [
+            "--ui-checkout", "/runtime-ui/ui", "--api-checkout", "/app",
+            "--ca-file", "/tls/ca.crt", "--backend-hostname", hostname,
+            "--backend-connect-host", "api", "--backend-port", "8000",
+            "--workbench-token-file", "/run/secrets/skybuild-workbench-token",
+            "--workbench-project", "skybuild", "--workbench-username", "user1",
+            "--workbench-password-file", "/run/secrets/skybuild-workbench-password",
+            "--host", "0.0.0.0", "--container-listener", "--port", "8443",
+            "--ssl-certfile", "/tls/server.crt", "--ssl-keyfile", "/tls/server.key",
+        ]
+        if (gateway.get("Config", {}).get("Entrypoint") != ["python", "/runtime-ui/runtime_ui.py"]
+                or gateway_command != expected_gateway_command
+                or gateway_host.get("Memory") != 256 * 1024**2
+                or gateway_host.get("PidsLimit") != 64
+                or gateway_host.get("RestartPolicy", {}).get("Name") != "unless-stopped"
+                or gateway_host.get("Privileged") is not False or gateway_host.get("CapAdd")
+                or gateway_host.get("NetworkMode") != network_name or gateway_host.get("PidMode") == "host"
+                or gateway_host.get("ReadonlyRootfs") is not True):
+            raise ValueError("Workbench command, user, resource, or isolation boundary changed")
+        expected_gateway_mounts = {
+            (str(state_dir / "secrets/workbench-gateway-token"), "/run/secrets/skybuild-workbench-token", False),
+            (str(state_dir / "secrets/workbench-user1-password"), "/run/secrets/skybuild-workbench-password", False),
+            (str(state_dir / "tls/ca.crt"), "/tls/ca.crt", False),
+            (str(state_dir / "tls/server.crt"), "/tls/server.crt", False),
+            (str(state_dir / "tls/server.key"), "/tls/server.key", False),
+        }
+        actual_gateway_mounts = {(mount.get("Source"), mount.get("Destination"), mount.get("RW"))
+                                 for mount in gateway.get("Mounts", [])}
+        if actual_gateway_mounts != expected_gateway_mounts or len(gateway.get("Mounts", [])) != 5:
+            raise ValueError("Workbench secret/TLS mount boundary changed")
+        for path in (state_dir / "tls/ca.crt", state_dir / "tls/server.crt", state_dir / "tls/server.key"):
+            tls.private_file(path)
+        provisioner._read_secret(state_dir / "secrets/workbench-gateway-token", mode=0o600)
+        provisioner._read_secret(state_dir / "secrets/workbench-user1-password", mode=0o600)
+        gateway_ready = json.loads(tls.command("curl", "--fail", "--silent", "--show-error", "--max-time", "10",
+            "--cacert", str(state_dir / "tls/ca.crt"), "--resolve", f"{hostname}:8443:{tailnet_ip}",
+            f"https://{hostname}:8443/health/ready"))
+        if gateway_ready != {"status": "ready"}:
+            raise ValueError("Pinned Workbench TLS gateway is not ready")
+        gateway_report = {"gateway_container": gateway_container, "gateway_image": gateway_image,
+                          "gateway_ready": gateway_ready,
+                          "api_gateway_topology": "loopback API 8000 + pinned Workbench 8443"}
     # Read installed package bytes, not /app/src or a mutable image tag. Output
     # contains code digests only and is bounded to 200 reviewed package files.
     probe = ("import hashlib,json,pathlib,skybuild; p=pathlib.Path(skybuild.__file__).parent; "
@@ -299,6 +423,7 @@ def promotion_preflight(checkout: Path, expected_sha: str, published_ref: str, *
     return {'ready_for_operator_promotion': True, 'no_changes_made': True,
             'candidate_source': expected_sha, 'current_source': current_sha,
             'api_container': api_container, 'database_container': db_container, 'api_image': api_image,
+            **gateway_report,
             'database': provisioner.DATABASE, 'database_system_id': system_id,
             'current_schema': current_version, 'candidate_schema': candidate_version,
             'schema_transition': schema_transition, 'published_ref': published_ref,
@@ -322,6 +447,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--api-container-id")
     parser.add_argument("--db-container-id")
     parser.add_argument("--api-image-id")
+    parser.add_argument("--gateway-container-id")
+    parser.add_argument("--gateway-image-id")
+    parser.add_argument("--compose-owner-path", type=Path)
+    parser.add_argument("--gateway-compose-owner-path", type=Path)
     parser.add_argument("--database-system-id")
     parser.add_argument("--ca-pem-sha256")
     args = parser.parse_args(argv)
@@ -332,12 +461,21 @@ def main(argv: list[str] | None = None) -> int:
                         args.ca_pem_sha256)
             if not all(required):
                 raise ValueError("Promotion requires retained explicit identities")
+            gateway_values = (args.gateway_container_id, args.gateway_image_id, args.compose_owner_path,
+                              args.gateway_compose_owner_path)
+            if any(value is not None for value in gateway_values) and not all(
+                    value is not None for value in gateway_values):
+                raise ValueError("Gateway promotion requires container, image, API Compose owner, and gateway Compose owner pins")
             report = promotion_preflight(args.checkout, args.expected_sha, args.published_ref,
                                          current_sha=args.current_sha, state_dir=args.state_dir,
                                          hostname=args.hostname, tailnet_ip=args.tailnet_ip,
                                          api_container=args.api_container_id, db_container=args.db_container_id,
                                          api_image=args.api_image_id, system_id=args.database_system_id,
                                          ca_pem_sha256=args.ca_pem_sha256,
+                                         gateway_container=args.gateway_container_id,
+                                         gateway_image=args.gateway_image_id,
+                                         compose_owner_path=args.compose_owner_path,
+                                         gateway_compose_owner_path=args.gateway_compose_owner_path,
                                          schema_transition=args.schema_transition)
         else:
             report = preflight(args.checkout, args.expected_sha, args.published_ref)

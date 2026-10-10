@@ -63,7 +63,8 @@ def valid_publication_ref(value: str) -> bool:
 
 def controller(checkout: Path, expected_sha: str, state_dir: Path,
                hostname: str, tailnet_ip: str, *,
-               expected_api_image: str | None = None, published_ref: str | None = None) -> None:
+               expected_api_image: str | None = None, published_ref: str | None = None,
+               compose_owner_path: Path | None = None) -> None:
     """Require reviewed source and owned pilot containers with pinned images."""
     if os.getuid() == 0:
         raise TLSError("Run TLS preparation as the non-root pilot state owner")
@@ -72,6 +73,16 @@ def controller(checkout: Path, expected_sha: str, state_dir: Path,
     if expected_api_image is not None and not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_api_image):
         raise TLSError("Require an exact retained API image ID")
     checkout = checkout.absolute()
+    expected_compose_owner = checkout / "ops/manual-pilot"
+    if compose_owner_path is not None:
+        if not compose_owner_path.is_absolute():
+            raise TLSError("Require an absolute retained Compose ownership path")
+        supplied_owner_path = compose_owner_path
+        expected_compose_owner = compose_owner_path.resolve(strict=True)
+        if (supplied_owner_path != expected_compose_owner
+                or expected_compose_owner.name != "manual-pilot"
+                or expected_compose_owner.parent.name != "ops"):
+            raise TLSError("Require the exact retained Compose ownership path")
     if command("git", "-C", str(checkout), "rev-parse", "--show-toplevel") != str(checkout):
         raise TLSError("Require the exact checkout root")
     for options in ((), ("--push",)):
@@ -102,7 +113,7 @@ def controller(checkout: Path, expected_sha: str, state_dir: Path,
         labels = row.get("Config", {}).get("Labels", {}) or {}
         if (labels.get("com.docker.compose.project") != "skybuild-pilot"
                 or labels.get("com.docker.compose.service") != service
-                or labels.get("com.docker.compose.project.working_dir") != str(checkout / "ops/manual-pilot")
+                or labels.get("com.docker.compose.project.working_dir") != str(expected_compose_owner)
                 or not row.get("State", {}).get("Running")):
             raise TLSError("Existing pilot container ownership/running state differs")
         image = "postgres:16" if service == "db" else "skybuild-pilot-api:local"
