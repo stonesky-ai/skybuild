@@ -88,6 +88,12 @@ def local(item, action):
         missing = [f for f in item.get("required_files", []) if not (checkout / f).is_file()]
         head = command(["git", "-C", str(checkout), "rev-parse", "HEAD"]).strip() if checkout.is_dir() else None
         available = not missing and head == item["head"]
+        if available:
+            available = not command(["git", "-C", str(checkout), "status", "--porcelain"]).strip()
+        if available and item.get("image"):
+            if command(["docker", "info", "--format", "{{.Name}}"]).strip().lower() != item["host"].lower():
+                raise ServiceError("Docker daemon host does not match")
+            available = command(["docker", "image", "inspect", "--format", "{{.Id}}", item["image"]]).strip() == item["image"]
         return {"state": "available" if available else "missing", "active_job": False,
                 "ok": available, "managed": False}
     env = dict(os.environ)

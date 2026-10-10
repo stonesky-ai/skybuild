@@ -119,3 +119,16 @@ def test_stop_skips_an_inactive_observation_without_failure():
         result = services.local(item,"stop")
         assert result["skipped"] and result["ok"]
         assert command.call_count == 1
+
+
+def test_image_capability_rejects_a_different_docker_host(tmp_path):
+    item=dict(kind="capability",host="wowbagger",name="skybuild-cpu-worker-image",checkout=str(tmp_path),head="a"*40,required_files=[],image="sha256:"+"b"*64)
+    with patch.object(services.socket,"gethostname",return_value="wowbagger"), patch.object(services,"command",side_effect=["a"*40,"","wonko"]):
+        with pytest.raises(services.ServiceError,match="daemon"):
+            services.local(item,"status")
+
+
+def test_dirty_runtime_is_not_an_available_capability(tmp_path):
+    item=dict(kind="capability",host="wowbagger",name="skybuild-managed-runtime",checkout=str(tmp_path),head="a"*40,required_files=[])
+    with patch.object(services.socket,"gethostname",return_value="wowbagger"), patch.object(services,"command",side_effect=["a"*40," M scripts/managed_session.py"]):
+        assert not services.local(item,"status")["ok"]
