@@ -181,6 +181,13 @@ class CPULocalControl(Input):
     reason: Annotated[str, StringConstraints(min_length=1, max_length=4096)]
 
 
+class ManualIntegration(Input):
+    """An authenticated owner's bounded statement, never caller guard facts."""
+
+    event: Literal["freeze", "accept", "integration_progress"]
+    evidence: dict[str, Any]
+
+
 class CPUCentralControl(CPULocalControl):
     capacity: Annotated[StrictInt, Field(ge=0, lt=2**31)]
 
@@ -433,6 +440,12 @@ def create_app(store: Any) -> FastAPI:
         if event == "initialize":
             return store.initialize_workflow(actor, project_id, task_id, expected, idem)
         return store.workflow_transition(actor, project_id, task_id, event, details, expected, idem)
+
+    @app.post(base + "/tasks/{task_id}/manual-integration")
+    def manual_integration(project_id: ProjectPath, task_id: RecordPath, body: ManualIntegration,
+                           actor: Actor, idem: Key, expected: Revision) -> dict:
+        from .manual_integration import transition
+        return transition(store, actor, project_id, task_id, body.event, body.evidence, expected, idem)
 
     @app.get(base + "/tasks/{task_id}/execution-status")
     def execution_status(project_id: ProjectPath, task_id: RecordPath, actor: Actor,
