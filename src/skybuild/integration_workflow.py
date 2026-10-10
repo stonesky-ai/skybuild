@@ -45,9 +45,10 @@ class IntegrationWorkflow:
     No default verifier trusts subprocess returns or caller booleans.
     """
 
-    def __init__(self, store, verify_receipt=None):
+    def __init__(self, store, verify_receipt=None, *, trusted_operation=None):
         self.store = store
         self.verify_receipt = verify_receipt
+        self.trusted_operation = trusted_operation
 
     def transition(self, principal, project_id, task_id, event, *, evidence,
                    expected_revision, idempotency_key, reason=None):
@@ -75,4 +76,5 @@ class IntegrationWorkflow:
 
         return self.store.verified_workflow_transition(
             principal, project_id, task_id, event, body, expected_revision, idempotency_key,
-            evidence=evidence, verifier=verify)
+            evidence=evidence, verifier=verify,
+            **({"trusted_operation": self.trusted_operation} if self.trusted_operation else {}))
