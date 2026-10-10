@@ -9,6 +9,7 @@ import re
 import socket
 import stat
 import subprocess
+import sys
 
 
 class PermitError(ValueError):
@@ -38,6 +39,56 @@ def _when(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def envelope_sha256(envelope: dict) -> str:
+    payload = json.dumps(envelope, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def check_source(checkout: Path, permit: dict) -> None:
+    """Bind the executing checkout, loaded modules and clean source bytes."""
+    if any(name.startswith("GIT_") and name != "GIT_PAGER" for name in os.environ):
+        raise PermitError("Inherited Git configuration can hide source changes")
+    source = subprocess.run(["git", "rev-parse", "HEAD"], cwd=checkout,
+                            capture_output=True, check=False, timeout=5)
+    if (source.returncode or not re.fullmatch(r"[0-9a-f]{40}", permit["source_head"])
+            or source.stdout.decode().strip() != permit["source_head"]):
+        raise PermitError("Controller source differs from approved exact head")
+    top = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=checkout,
+                         capture_output=True, check=False, timeout=5)
+    status = subprocess.run(["git", "status", "--porcelain=v1", "--untracked-files=all", "-z"],
+                            cwd=checkout, capture_output=True, check=False, timeout=10)
+    tracked = subprocess.run(["git", "ls-files", "-z"], cwd=checkout,
+                             capture_output=True, check=False, timeout=10)
+    if (top.returncode or Path(top.stdout.decode().strip()).resolve() != checkout.resolve()
+            or status.returncode or status.stdout or tracked.returncode):
+        raise PermitError("Executing checkout is dirty or not the approved root")
+    tracked_paths = set(tracked.stdout.split(b"\0"))
+    source_root = checkout / "src" / "skybuild"
+    loaded = {name: module for name, module in sys.modules.items()
+              if (name == "skybuild" or name.startswith("skybuild.")) and getattr(module, "__file__", None)}
+    if not loaded or any(not Path(module.__file__).resolve().is_relative_to(source_root)
+                         for module in loaded.values()):
+        raise PermitError("Loaded SkyBuild module is outside the approved checkout")
+    job_unit = sys.modules.get("scripts.skybuild_job_unit")
+    if (job_unit is None or not getattr(job_unit, "__file__", None)
+            or Path(job_unit.__file__).resolve() != checkout / "scripts" / "skybuild_job_unit.py"):
+        raise PermitError("Loaded job unit is outside the approved checkout")
+    for module in (*loaded.values(), job_unit):
+        path = Path(module.__file__)
+        relative = path.resolve().relative_to(checkout).as_posix()
+        if (path.is_symlink() or not path.is_file() or path.stat().st_size > 2_097_152
+                or os.fsencode(relative) not in tracked_paths):
+            raise PermitError("Loaded source is not a bounded tracked regular file")
+        committed = subprocess.run(["git", "show", "HEAD:" + relative], cwd=checkout,
+                                   capture_output=True, check=False, timeout=5)
+        if committed.returncode or committed.stdout != path.read_bytes():
+            raise PermitError("Loaded source bytes differ from approved head")
+    main = sys.modules.get("__main__")
+    if (getattr(getattr(main, "__spec__", None), "name", None) == "skybuild.auto_patch_controller"
+            and Path(main.__file__).resolve() != checkout / "src" / "skybuild" / "auto_patch_controller.py"):
+        raise PermitError("Executing controller is outside the approved checkout")
+
+
 def load(path: Path, expected_sha256: str, *, checkout: Path, selected: list[dict],
          project: str, base_ref: str, hostwatch: Path, usage: Path) -> dict:
     if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
@@ -57,13 +108,11 @@ def load(path: Path, expected_sha256: str, *, checkout: Path, selected: list[dic
             or permit["host_id"] != socket.gethostname()
             or permit["slots"] != 2):
         raise PermitError("Permit scope differs from this two-worker route")
-    source = subprocess.run(["git", "rev-parse", "HEAD"], cwd=checkout,
-                            capture_output=True, check=False, timeout=5)
-    if (source.returncode or not re.fullmatch(r"[0-9a-f]{40}", permit["source_head"])
-            or source.stdout.decode().strip() != permit["source_head"]):
-        raise PermitError("Controller source differs from approved exact head")
-    expected_workers = [{key: item[key] for key in ("task_id", "worker", "assignment_id",
-                                                  "brief_path", "branch", "patch_sha256")}
+    check_source(checkout, permit)
+    expected_workers = [{**{key: item[key] for key in ("task_id", "worker", "assignment_id",
+                                                         "brief_path", "brief_sha256", "branch",
+                                                         "base_sha", "revision", "patch_sha256")},
+                         "envelope_sha256": envelope_sha256(item["envelope"])}
                         for item in selected]
     if permit["workers"] != expected_workers:
         raise PermitError("Selected task and patch identities differ from permit")

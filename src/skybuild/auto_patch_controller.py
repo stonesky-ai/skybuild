@@ -17,7 +17,8 @@ import time
 
 from scripts.skybuild_job_unit import JobSpec, JobUnitError, JobUnitManager
 
-from .auto_patch_permit import PermitError, check_weekly_usage, load as load_permit, resource_admission
+from .auto_patch_permit import (PermitError, check_source, check_weekly_usage,
+                                load as load_permit, resource_admission)
 from .auto_patch_worker import _approved_task, _patch_bytes
 from .client import Client, ClientError, ca_file_sha256
 from .fleet_preflight import PreflightError, _token_from_file, _resolved_addresses, probe_private_api
@@ -68,7 +69,8 @@ def select(client: Client, repo: Path, candidates: list[dict], *, project: str,
         task = client.get_task(project, envelope["task_id"])
         if not isinstance(task, dict) or task.get("status") != "ready":
             continue
-        pinned = {**envelope, "task_status": task["status"], "task_revision": task.get("revision")}
+        pinned = {**envelope, "schema": "manual-work-v2", "task_status": task["status"],
+                  "task_revision": task.get("revision")}
         try:
             _approved_task(task, pinned, entry["patch_sha256"])
         except ValueError:
@@ -79,7 +81,8 @@ def select(client: Client, repo: Path, candidates: list[dict], *, project: str,
             raise AutoControllerError("Ready task priority is invalid")
         choices.append({**entry, "task_id": envelope["task_id"], "assignment_id": envelope["assignment_id"],
                         "branch": envelope["branch"], "owned_paths": envelope["owned_paths"],
-                        "priority": priority, "revision": task["revision"], "base_sha": envelope["base_sha"]})
+                        "priority": priority, "revision": task["revision"], "base_sha": envelope["base_sha"],
+                        "brief_sha256": envelope["brief_sha256"], "envelope": pinned})
     choices.sort(key=lambda item: (item["priority"], item["task_id"], item["worker"]))
     selected = []
     for item in choices:
@@ -91,6 +94,8 @@ def select(client: Client, repo: Path, candidates: list[dict], *, project: str,
             continue
         selected.append(item)
         if len(selected) == 2:
+            if selected[0]["base_sha"] != selected[1]["base_sha"]:
+                raise AutoControllerError("Selected tasks use different published bases")
             return selected
     raise AutoControllerError("Fewer than two distinct approved Ready assignments")
 
@@ -166,17 +171,20 @@ def run(*, repo: Path, manifest: Path, project: str, dispatcher: str, url: str,
               "project_id": project, "base_ref": base_ref, "permit_sha256": permit_sha256,
               "approved_until": permit["approved_until"],
               "selected": [{key: item[key] for key in ("task_id", "assignment_id", "worker", "branch",
-                                                     "priority", "revision", "base_sha", "patch_sha256")}
+                                                     "priority", "revision", "base_sha", "brief_sha256",
+                                                     "patch_sha256")}
                            for item in selected]})
     delivered = []
     for item in selected:
         if datetime.now(timezone.utc) >= expiry:
             raise AutoControllerError("Approval expired before dispatch")
+        check_source(repo, permit)
         check_weekly_usage(weekly_usage, permit)
         resource_admission(hostwatch, permit, selected_count=2)
         response = dispatch(repo, item["brief_path"], worker=item["worker"], dispatcher=dispatcher,
                             project=project, principal=dispatcher, url=url, token_file=dispatcher_token,
-                            state_dir=state_dir / "dispatch", ca_file=ca_file, base_ref=base_ref)
+                            state_dir=state_dir / "dispatch", ca_file=ca_file, base_ref=base_ref,
+                            expected_envelope=item["envelope"])
         delivered.append({**item, "message_id": response["message_id"]})
     _save_new(state_dir / "delivered.json", {"messages": [
         {"task_id": item["task_id"], "worker": item["worker"], "message_id": item["message_id"]}
@@ -190,6 +198,7 @@ def run(*, repo: Path, manifest: Path, project: str, dispatcher: str, url: str,
         try:
             if datetime.now(timezone.utc) >= expiry:
                 raise AutoControllerError("Approval expired before worker claim")
+            check_source(repo, permit)
             check_weekly_usage(weekly_usage, permit)
             resource_admission(hostwatch, permit, selected_count=2)
             with Client(url, _token_from_file(owner_token), retries=0, timeout=10,
@@ -202,13 +211,11 @@ def run(*, repo: Path, manifest: Path, project: str, dispatcher: str, url: str,
             with Client(url, _token_from_file(Path(item["token_file"])), retries=0, timeout=10,
                         trust_env=False, ca_file=ca_file, expected_ca_sha256=ca_digest) as worker_client:
                 current = worker_client.get_task(project, item["task_id"])
-                envelope = build_envelope(repo, item["brief_path"], worker=item["worker"],
-                                          dispatcher=dispatcher, base_ref=base_ref)
-                _approved_task(current, {**envelope, "task_status": "ready",
-                                         "task_revision": item["revision"]}, item["patch_sha256"])
+                _approved_task(current, item["envelope"], item["patch_sha256"])
                 received = receive_assignment(worker_client, project, repo, worker=item["worker"],
                                               dispatcher=dispatcher, message_id=item["message_id"],
-                                              destination=worker_dir / "assignment.json")
+                                              destination=worker_dir / "assignment.json",
+                                              expected_envelope=item["envelope"])
             if received.get("place") != "working" or not received.get("attempt_id"):
                 raise AutoControllerError("Worker claim has no fenced attempt")
             _save_new(worker_dir / "preclaim.json", received)
@@ -221,6 +228,7 @@ def run(*, repo: Path, manifest: Path, project: str, dispatcher: str, url: str,
                          "--approved-until", permit["approved_until"])
             if datetime.now(timezone.utc) >= expiry:
                 raise AutoControllerError("Approval expired before bounded unit launch")
+            check_source(repo, permit)
             check_weekly_usage(weekly_usage, permit)
             resource_admission(hostwatch, permit, selected_count=2)
             log = state_dir / ("worker-" + item["worker"] + ".log")

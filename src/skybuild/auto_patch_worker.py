@@ -69,7 +69,8 @@ def _approved_task(task: dict, assignment: dict, patch_sha256: str, *, preclaim:
     workflow = metadata.get("_skybuild_workflow")
     petri = workflow.get("petri") if isinstance(workflow, dict) else None
     token = petri.get("token") if isinstance(petri, dict) else None
-    if (not isinstance(token, dict) or token.get("place") != ("ready" if preclaim else "working")
+    if (not isinstance(petri, dict) or petri.get("schema_version") != 1
+            or not isinstance(token, dict) or token.get("place") != ("ready" if preclaim else "working")
             or token.get("pending_action") is not None or token.get("superseded")):
         raise PatchWorkerError("Petri task place is not eligible")
 

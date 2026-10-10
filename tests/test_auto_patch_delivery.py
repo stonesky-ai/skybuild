@@ -21,7 +21,7 @@ def task(task_id, assignment_id, digest, *, priority=1, approved=True):
             "metadata": {"_skybuild_cpu_patch": {
                 "schema": "skybuild.cpu-patch.v1", "sha256": digest,
                 "assignment_id": assignment_id if approved else "another-assignment"},
-                "_skybuild_workflow": {"petri": {"token": {"place": "ready",
+                "_skybuild_workflow": {"petri": {"schema_version": 1, "token": {"place": "ready",
                     "pending_action": None, "superseded": False}}}}}
 
 
@@ -62,6 +62,7 @@ def test_selector_chooses_two_distinct_ready_tasks_and_rejects_unapproved(tmp_pa
         assert dispatcher == "pilot_dispatcher" and base_ref == "refs/heads/dev-006"
         return {"task_id": f"SKYBUILD-CPU-{index}", "assignment_id": f"CPU-{index}",
                 "branch": f"task/cpu-{index}", "base_sha": "a" * 40,
+                "schema": "manual-work-v1", "brief_sha256": "b" * 64,
                 "owned_paths": [f"docs/{'abc'[index - 1]}.md"]}
 
     monkeypatch.setattr(controller, "build_envelope", envelope)
@@ -131,6 +132,29 @@ def test_worker_refuses_changed_patch_and_unapproved_task(tmp_path):
                                "assignment_id": "CPU-1"}, "a" * 64)
 
 
+def test_selector_rejects_ready_task_without_claimable_petri_version():
+    candidate = task("SKYBUILD-CPU-1", "CPU-1", "a" * 64)
+    del candidate["metadata"]["_skybuild_workflow"]["petri"]["schema_version"]
+    with pytest.raises(worker.PatchWorkerError, match="Petri task place"):
+        worker._approved_task(candidate, {"task_id": "SKYBUILD-CPU-1", "task_revision": 2,
+                                          "assignment_id": "CPU-1"}, "a" * 64)
+
+
+def test_source_guard_rejects_dirty_checkout_at_approved_head(tmp_path):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+    (checkout / "tracked.py").write_text("VALUE = 1\n")
+    subprocess.run(["git", "-C", str(checkout), "add", "tracked.py"], check=True)
+    subprocess.run(["git", "-C", str(checkout), "-c", "user.name=Test", "-c",
+                    "user.email=test@example.invalid", "commit", "-qm", "base"], check=True)
+    head = subprocess.run(["git", "-C", str(checkout), "rev-parse", "HEAD"],
+                          check=True, capture_output=True, text=True).stdout.strip()
+    (checkout / "tracked.py").write_text("VALUE = 2\n")
+    with pytest.raises(permit.PermitError, match="dirty"):
+        permit.check_source(checkout, {"source_head": head})
+
+
 def test_private_git_askpass_uses_token_file_without_embedding_secret(tmp_path):
     token = tmp_path / "token"
     token.write_text("example-secret\n")
@@ -146,7 +170,8 @@ def test_private_git_askpass_uses_token_file_without_embedding_secret(tmp_path):
     assert password == b"example-secret\n"
 
 
-def test_exact_one_shot_permit_requires_valid_usage_and_resource_headroom(tmp_path):
+def test_exact_one_shot_permit_requires_valid_usage_and_resource_headroom(tmp_path, monkeypatch):
+    monkeypatch.setattr(permit, "check_source", lambda *_args: None)
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     subprocess.run(["git", "init", "-q", str(checkout)], check=True)
@@ -166,10 +191,12 @@ def test_exact_one_shot_permit_requires_valid_usage_and_resource_headroom(tmp_pa
         "capacity": {"status": "ok", "max_new_jobs": 2}}))
     selected = [{"task_id": "TASK-1", "worker": "worker_a", "assignment_id": "A-1",
                  "brief_path": "docs/design/assignments/a.json", "branch": "task/a",
-                 "patch_sha256": "a" * 64},
+                 "patch_sha256": "a" * 64, "base_sha": head, "brief_sha256": "c" * 64,
+                 "revision": 2, "envelope": {"assignment_id": "A-1", "base_sha": head}},
                 {"task_id": "TASK-2", "worker": "worker_b", "assignment_id": "A-2",
                  "brief_path": "docs/design/assignments/b.json", "branch": "task/b",
-                 "patch_sha256": "b" * 64}]
+                 "patch_sha256": "b" * 64, "base_sha": head, "brief_sha256": "d" * 64,
+                 "revision": 2, "envelope": {"assignment_id": "A-2", "base_sha": head}}]
     approved = {"schema": "skybuild.auto-cpu-patch-permit.v1",
         "profile": "bounded-trusted-cpu-patch-v1", "project_id": "skybuild",
         "host_id": socket.gethostname(), "source_head": head, "base_ref": "refs/heads/dev-006",
@@ -177,13 +204,28 @@ def test_exact_one_shot_permit_requires_valid_usage_and_resource_headroom(tmp_pa
         "weekly_usage_sha256": hashlib.sha256(weekly.read_bytes()).hexdigest(),
         "hostwatch_reserve_bytes": 8 * 1024**3,
         "memory_high_bytes": 1024**3, "memory_max_bytes": 2 * 1024**3,
-        "runtime_seconds": 600, "workers": selected}
+        "runtime_seconds": 600, "workers": [
+            {**{key: item[key] for key in ("task_id", "worker", "assignment_id", "brief_path",
+                                            "brief_sha256", "branch", "base_sha", "revision", "patch_sha256")},
+             "envelope_sha256": permit.envelope_sha256(item["envelope"])} for item in selected]}
     approved_file = tmp_path / "permit.json"
     approved_file.write_text(json.dumps(approved))
     digest = hashlib.sha256(approved_file.read_bytes()).hexdigest()
     assert permit.load(approved_file, digest, checkout=checkout, selected=selected,
                        project="skybuild", base_ref="refs/heads/dev-006",
                        hostwatch=host, usage=weekly) == approved
+    selected[0]["base_sha"] = "f" * 40
+    with pytest.raises(permit.PermitError, match="Selected task"):
+        permit.load(approved_file, digest, checkout=checkout, selected=selected,
+                    project="skybuild", base_ref="refs/heads/dev-006",
+                    hostwatch=host, usage=weekly)
+    selected[0]["base_sha"] = head
+    selected[0]["brief_sha256"] = "e" * 64
+    with pytest.raises(permit.PermitError, match="Selected task"):
+        permit.load(approved_file, digest, checkout=checkout, selected=selected,
+                    project="skybuild", base_ref="refs/heads/dev-006",
+                    hostwatch=host, usage=weekly)
+    selected[0]["brief_sha256"] = "c" * 64
     approved["workers"][1]["patch_sha256"] = "c" * 64
     approved_file.write_text(json.dumps(approved))
     with pytest.raises(permit.PermitError, match="bytes changed"):
