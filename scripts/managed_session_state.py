@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -114,6 +115,18 @@ def status(state, env):
     return {"host": socket.gethostname(), "state_available": True, "merge_slot": slot, "services": summaries}
 
 
+def resolution_bytes(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise SessionError("The resolution evidence must be a private regular file owned by this user")
+        content = stream.read(16385)
+    if len(content) > 16384:
+        raise SessionError("The resolution evidence is too large")
+    return content
+
+
 def recover(state, unit, evidence_path, env):
     if not state_check(state):
         raise SessionError("The state directory does not exist")
@@ -130,10 +143,10 @@ def recover(state, unit, evidence_path, env):
         if not summary["physical_exit_confirmed"]:
             raise SessionError("The service exit and cleanup are not confirmed")
         # Bind the receipt to the exact bytes that supplied the decision.
-        evidence = read_record(evidence_path)
-        evidence_bytes = evidence_path.read_bytes()
-        if len(evidence_bytes) > 16384 or json.loads(evidence_bytes) != evidence:
-            raise SessionError("The resolution evidence changed while it was read")
+        evidence_bytes = resolution_bytes(evidence_path)
+        evidence = json.loads(evidence_bytes)
+        if not isinstance(evidence, dict):
+            raise SessionError("The resolution evidence is not an object")
         if (evidence.get("schema") != "skybuild.merge-resolution.v1" or evidence.get("unit") != unit
                 or evidence.get("target_ref") != record.get("target_ref")
                 or evidence.get("invocation_id") != result["invocation_id"]

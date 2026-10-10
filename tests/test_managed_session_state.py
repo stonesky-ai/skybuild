@@ -141,3 +141,34 @@ def test_repeat_returns_receipt_and_preserves_new_slot(records):
     write_new(registry / "merge-slot.json", {"unit": other, "target_ref": "refs/heads/dev-006"})
     assert state.recover(registry, UNIT, resolution, {}) == first
     assert json.loads((registry / "merge-slot.json").read_text())["unit"] == other
+
+
+@pytest.mark.parametrize("mode", [0o666, 0o640])
+def test_shared_resolution_keeps_slot(records, mode):
+    registry, resolution = records
+    resolution.chmod(mode)
+    with pytest.raises(state.SessionError, match="private regular file"):
+        state.recover(registry, UNIT, resolution, {})
+    assert (registry / "merge-slot.json").exists()
+
+
+def test_foreign_owned_resolution_keeps_slot(records, monkeypatch):
+    from types import SimpleNamespace
+    registry, resolution = records
+    original = state.os.fstat
+    def foreign_owner(descriptor):
+        info = original(descriptor)
+        return SimpleNamespace(st_mode=info.st_mode, st_uid=state.os.getuid()+1)
+    monkeypatch.setattr(state.os, "fstat", foreign_owner)
+    with pytest.raises(state.SessionError, match="owned by this user"):
+        state.recover(registry, UNIT, resolution, {})
+    assert (registry / "merge-slot.json").exists()
+
+
+def test_fifo_resolution_is_rejected_without_blocking(records):
+    registry, resolution = records
+    resolution.unlink()
+    state.os.mkfifo(resolution, 0o600)
+    with pytest.raises(state.SessionError, match="private regular file"):
+        state.recover(registry, UNIT, resolution, {})
+    assert (registry / "merge-slot.json").exists()
