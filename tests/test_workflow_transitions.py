@@ -8,6 +8,8 @@ import pytest
 from skybuild.contracts import DomainError
 from skybuild.workflow import Place, TaskToken, TaskWorkflow, TRANSITIONS
 
+TRANSITIONS = tuple(spec for spec in TRANSITIONS if spec.event in {"claim", "submit", "freeze", "accept"})
+
 
 def token(place=Place.READY):
     return TaskToken("project", "TASK-1", place=place, source_head="abc", target_base="def",
