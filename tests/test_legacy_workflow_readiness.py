@@ -6,13 +6,16 @@ import pytest
 
 from skybuild.api import create_app
 from skybuild.contracts import DomainError
+from test_claims import ready
 from test_effects import intent
 from test_store import actors, create, store
 
 
 def legacy_without_marker(store, people, project, *, status="proposed"):
-    task = create(store, people["owner"], project, "legacy-" + uuid4().hex,
-                  status=status, acceptance_criteria=["Preserve imported history"])
+    task_id = "legacy-" + uuid4().hex
+    task = (ready(store, people, project, task_id) if status == "ready" else
+            create(store, people["owner"], project, task_id,
+                   acceptance_criteria=["Preserve imported history"]))
     # Frozen imports insert their journal directly after migration 005's one-time
     # backfill. Remove only synthetic fixture bookkeeping to reproduce that state.
     with store._connection() as connection:
@@ -77,8 +80,7 @@ def test_missing_marker_does_not_assess_ready_task_or_authorize_claim(store, act
 @pytest.mark.parametrize("assessed", [0, 5, 7])
 def test_initialization_preserves_existing_readiness_generations(store, actors, assessed):
     project, people = actors
-    task = create(store, people["owner"], project, "existing-" + uuid4().hex,
-                  status="ready", acceptance_criteria=["Preserve readiness"])
+    task = ready(store, people, project, "existing-" + uuid4().hex)
     with store._connection() as connection:
         connection.execute("UPDATE task_readiness SET input_generation = 7, assessed_generation = %s "
                            "WHERE project_id = %s AND task_id = %s", (assessed, project, task["task_id"]))
