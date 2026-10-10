@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
+import stat
 
 import pytest
 
@@ -25,6 +27,24 @@ def test_git_package_payload_rejects_unpinned_or_missing_archives(tmp_path):
 
     with pytest.raises(builder.BuildError, match="exact package allowlist"):
         builder.stage_git_payload(tmp_path / "rootfs", package_dir)
+
+
+def test_git_package_staging_uses_private_hashed_copy_and_rejects_symlinks(tmp_path):
+    source = tmp_path / "source.deb"
+    source.write_bytes(b"trusted package bytes")
+    staged = tmp_path / "private" / "package.deb"
+    staged.parent.mkdir(mode=0o700)
+    expected = hashlib.sha256(source.read_bytes()).hexdigest()
+
+    builder._copy_pinned_package(source, staged, expected)
+    source.write_bytes(b"replacement package bytes")
+
+    assert staged.read_bytes() == b"trusted package bytes"
+    assert stat.S_IMODE(staged.stat().st_mode) == 0o400
+    link = tmp_path / "link.deb"
+    link.symlink_to(source)
+    with pytest.raises(builder.BuildError, match="opened safely"):
+        builder._copy_pinned_package(link, tmp_path / "private" / "link.deb", expected)
 
 
 def test_runner_environment_metadata_is_static_and_binds_exact_project_lock(tmp_path):
