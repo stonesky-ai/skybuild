@@ -154,6 +154,27 @@ def test_preparation_rechecks_review_bytes_and_complete_membership(git_case):
         operator.prepared_bundle(case["repo"], case["prepared"])
 
 
+@pytest.mark.parametrize("fault", ["too-many-members", "option-ref", "option-head"])
+def test_preparation_bounds_inputs_before_git_commands(git_case, monkeypatch, fault):
+    case = git_case
+    owner = operator.read_json(case["prepared"] / "inputs.json")
+    if fault == "too-many-members":
+        owner["inputs"]["members"] *= 21
+    elif fault == "option-ref":
+        owner["inputs"]["members"][0]["ref"] = "--upload-pack=untrusted"
+    else:
+        owner["inputs"]["members"][0]["sha"] = "--help"
+    import hashlib
+    owner["fingerprint"] = hashlib.sha256(json.dumps(owner["inputs"], sort_keys=True).encode()).hexdigest()
+    report = operator.read_json(case["prepared"] / "report.json")
+    report.update(owner)
+    (case["prepared"] / "inputs.json").write_text(json.dumps(owner))
+    (case["prepared"] / "report.json").write_text(json.dumps(report))
+    monkeypatch.setattr(operator, "command", lambda *args: pytest.fail("Malformed inputs reached Git"))
+    with pytest.raises(operator.ReceiptError):
+        operator.prepared_bundle(case["repo"], case["prepared"])
+
+
 @pytest.mark.parametrize("kind", ["symlink", "fifo", "oversize"])
 def test_artifact_reader_rejects_special_or_unbounded_files(tmp_path, kind):
     path = tmp_path / "artifact"

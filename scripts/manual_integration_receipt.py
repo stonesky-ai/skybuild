@@ -21,7 +21,7 @@ from skybuild.contracts import DomainError
 from skybuild.fleet_preflight import _token_from_file, _resolved_addresses
 from skybuild.manual_dispatch import _private_endpoint
 from skybuild.manual_integration import (SCHEMA, binding, canonical, digest, validation_digest,
-                                         validate_evidence, DEFAULT_GATE_COMMAND_SHA256)
+                                         validate_evidence, DEFAULT_GATE_COMMAND_SHA256, _sha, _branch_ref)
 from skybuild.integration_workflow import satisfactory_validation
 from skybuild.store import Store
 
@@ -87,6 +87,12 @@ def prepared_bundle(checkout, prepared):
     require(owner["fingerprint"] == fingerprint == report["fingerprint"]
             and inputs == report["inputs"] and report["schema"] == "skybuild.bundle-preparation.v1"
             and inputs["schema"] == "skybuild.bundle-input.v1" and report["ok"] is True)
+    # Bound work and reject Git option/revision injection before any subprocess.
+    require(isinstance(inputs["members"], list) and 1 <= len(inputs["members"]) <= 20
+            and _branch_ref(inputs["target"]["ref"]) and _sha(inputs["target"]["sha"])
+            and _sha(report["candidate_head"]) and _sha(report["candidate_tree"]))
+    for item in inputs["members"]:
+        require(isinstance(item, dict) and _branch_ref(item["ref"]) and _sha(item["sha"]))
     require(file_digest(Path(inputs["policy"]["path"])) == inputs["policy"]["sha256"])
     members = []
     for item in inputs["members"]:
@@ -145,6 +151,7 @@ def accepted_packet(checkout, view, attestor, operation_id, frozen, integration_
             and integrated["expected_base"] == bundle["base_commit"]
             and integrated["candidate_tree"] == bundle["candidate_tree"]
             and integrated["atomic_expected_base"] is False)
+    require(_sha(integrated["candidate_head"]) and _sha(integrated["published_commit"]))
     artifact_path = Path(integrated["gate_artifact"])
     durable = read_json(artifact_path)
     summary = integrated["gate"]
@@ -247,6 +254,7 @@ def main(argv=None):
     submit.add_argument("--receipt", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
+        require(not any(name.startswith("GIT_") and name != "GIT_PAGER" for name in os.environ))
         endpoint = _private_endpoint(args.url, _resolved_addresses)
         with Client(endpoint, _token_from_file(args.token_file), ca_file=args.ca_file,
                     retries=0, timeout=5, trust_env=False) as client:
