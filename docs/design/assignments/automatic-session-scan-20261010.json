@@ -1,0 +1,21 @@
+{
+  "schema": "manual-work-brief-v1",
+  "assignment_id": "AUTO-CPU-SESSION-SCAN-20261010-002",
+  "task_id": "SKYBUILD-MVP-AUTO-SESSION-SCAN",
+  "worker": "wonko_auto_cpu_scan_02",
+  "dispatcher": "pilot_dispatcher",
+  "branch": "task/auto-session-scan-20261010",
+  "owned_paths": [
+    "scripts/session_failure_scan.py",
+    "tests/test_session_failure_scan.py"
+  ],
+  "checks": [
+    "Apply only the administrator-approved deterministic patch with SHA-256 5e3ae38ef9e08077ec797b531440a7a34ad7fd9e6a5acae2e468f0e310bbd31f; no candidate code or test execution in the worker.",
+    "Reassemble one session tool result split across input_text blocks before JSON classification, while retaining separate complete-block handling and ignoring successful quoted failures.",
+    "Add a regression case with both split failing and split successful outputs; preserve the finite watch cancellation behavior.",
+    "The independent validation producer runs tests/test_session_failure_scan.py; the prepared patch passed this focused suite against dev-006 ec3fa9c12f560d205ddf46c08ccaef47012341c2.",
+    "Require exact owned paths, regular tracked files, Python syntax, clean diff, sole pinned parent, pushed branch head and fenced REST/Cord result before independent review and frozen bundle admission."
+  ],
+  "model_limit": "One bounded trusted CPU patch worker, 2 GiB MemoryMax, no model query, paid API, candidate execution or publisher credential.",
+  "next_action": "When this brief is included in published dev-006 and the exact Ready task has administrator patch approval, automatically select, claim and apply the approved patch in a separate unit; then submit the exact fenced result for independent review and bundled delivery."
+}
