@@ -744,7 +744,7 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries, T
     def _submit_workflow_receipt(self, connection, principal, before, body, operation_id):
         """Bind an author's proposed output, never independent acceptance."""
         from dataclasses import replace
-        from .workflow import Place, ResultState
+        from .workflow import Place
         fields = {'source_head', 'target_base', 'source_branch', 'attempt_id', 'claim_fence',
                   'input_generation', 'definition_revision', 'policy_version'}
         _body(body, fields)
@@ -781,8 +781,10 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries, T
                 'assessed_generation = input_generation + 1 WHERE project_id = %s AND task_id = %s '
                 'RETURNING input_generation, assessed_generation',
                 (before['project_id'], before['task_id'])).fetchone()
-            token = replace(token, input_generation=readiness['input_generation'],
-                            evidence=tuple(replace(result, state=ResultState.STALE) for result in token.evidence))
+            # A changed source/base invalidates every attached result. Keep the
+            # current token compact; the complete old payloads remain in the
+            # append-only task journal at their original validation events.
+            token = replace(token, input_generation=readiness['input_generation'], evidence=())
             prepared['metadata']['_skybuild_workflow']['readiness'] = dict(readiness)
             prepared['metadata']['_skybuild_workflow']['generation'] = prepared['metadata']['_skybuild_workflow'].get('generation', 0) + 1
         token = replace(token, source_head=body['source_head'], target_base=body['target_base'], source_branch=branch)
