@@ -1,3 +1,5 @@
+import asyncio
+from collections import Counter
 import json
 import importlib.util
 from pathlib import Path
@@ -33,6 +35,18 @@ def test_workbench_compose_arguments_follow_image_entrypoint():
     assert entrypoint == ["python", "/runtime-ui/runtime_ui.py"]
     assert argv[:3] == ["python", "/runtime-ui/runtime_ui.py", "--ui-checkout"]
     assert "python" not in command
+
+
+def test_workbench_docker_sources_are_included_by_root_build_context_filter():
+    dockerignore = set((ROOT.parents[1] / ".dockerignore").read_text().splitlines())
+    dockerfile = (ROOT / "Dockerfile").read_text()
+
+    assert {"!ops/", "!ops/runtime-ui/", "!ops/runtime-ui/runtime_ui.py",
+            "!ops/runtime-ui/asset-pins.json", "!ops/runtime-ui/navigation.html",
+            "!ops/runtime-ui/ui/", "!ops/runtime-ui/ui/**"} <= dockerignore
+    assert "COPY --chown=1000:1000 ops/runtime-ui/runtime_ui.py ops/runtime-ui/asset-pins.json ops/runtime-ui/navigation.html /runtime-ui/" in dockerfile
+    assert "COPY --chown=1000:1000 ops/runtime-ui/ui/ /runtime-ui/ui/" in dockerfile
+    assert "!ops/runtime-ui/api-source/" not in dockerignore
 
 
 def token_file(path: Path, value: str = TOKEN) -> Path:
@@ -80,6 +94,7 @@ def test_private_login_creates_secure_session_and_logout_revokes_it(tmp_path):
         assert 'href="/workbench/assets/private-mode.css"' in login_page.text
         assert 'autocomplete="username"' in login_page.text
         assert 'autocomplete="current-password"' in login_page.text
+        assert '<form class="login-form" id="login-form" method="post" action="/workbench/session">' in login_page.text
         assert PASSWORD not in login_page.text
         bad = login(client, password="wrong-password")
         assert bad.status_code == 401 and bad.json() == {"detail": "Username or password is incorrect"}
@@ -121,6 +136,54 @@ def test_private_login_requires_same_origin_and_limits_failures(tmp_path):
         limited = login(client)
         assert limited.status_code == 429
         assert USERNAME not in limited.text and PASSWORD not in limited.text
+
+
+def test_private_login_rechecks_failure_limit_after_concurrent_body_reads(tmp_path):
+    app = private_app(lambda request: httpx.Response(200), token_file(tmp_path / "token"))
+    total = 30
+    arrived = 0
+    body_barrier = asyncio.Event()
+    body = json.dumps({"username": USERNAME, "password": "wrong-review-password"}).encode()
+
+    async def request_with_body_barrier():
+        nonlocal arrived
+        scope = {
+            "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+            "method": "POST", "scheme": "https", "path": "/workbench/session",
+            "raw_path": b"/workbench/session", "query_string": b"", "root_path": "",
+            "headers": [
+                (b"host", b"localhost:8443"), (b"origin", b"https://localhost:8443"),
+                (b"x-skybuild-workbench", b"1"), (b"sec-fetch-site", b"same-origin"),
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+            "client": ("100.80.1.2", 50000), "server": ("localhost", 8443),
+        }
+        status = None
+
+        async def receive():
+            nonlocal arrived
+            arrived += 1
+            if arrived == total:
+                body_barrier.set()
+            await body_barrier.wait()
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        async def send(message):
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = message["status"]
+
+        await app(scope, receive, send)
+        return status
+
+    async def run_requests():
+        statuses = await asyncio.wait_for(
+            asyncio.gather(*(request_with_body_barrier() for _ in range(total))), timeout=10)
+        return Counter(statuses)
+
+    assert asyncio.run(run_requests()) == Counter({429: total - runtime_ui.LOGIN_FAILURE_LIMIT,
+                                                    401: runtime_ui.LOGIN_FAILURE_LIMIT})
 
 
 def test_private_pages_bootstrap_only_project_and_never_credential(tmp_path):

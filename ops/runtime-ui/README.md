@@ -174,17 +174,18 @@ rtk proxy scripts/project_python -m pytest \
   tests/test_runtime_stack_startup.py -q
 ```
 
-Result: 47 passed. These checks cover routes, empty lists, installation trust,
+Result: 49 passed. These checks cover routes, empty lists, installation trust,
 SNI, fixed destination, caller and server credential boundaries, task CRUD/history/
 workflow loading, mutation intent, request limits, unavailable panels, origin/Host
 checks, redirects, sanitized failures, qualified database checks, startup ordering,
 changed-asset refusal, oversized upstream responses, refusal after readiness failure,
-private listener boundaries, and executed Node VM DOM tests for both generated
-private page scripts. Those tests verify automatic task/workflow-board reads,
-rendered real task IDs/counts, same-origin session-cookie fetch behavior, and
-tokenless mutation headers. They do not run a live browser or a browser CSS
-rendering engine; private pages serve a `[hidden]` override so the retained form
-layout cannot reveal the hidden login form.
+private listener boundaries, synchronized login throttling, Dockerfile/Compose
+argv composition, build-context allowlisting, and executed Node VM DOM tests for
+both generated private page scripts. Those tests verify automatic task/workflow-
+board reads, rendered real task IDs/counts, same-origin session-cookie fetch
+behavior, and tokenless mutation headers. They do not run a live browser or a
+browser CSS rendering engine; private pages serve a `[hidden]` override so the
+retained form layout cannot reveal the hidden login form.
 
 The independently reviewed startup command was exercised against the retained
 installation on 2026-10-10. Both API and Workbench reported ready; authenticated

@@ -484,7 +484,7 @@ def create_app(*, ui_checkout: Path, api_checkout: Path, ca_file: Path,
             '<script src="/workbench/assets/private-login.js" defer></script></head><body>'
             '<main class="login-shell"><h1>Sign in to SkyBuild</h1>'
             '<p>Use your SkyBuild account to open the task workbench.</p>'
-            '<form class="login-form" id="login-form">'
+            '<form class="login-form" id="login-form" method="post" action="/workbench/session">'
             '<label for="login-username">Username</label><input id="login-username" name="username" '
             'autocomplete="username" maxlength="128" required>'
             '<label for="login-password">Password</label><input id="login-password" name="password" '
@@ -504,6 +504,11 @@ def create_app(*, ui_checkout: Path, api_checkout: Path, ca_file: Path,
         if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
             return JSONResponse({"detail": "Invalid sign-in request"}, status_code=400, headers=HEADERS)
         body = await bounded_body(request, 8192)
+        # Body reads yield control. Recheck so synchronized attempts cannot all
+        # pass the initial limit before recording their failed credentials.
+        now = time.monotonic()
+        if login_is_limited(address, now):
+            return JSONResponse({"detail": "Too many sign-in attempts"}, status_code=429, headers=HEADERS)
         try:
             payload = json.loads(body) if body is not None else None
         except (ValueError, UnicodeDecodeError, RecursionError):
