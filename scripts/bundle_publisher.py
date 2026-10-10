@@ -25,8 +25,9 @@ from trusted_gate_attestation import verify_attestation
 from skybuild.manual_integration import DEFAULT_GATE_COMMAND, DEFAULT_GATE_COMMAND_SHA256
 from skybuild.client import Client
 from skybuild.integration_workflow import satisfactory_validation
-from skybuild.workflow import ResultState, TaskToken, ValidationStage, _result_current
+from skybuild.workflow import Place, ResultState, TaskToken, ValidationStage, _result_current
 from skybuild.contracts import valid_identifier
+from manual_integration_receipt import prepared_bundle
 
 
 class PublisherError(RuntimeError):
@@ -40,6 +41,13 @@ _TERMINAL = {"confirmed"}
 _REPOSITORY = "stonesky-ai/skybuild"
 _DEFAULT_TRUST_CONFIG = Path.home() / ".config/skybuild/trusted-publisher.json"
 _DEFAULT_INTENT_DIR = Path.home() / ".local/state/skybuild/publication-intents"
+_TRUSTED_MODULE_PATHS = {
+    "bundle_publisher": "scripts/bundle_publisher.py",
+    "_repo_guard": "scripts/_repo_guard.py",
+    "trusted_gate_attestation": "scripts/trusted_gate_attestation.py",
+    "manual_integration_receipt": "scripts/manual_integration_receipt.py",
+    "skybuild": "src/skybuild/__init__.py",
+}
 
 
 def _run(argv: list[str], cwd: Path, *, check: bool = True) -> str:
@@ -184,7 +192,7 @@ def _read_attestation(path: Path, checkout: Path) -> dict:
 
 
 _RUNNER_PIN_FIELDS = {
-    "runner_identity", "runner_version", "runner_image_id", "postgres_image_id",
+    "candidate_history_sha256", "runner_identity", "runner_version", "runner_image_id", "postgres_image_id",
     "firewall_image_id", "firewall_policy_sha256", "trusted_entrypoint_sha256",
     "network_probe_sha256", "attestation_signer_sha256", "execution_host",
     "environment_allowlist", "resource_limits",
@@ -258,8 +266,8 @@ def _read_trust_config(path: Path, expected_sha256: str, checkout: Path
     for field in ("runner_image_id", "postgres_image_id", "firewall_image_id"):
         if not isinstance(runner_pins[field], str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", runner_pins[field]):
             raise PublisherError(f"Trusted runner {field} pin is invalid")
-    for field in ("firewall_policy_sha256", "trusted_entrypoint_sha256", "network_probe_sha256",
-                  "attestation_signer_sha256"):
+    for field in ("candidate_history_sha256", "firewall_policy_sha256", "trusted_entrypoint_sha256",
+                  "network_probe_sha256", "attestation_signer_sha256"):
         if not isinstance(runner_pins[field], str) or not re.fullmatch(r"[0-9a-f]{64}", runner_pins[field]):
             raise PublisherError(f"Trusted runner {field} pin is invalid")
     environment = runner_pins["environment_allowlist"]
@@ -280,12 +288,12 @@ def _read_trust_config(path: Path, expected_sha256: str, checkout: Path
             or Path(client["token_path"]).resolve().is_relative_to(checkout)):
         raise PublisherError("Trusted read-only SkyBuild client config is invalid")
     if client["ca_file"] is None:
-        if client["ca_sha256"] is not None:
-            raise PublisherError("CA digest requires a pinned CA file")
-    elif (not isinstance(client["ca_file"], str) or not Path(client["ca_file"]).is_absolute()
-          or Path(client["ca_file"]).resolve().is_relative_to(checkout)
-          or not isinstance(client["ca_sha256"], str)
-          or not re.fullmatch(r"[0-9a-f]{64}", client["ca_sha256"])):
+        raise PublisherError("Trusted SkyBuild client requires a pinned CA file")
+    if (not isinstance(client["ca_file"], str) or not Path(client["ca_file"]).is_absolute()
+            or Path(client["ca_file"]).resolve().is_relative_to(checkout)
+            or Path(client["ca_file"]).resolve() != Path(client["ca_file"])
+            or not isinstance(client["ca_sha256"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", client["ca_sha256"])):
         raise PublisherError("Trusted SkyBuild client CA pin is invalid")
     return keys, active, config["publisher_commit"], runner_pins, client
 
@@ -417,6 +425,58 @@ def _verify_trusted_publisher_source(source_root: Path, expected_commit: str) ->
     tracked = _run(["git", "ls-tree", "--name-only", expected_commit, "--", relative], source_root)
     if tracked != relative:
         raise PublisherError("Publisher module is not tracked by the pinned source commit")
+    _verify_trusted_runtime(source_root, expected_commit)
+
+
+def _verify_trusted_runtime(source_root: Path, expected_commit: str) -> None:
+    """Require canonical launcher paths and authority modules from pinned source bytes."""
+    source_root = source_root.resolve()
+    prefix_paths = [source_root / "src", source_root / "scripts", source_root]
+    expected_pythonpath = os.pathsep.join(str(path) for path in prefix_paths)
+    if (os.environ.get("PYTHONPATH") != expected_pythonpath
+            or os.environ.get("UV_PROJECT_ENVIRONMENT") != str(source_root / ".venv")
+            or not sys.flags.safe_path
+            or Path(sys.prefix).resolve() != (source_root / ".venv").resolve()
+            or sys.path[:3] != [str(path) for path in prefix_paths]):
+        raise PublisherError("Publisher must run through its canonical project_python environment")
+
+    observed: dict[str, Path] = {}
+    for name, relative in _TRUSTED_MODULE_PATHS.items():
+        module = sys.modules.get(name)
+        if name == "bundle_publisher" and module is None:
+            module = sys.modules.get("__main__")
+        origin = getattr(module, "__file__", None)
+        expected_path = source_root / relative
+        if not isinstance(origin, str) or Path(origin).resolve() != expected_path.resolve():
+            raise PublisherError(f"Trusted authority module {name} is outside the pinned source tree")
+        observed[name] = expected_path
+
+    for name, module in tuple(sys.modules.items()):
+        if name == "skybuild" or name.startswith("skybuild."):
+            origin = getattr(module, "__file__", None)
+            if not isinstance(origin, str):
+                raise PublisherError(f"Trusted project module {name} has no source origin")
+            origin_path = Path(origin).resolve()
+            try:
+                relative = origin_path.relative_to(source_root).as_posix()
+            except ValueError:
+                raise PublisherError(f"Trusted project module {name} is outside the pinned source tree") from None
+            if not relative.startswith("src/skybuild/") or origin_path.suffix != ".py":
+                raise PublisherError(f"Trusted project module {name} has an unexpected source path")
+            observed[name] = origin_path
+
+    for name, path in observed.items():
+        relative = _TRUSTED_MODULE_PATHS.get(name)
+        if relative is None:
+            relative = path.relative_to(source_root).as_posix()
+        try:
+            result = subprocess.run(["git", "show", f"{expected_commit}:{relative}"],
+                                    cwd=source_root, capture_output=True, timeout=10)
+            current = path.read_bytes()
+        except OSError as error:
+            raise PublisherError(f"Trusted authority module {name} could not be verified") from error
+        if result.returncode or result.stdout != current:
+            raise PublisherError(f"Trusted authority module {name} differs from pinned commit bytes")
 
 
 def _key(remote: str, target_ref: str) -> str:
@@ -538,7 +598,8 @@ def _verify_member_workflow(member: dict,
         "definition_revision": token.definition_revision, "policy_version": token.policy_version,
         "target_base": token.target_base,
     }
-    if (token.task_id != task_id or token.source_head != member["source_head"]
+    if (token.task_id != task_id or token.place != Place.INTEGRATING
+            or token.source_head != member["source_head"]
             or token.source_branch != member["source_branch"] or token.superseded
             or token.pending_action is not None or not satisfactory_validation(token)
             or workflow != expected):

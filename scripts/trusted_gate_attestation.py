@@ -32,7 +32,7 @@ _ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,127}")
 PINNED_PREDICATE_FIELDS = {
     "bundle_id", "pr_number", "target_ref", "target_base", "candidate_commit",
     "candidate_tree", "candidate_archive_sha256", "gate_argv", "gate_command_sha256",
-    "gate_policy_sha256", "runner_identity", "runner_version", "runner_image_id",
+    "candidate_history_sha256", "gate_policy_sha256", "runner_identity", "runner_version", "runner_image_id",
     "postgres_image_id", "firewall_image_id", "firewall_policy_sha256",
     "trusted_entrypoint_sha256", "network_probe_sha256", "attestation_signer_sha256",
     "execution_host",
@@ -74,7 +74,8 @@ def _digest(value: Any, label: str) -> None:
 def _validate_predicate(value: Any) -> dict:
     keys = {
         "bundle_id", "pr_number", "target_ref", "target_base", "candidate_commit",
-        "candidate_tree", "candidate_archive_sha256", "gate_argv", "gate_command_sha256",
+        "candidate_tree", "candidate_archive_sha256", "candidate_history_sha256",
+        "gate_argv", "gate_command_sha256",
         "gate_policy_sha256", "runner_identity", "runner_version", "runner_image_id",
         "postgres_image_id", "firewall_image_id", "firewall_policy_sha256",
         "trusted_entrypoint_sha256", "network_probe_sha256", "attestation_signer_sha256",
@@ -97,7 +98,8 @@ def _validate_predicate(value: Any) -> dict:
     for key in ("target_base", "candidate_commit", "candidate_tree"):
         if not isinstance(predicate[key], str) or not _OID.fullmatch(predicate[key]):
             raise AttestationError(f"Gate attestation {key} is invalid")
-    for key in ("candidate_archive_sha256", "gate_command_sha256", "gate_policy_sha256"):
+    for key in ("candidate_archive_sha256", "candidate_history_sha256", "gate_command_sha256",
+                "gate_policy_sha256"):
         _digest(predicate[key], key)
 
     argv = predicate["gate_argv"]
@@ -260,11 +262,12 @@ def _validate_predicate(value: Any) -> dict:
         raise AttestationError("Gate result times are reversed")
     preflight = _object(result["preflight"],
                         {"candidate_archive_readonly", "candidate_copied_to_scratch",
-                         "imported_package_path", "host_gateway_probe", "external_direct_ip_probe",
-                         "external_dns_probe"}, "preflight")
+                         "source_package_path", "gate_launch", "host_gateway_probe",
+                         "external_direct_ip_probe", "external_dns_probe"}, "preflight")
     if (preflight != {"candidate_archive_readonly": True,
                       "candidate_copied_to_scratch": True,
-                      "imported_package_path": "/scratch/workspace/src/skybuild/__init__.py",
+                      "source_package_path": "/scratch/workspace/src/skybuild/__init__.py",
+                      "gate_launch": "trusted_exec",
                       "host_gateway_probe": "blocked", "external_direct_ip_probe": "blocked",
                       "external_dns_probe": "blocked"}):
         raise AttestationError("Gate sandbox preflight did not pass")

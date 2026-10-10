@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +16,8 @@ import bundle_publisher as publisher
 import trusted_gate_attestation as gate
 from skybuild.manual_integration import DEFAULT_GATE_COMMAND, DEFAULT_GATE_COMMAND_SHA256
 from skybuild.workflow import Place, ResultState, TaskToken, ValidationResult, ValidationStage
+
+_ORIGINAL_VERIFY_TRUSTED_RUNTIME = publisher._verify_trusted_runtime
 
 
 def git(cwd, *args):
@@ -25,6 +29,7 @@ def git(cwd, *args):
 def world(tmp_path, monkeypatch):
     monkeypatch.setattr(publisher, "verify_skybuild", lambda _checkout: None)
     monkeypatch.setattr(publisher, "verify_skybuild_remote", lambda _checkout, _remote: None)
+    monkeypatch.setattr(publisher, "_verify_trusted_runtime", lambda *_args: None)
     trusted_source = tmp_path / "trusted-publisher"
     trusted_source.mkdir()
     git(trusted_source, "init", "-b", "main")
@@ -117,6 +122,7 @@ def qualification(world):
         "target_base": world["base"], "candidate_commit": world["candidate"],
         "candidate_tree": world["tree"],
         "candidate_archive_sha256": publisher._candidate_archive_sha256(world["repo"], world["candidate"]),
+        "candidate_history_sha256": "9" * 64,
         "gate_argv": DEFAULT_GATE_COMMAND, "gate_command_sha256": DEFAULT_GATE_COMMAND_SHA256,
         "gate_policy_sha256": bundle["policy_sha256"], "runner_identity": "local-test-runner",
         "runner_version": "1", "runner_image_id": "sha256:" + "1" * 64,
@@ -169,7 +175,8 @@ def qualification(world):
                    "started_at": "2026-10-10T10:00:00Z", "finished_at": "2026-10-10T10:01:00Z",
                    "preflight": {"candidate_archive_readonly": True,
                                  "candidate_copied_to_scratch": True,
-                                 "imported_package_path": "/scratch/workspace/src/skybuild/__init__.py",
+                                 "source_package_path": "/scratch/workspace/src/skybuild/__init__.py",
+                                 "gate_launch": "trusted_exec",
                                  "host_gateway_probe": "blocked",
                                  "external_direct_ip_probe": "blocked",
                                  "external_dns_probe": "blocked"}},
@@ -272,6 +279,69 @@ def test_github_pr_observer_uses_rest_base_sha_and_current_commit_checks(monkeyp
     assert calls == ["repos/stonesky-ai/skybuild/pulls/12",
                      f"repos/stonesky-ai/skybuild/commits/{commit}/check-runs?per_page=100",
                      f"repos/stonesky-ai/skybuild/commits/{commit}/status"]
+
+
+def test_owner_private_trust_config_requires_pinned_skybuild_ca(world, tmp_path):
+    token = tmp_path / "observer-token"
+    token.write_text("read-only-token\n")
+    token.chmod(0o600)
+    ca = tmp_path / "skybuild-ca.pem"
+    ca.write_bytes(b"pinned CA material\n")
+    pins = {key: qualification(world)["predicate"][key]
+            for key in publisher._RUNNER_PIN_FIELDS}
+    config = {"schema": "skybuild.publisher-trust.v1", "active_key_id": "local-test",
+              "publisher_commit": world["trusted_commit"], "runner_pins": pins,
+              "keys": {"local-test": str(world["key"])},
+              "skybuild_client": {"base_url": "https://skybuild.example/api/v1",
+                                  "token_path": str(token), "ca_file": str(ca),
+                                  "ca_sha256": hashlib.sha256(ca.read_bytes()).hexdigest()}}
+    path = tmp_path / "trusted-publisher.json"
+    raw = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
+    path.write_bytes(raw)
+    path.chmod(0o600)
+    keys, active, commit, observed_pins, client = publisher._read_trust_config(
+        path, hashlib.sha256(raw).hexdigest(), world["repo"])
+    assert keys["local-test"] == world["key"]
+    assert active == "local-test" and commit == world["trusted_commit"]
+    assert observed_pins == pins and client["ca_file"] == str(ca)
+
+    config["skybuild_client"]["ca_file"] = None
+    config["skybuild_client"]["ca_sha256"] = None
+    raw = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
+    path.write_bytes(raw)
+    with pytest.raises(publisher.PublisherError, match="requires a pinned CA file"):
+        publisher._read_trust_config(path, hashlib.sha256(raw).hexdigest(), world["repo"])
+
+
+def test_trusted_runtime_rejects_candidate_loaded_workflow(world, monkeypatch, tmp_path):
+    source_root = Path(__file__).resolve().parents[1]
+    monkeypatch.setattr(publisher, "__file__", str(source_root / "scripts/bundle_publisher.py"))
+    canonical_paths = [str(source_root / "src"), str(source_root / "scripts"), str(source_root)]
+    monkeypatch.setattr(sys, "path", canonical_paths + [entry for entry in sys.path
+                                                         if entry not in canonical_paths])
+    candidate_module = tmp_path / "candidate" / "src/skybuild/workflow.py"
+    candidate_module.parent.mkdir(parents=True)
+    candidate_module.write_text("# candidate workflow module\n")
+    monkeypatch.setitem(sys.modules, "skybuild.workflow",
+                        SimpleNamespace(__file__=str(candidate_module)))
+    with pytest.raises(publisher.PublisherError, match="skybuild.workflow is outside"):
+        _ORIGINAL_VERIFY_TRUSTED_RUNTIME(source_root, world["trusted_commit"])
+
+
+def test_trusted_runtime_rejects_untrusted_pythonpath(world, monkeypatch, tmp_path):
+    source_root = Path(__file__).resolve().parents[1]
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join((str(tmp_path), os.environ.get("PYTHONPATH", ""))))
+    with pytest.raises(publisher.PublisherError, match="canonical project_python"):
+        _ORIGINAL_VERIFY_TRUSTED_RUNTIME(source_root, world["trusted_commit"])
+
+
+@pytest.mark.parametrize("place", ["done", "hold", "deferred"])
+def test_only_integrating_workflow_can_publish(world, place):
+    member = frozen_bundle(world)["members"][0]
+    response = observe_task(world, "skybuild", member["task_id"])
+    response["token"]["place"] = place
+    with pytest.raises(publisher.PublisherError, match="Current SkyBuild task differs"):
+        publisher._verify_member_workflow(member, lambda _project, _task: response)
 
 
 def intent(world):
