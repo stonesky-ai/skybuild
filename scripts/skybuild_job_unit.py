@@ -212,10 +212,11 @@ class JobUnitManager:
         properties = (
             f"Description=SkyBuild launch {manifest['launch_nonce']}",
             "Nice=10", f"MemoryHigh={spec.memory_high_bytes}", f"MemoryMax={spec.memory_max_bytes}",
-            "MemorySwapMax=0", "OOMPolicy=continue", "NoNewPrivileges=yes",
+            "MemorySwapMax=0", "OOMPolicy=kill", "NoNewPrivileges=yes",
+            "KillMode=control-group", "TimeoutStopSec=10", "SendSIGKILL=yes",
             f"RuntimeMaxSec={spec.runtime_seconds}", f"WorkingDirectory={spec.worktree}",
             f"StandardInput=file:{spec.stdin_path}", f"StandardOutput=append:{spec.log_path}",
-            f"StandardError=append:{spec.log_path}", "RemainAfterExit=yes",
+            f"StandardError=append:{spec.log_path}", "RemainAfterExit=no",
         )
         command = [self.systemd_run, "--user", f"--unit={unit}", "--quiet", "--expand-environment=no"]
         for prop in properties:

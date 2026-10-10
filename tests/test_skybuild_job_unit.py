@@ -58,7 +58,8 @@ def test_launch_is_niced_capped_isolated_and_durable(tmp_path):
     assert f"Description=SkyBuild launch {manifest['launch_nonce']}" in command
     props = [command[index + 1] for index, item in enumerate(command) if item == "-p"]
     assert {"Nice=10", "MemoryHigh=1073741824", "MemoryMax=2147483648", "MemorySwapMax=0",
-            "RuntimeMaxSec=3600", "NoNewPrivileges=yes", "RemainAfterExit=yes",
+            "RuntimeMaxSec=3600", "NoNewPrivileges=yes", "RemainAfterExit=no",
+            "KillMode=control-group", "TimeoutStopSec=10", "SendSIGKILL=yes", "OOMPolicy=kill",
             f"WorkingDirectory={job.worktree}"} <= set(props)
     assert command[command.index("--") + 1:command.index("--") + 3] == ["/usr/bin/env", "-i"]
     assert command[-1] == "/usr/bin/true"
