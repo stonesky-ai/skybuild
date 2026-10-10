@@ -68,7 +68,9 @@ def promotion(tmp_path, monkeypatch, request):
         if args[:2] == ('tailscale', 'serve'):
             return json.dumps(data['serve'])
         if args[:2] == ('docker', 'inspect'):
-            return json.dumps([data['api'] if args[2] == 'skybuild-pilot-api' else data['db']])
+            containers = {'skybuild-pilot-api': data['api'], 'skybuild-pilot-pg': data['db'],
+                          'skybuild-workbench': data.get('gateway')}
+            return json.dumps([containers[args[2]]])
         if args[:3] == ('docker', 'exec', 'skybuild-pilot-api'):
             return json.dumps(data['installed'])
         if args[0] == 'curl':
@@ -121,6 +123,114 @@ def test_promotion_checks_are_read_only_and_refuse_binary_rollback(promotion):
     assert all(statement.startswith(('SELECT ', 'SET TRANSACTION ')) for statement in data['statements'])
     assert not any(any(word in args for word in ('stop', 'start', 'build', 'up', 'restart', 'migrate')) for args in data['calls'])
     assert 'password' not in json.dumps(report)
+
+
+def _enable_gateway(arguments, data):
+    state = arguments['state_dir']
+    (state / 'tls/ca.crt').chmod(0o600)
+    for name in ('server.crt', 'server.key'):
+        path = state / 'tls' / name
+        path.write_bytes(('fixture ' + name).encode())
+        path.chmod(0o600)
+    for name in ('workbench-gateway-token', 'workbench-user1-password'):
+        provisioner._write_new(state / 'secrets' / name, 'f' * 64, 0o600)
+    owner = arguments['checkout'] / 'ops/manual-pilot'
+    owner.mkdir(parents=True)
+    args = ['--container-listener']
+    for flag, value in (
+        ('--backend-connect-host', 'api'), ('--backend-port', '8000'),
+        ('--ca-file', '/tls/ca.crt'), ('--ssl-certfile', '/tls/server.crt'),
+        ('--ssl-keyfile', '/tls/server.key'), ('--host', '0.0.0.0'), ('--port', '8443'),
+        ('--workbench-project', 'skybuild'),
+        ('--workbench-token-file', '/run/secrets/skybuild-workbench-token'),
+        ('--workbench-password-file', '/run/secrets/skybuild-workbench-password'),
+    ):
+        args.extend((flag, value))
+    api_ports = {'8000/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '8000'}]}
+    data['api']['HostConfig']['PortBindings'] = api_ports
+    data['api']['NetworkSettings']['Ports'] = api_ports
+    network = {'NetworkID': '4' * 64, 'Aliases': ['api']}
+    data['api']['NetworkSettings']['Networks'] = {'skybuild-pilot_default': network}
+    data['db']['NetworkSettings'] = {'Networks': {'skybuild-pilot_default': {'NetworkID': '4' * 64}}}
+    gateway_ports = {'8443/tcp': [
+        {'HostIp': '127.0.0.1', 'HostPort': '8443'},
+        {'HostIp': arguments['tailnet_ip'], 'HostPort': '8443'},
+    ]}
+    gateway_mounts = [
+        (state / 'secrets/workbench-gateway-token', '/run/secrets/skybuild-workbench-token'),
+        (state / 'secrets/workbench-user1-password', '/run/secrets/skybuild-workbench-password'),
+        (state / 'tls/ca.crt', '/tls/ca.crt'),
+        (state / 'tls/server.crt', '/tls/server.crt'),
+        (state / 'tls/server.key', '/tls/server.key'),
+    ]
+    data['gateway'] = {
+        'Id': '5' * 64, 'Image': 'sha256:' + '6' * 64,
+        'State': {'Running': True},
+        'Config': {'User': str(os.getuid()), 'Entrypoint': ['python', '/runtime-ui/runtime_ui.py'],
+                   'Cmd': args, 'Labels': {'com.docker.compose.project': 'skybuild-pilot',
+                                           'com.docker.compose.service': 'workbench'}},
+        'HostConfig': {'PortBindings': gateway_ports, 'Memory': 256 * 1024**2, 'PidsLimit': 64,
+                       'RestartPolicy': {'Name': 'unless-stopped'}, 'Privileged': False,
+                       'CapAdd': None, 'NetworkMode': 'skybuild-pilot_default'},
+        'NetworkSettings': {'Ports': gateway_ports,
+                            'Networks': {'skybuild-pilot_default': {'NetworkID': '4' * 64}}},
+        'Mounts': [{'Source': str(source), 'Destination': destination, 'RW': False}
+                   for source, destination in gateway_mounts],
+    }
+    arguments.update(gateway_container='5' * 64, gateway_image='sha256:' + '6' * 64,
+                     compose_owner_path=owner)
+
+
+def test_gateway_topology_checks_exact_compose_owner_and_split_bindings(promotion):
+    arguments, data = promotion
+    _enable_gateway(arguments, data)
+    report = controller.promotion_preflight(**arguments)
+    assert report['ready_for_operator_promotion'] is True
+    assert report['gateway_container'] == arguments['gateway_container']
+    assert report['gateway_image'] == arguments['gateway_image']
+    assert report['api_gateway_topology'] == 'loopback API 8000 + pinned Workbench 8443'
+    assert data['controller_kwargs']['compose_owner_path'] == arguments['compose_owner_path']
+    assert not any(args[:3] == ('docker', 'inspect', 'skybuild-pilot-workbench') for args in data['calls'])
+
+
+@pytest.mark.parametrize('boundary', [
+    'gateway-id', 'gateway-image', 'api-public-bind', 'gateway-public-bind', 'extra-gateway-port',
+    'gateway-network', 'missing-network-id', 'db-network', 'gateway-label', 'gateway-entrypoint',
+    'gateway-argument', 'argument-without-value', 'duplicate-argument', 'gateway-mount',
+    'writable-secret', 'gateway-memory', 'gateway-user',
+    'gateway-not-ready', 'compose-owner-symlink', 'partial-gateway-pins',
+])
+def test_gateway_topology_rejects_identity_and_boundary_changes(promotion, boundary):
+    arguments, data = promotion
+    _enable_gateway(arguments, data)
+    if boundary == 'gateway-id': data['gateway']['Id'] = '7' * 64
+    elif boundary == 'gateway-image': data['gateway']['Image'] = 'sha256:' + '7' * 64
+    elif boundary == 'api-public-bind': data['api']['HostConfig']['PortBindings']['8000/tcp'].append(
+        {'HostIp': arguments['tailnet_ip'], 'HostPort': '8443'})
+    elif boundary == 'gateway-public-bind': data['gateway']['HostConfig']['PortBindings']['8443/tcp'][0]['HostIp'] = '0.0.0.0'
+    elif boundary == 'extra-gateway-port': data['gateway']['NetworkSettings']['Ports']['9000/tcp'] = []
+    elif boundary == 'gateway-network': data['gateway']['NetworkSettings']['Networks']['foreign'] = {'NetworkID': '8' * 64}
+    elif boundary == 'missing-network-id':
+        del data['api']['NetworkSettings']['Networks']['skybuild-pilot_default']['NetworkID']
+    elif boundary == 'db-network': data['db']['NetworkSettings']['Networks']['skybuild-pilot_default']['NetworkID'] = '8' * 64
+    elif boundary == 'gateway-label': data['gateway']['Config']['Labels']['com.docker.compose.service'] = 'api'
+    elif boundary == 'gateway-entrypoint': data['gateway']['Config']['Entrypoint'] = ['python', '-m', 'wrong']
+    elif boundary == 'gateway-argument': data['gateway']['Config']['Cmd'][data['gateway']['Config']['Cmd'].index('--backend-port') + 1] = '8443'
+    elif boundary == 'argument-without-value': data['gateway']['Config']['Cmd'][-2:] = ['--workbench-password-file']
+    elif boundary == 'duplicate-argument': data['gateway']['Config']['Cmd'].append('--port')
+    elif boundary == 'gateway-mount': data['gateway']['Mounts'][0]['Source'] = str(arguments['state_dir'] / 'secrets/other')
+    elif boundary == 'writable-secret': data['gateway']['Mounts'][0]['RW'] = True
+    elif boundary == 'gateway-memory': data['gateway']['HostConfig']['Memory'] = 0
+    elif boundary == 'gateway-user': data['gateway']['Config']['User'] = '0' if os.getuid() else '999'
+    elif boundary == 'gateway-not-ready': data['ready']['status'] = 'unavailable'
+    elif boundary == 'compose-owner-symlink':
+        owner = arguments['compose_owner_path']
+        actual = owner.with_name('manual-pilot-real')
+        owner.rename(actual)
+        owner.symlink_to(actual, target_is_directory=True)
+    elif boundary == 'partial-gateway-pins': arguments['compose_owner_path'] = None
+    with pytest.raises(ValueError):
+        controller.promotion_preflight(**arguments)
 
 
 @pytest.mark.parametrize('boundary', [
@@ -207,6 +317,65 @@ def test_promotion_cli_hides_arbitrary_driver_errors(promotion, monkeypatch, cap
     output = capsys.readouterr().out
     assert 'SECRET' not in output
     assert json.loads(output)['no_changes_made'] is True
+
+
+def test_gateway_promotion_cli_dispatches_all_explicit_pins(promotion, monkeypatch, capsys):
+    arguments, _ = promotion
+    expected = dict(
+        checkout=arguments['checkout'], expected_sha=arguments['expected_sha'],
+        published_ref=arguments['published_ref'], current_sha=arguments['current_sha'],
+        state_dir=arguments['state_dir'], hostname=arguments['hostname'], tailnet_ip=arguments['tailnet_ip'],
+        api_container=arguments['api_container'], db_container=arguments['db_container'],
+        gateway_container='5' * 64, gateway_image='sha256:' + '6' * 64,
+        api_image=arguments['api_image'], system_id=arguments['system_id'],
+        ca_pem_sha256=arguments['ca_pem_sha256'], compose_owner_path=arguments['checkout'] / 'ops/manual-pilot',
+        schema_transition=arguments['schema_transition'],
+    )
+    seen = {}
+
+    def stub(checkout, expected_sha, published_ref, **kwargs):
+        seen.update(checkout=checkout, expected_sha=expected_sha, published_ref=published_ref, **kwargs)
+        return {'ready_for_operator_promotion': True, 'no_changes_made': True}
+
+    monkeypatch.setattr(controller, 'promotion_preflight', stub)
+    flags = [
+        '--promotion', '--checkout', str(expected['checkout']), '--expected-sha', expected['expected_sha'],
+        '--published-ref', expected['published_ref'], '--current-sha', expected['current_sha'],
+        '--state-dir', str(expected['state_dir']), '--hostname', expected['hostname'],
+        '--tailnet-ip', expected['tailnet_ip'], '--api-container-id', expected['api_container'],
+        '--db-container-id', expected['db_container'], '--api-image-id', expected['api_image'],
+        '--gateway-container-id', expected['gateway_container'], '--gateway-image-id', expected['gateway_image'],
+        '--database-system-id', expected['system_id'], '--ca-pem-sha256', expected['ca_pem_sha256'],
+        '--compose-owner-path', str(expected['compose_owner_path']),
+        '--schema-transition', expected['schema_transition'],
+    ]
+    assert controller.main(flags) == 0
+    capsys.readouterr()
+    assert seen == expected
+
+
+def test_gateway_promotion_cli_rejects_partial_identity_set(promotion, monkeypatch, capsys):
+    arguments, _ = promotion
+    called = False
+
+    def fail_if_called(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError('preflight must not run with partial gateway pins')
+
+    monkeypatch.setattr(controller, 'promotion_preflight', fail_if_called)
+    flags = ['--promotion', '--checkout', str(arguments['checkout']),
+             '--expected-sha', arguments['expected_sha'], '--published-ref', arguments['published_ref'],
+             '--current-sha', arguments['current_sha'], '--state-dir', str(arguments['state_dir']),
+             '--hostname', arguments['hostname'], '--tailnet-ip', arguments['tailnet_ip'],
+             '--api-container-id', arguments['api_container'], '--db-container-id', arguments['db_container'],
+             '--api-image-id', arguments['api_image'], '--database-system-id', arguments['system_id'],
+             '--ca-pem-sha256', arguments['ca_pem_sha256'], '--gateway-container-id', '5' * 64]
+    assert controller.main(flags) == 2
+    assert called is False
+    report = json.loads(capsys.readouterr().out)
+    assert report['ready_for_operator_promotion'] is False
+    assert report['no_changes_made'] is True
 
 
 def test_source_manifest_matches_exact_git_blob_bytes():

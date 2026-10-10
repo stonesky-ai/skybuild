@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
 import manual_pilot_provision as provisioner  # noqa: E402
 from manual_pilot_provision import init_secrets  # noqa: E402
 import manual_pilot_controller as controller  # noqa: E402
+import manual_pilot_tls as tls  # noqa: E402
 
 
 def test_promotion_accepts_only_additive_012_authority_migration():
@@ -122,6 +123,70 @@ def test_preflight_rejects_dirty_or_unpublished_head(tmp_path, monkeypatch):
     monkeypatch.setattr(controller, "_command", command)
     report = controller.preflight(checkout, approved_sha, "refs/heads/dev-002")
     assert report["checks"]["published_clean_head"]["ok"] is False
+
+
+def test_tls_controller_accepts_explicit_retained_compose_owner_path(tmp_path, monkeypatch):
+    checkout = tmp_path / 'source-clone'
+    checkout.mkdir()
+    state = tmp_path / 'private-state'
+    state.mkdir(mode=0o700)
+    owner = tmp_path / 'retained-main-checkout/ops/manual-pilot'
+    owner.mkdir(parents=True)
+    sha = 'a' * 40
+    image = 'sha256:' + 'b' * 64
+    hostname = 'controller.tail.ts.net'
+    ip = '100.100.1.2'
+    rows = {
+        'skybuild-pilot-api': {
+            'Config': {'Labels': {'com.docker.compose.project': 'skybuild-pilot',
+                                  'com.docker.compose.service': 'api',
+                                  'com.docker.compose.project.working_dir': str(owner)}},
+            'State': {'Running': True}, 'Image': image, 'Mounts': [],
+            'NetworkSettings': {'Ports': {}}},
+        'skybuild-pilot-pg': {
+            'Config': {'Labels': {'com.docker.compose.project': 'skybuild-pilot',
+                                  'com.docker.compose.service': 'db',
+                                  'com.docker.compose.project.working_dir': str(owner)}},
+            'State': {'Running': True}, 'Image': 'sha256:' + 'c' * 64,
+            'NetworkSettings': {'Ports': {'5432/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '55432'}]}},
+            'Mounts': [{'Destination': '/var/lib/postgresql/data', 'Source': str(state / 'pgdata')}]},
+    }
+
+    def command(*args):
+        if args[:4] == ('git', '-C', str(checkout), 'rev-parse'):
+            return str(checkout) if '--show-toplevel' in args else sha
+        if args[:4] == ('git', '-C', str(checkout), 'remote'):
+            return 'https://github.com/stonesky-ai/skybuild.git'
+        if args[:4] == ('git', '-C', str(checkout), 'status'):
+            return ''
+        if args[:4] == ('git', '-C', str(checkout), 'ls-remote'):
+            return sha + '\trefs/heads/dev-017'
+        if args[:3] == ('tailscale', 'status', '--json'):
+            return json.dumps({'BackendState': 'Running', 'Self': {
+                'DNSName': hostname, 'TailscaleIPs': [ip]}})
+        if args[:2] == ('docker', 'inspect'):
+            return json.dumps([rows[args[2]]])
+        if args[:3] == ('docker', 'image', 'inspect'):
+            return image if args[3] == 'skybuild-pilot-api:local' else 'sha256:' + 'c' * 64
+        raise AssertionError(args)
+
+    monkeypatch.setattr(tls, 'command', command)
+    tls.controller(checkout, sha, state, hostname, ip, expected_api_image=image,
+                   published_ref='refs/heads/dev-017', compose_owner_path=owner)
+
+
+def test_tls_controller_rejects_compose_owner_symlink(tmp_path, monkeypatch):
+    checkout = tmp_path / 'source-clone'
+    checkout.mkdir()
+    state = tmp_path / 'private-state'
+    state.mkdir(mode=0o700)
+    real = tmp_path / 'retained/ops/manual-pilot-real'
+    real.mkdir(parents=True)
+    owner = tmp_path / 'retained/ops/manual-pilot'
+    owner.symlink_to(real, target_is_directory=True)
+    with pytest.raises(tls.TLSError, match='exact retained Compose'):
+        tls.controller(checkout, 'a' * 40, state, 'controller.tail.ts.net', '100.100.1.2',
+                       compose_owner_path=owner)
 
 
 def test_provision_refuses_wrong_port_or_state_before_connect(tmp_path, monkeypatch):
