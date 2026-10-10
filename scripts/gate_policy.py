@@ -52,7 +52,7 @@ FOCUSED_FIELDS = {"schema", "permit_id", "policy_sha256", "consumption_sha256", 
                   "input_sha256", "project_id", "task_id", "assignment_id", "worker_id", "brief_sha256",
                   "approved_patch_sha256", "source_head", "source_tree", "base_sha", "workflow", "stage",
                   "profile", "command", "command_sha256", "runner_source", "execution_host", "images",
-                  "counts", "verdict", "isolation"}
+                  "reported_counts", "verdict", "isolation"}
 
 
 class PolicyError(RuntimeError):
@@ -178,7 +178,7 @@ def sign_focused(isolation: dict, authorization: "Authorization", key_path: Path
                "command_sha256": isolation["gate_command_sha256"],
                "runner_source": authorization.policy["runner_source"],
                "execution_host": authorization.policy["execution_host"], "images": authorization.policy["images"],
-               "counts": counts, "verdict": "pass" if (isolation["result"]["exit_code"] == 0
+               "reported_counts": counts, "verdict": "pass" if (isolation["result"]["exit_code"] == 0
                    and counts["passed"] > 0 and not any(counts[name] for name in
                        ("failed", "errors", "skipped", "xfailed", "xpassed"))) else "fail",
                "isolation": isolation}
@@ -191,13 +191,15 @@ def verify_focused(envelope: dict, key: dict, expected: dict) -> dict:
     payload = fields(verify(envelope, FOCUSED_RESULT, key), FOCUSED_FIELDS)
     if payload["schema"] != FOCUSED_RESULT or any(payload.get(name) != value for name, value in expected.items()):
         raise PolicyError("Focused result differs from exact approved task/source/stage")
-    counts = fields(payload["counts"], {"collected", "selected", "passed", "failed", "errors", "skipped", "deselected", "xfailed", "xpassed"})
+    # Candidate stdout is meaningful here only for the two exact owner-approved
+    # known trees. It cannot establish test counts against arbitrary hostile code.
+    counts = fields(payload["reported_counts"], {"collected", "selected", "passed", "failed", "errors", "skipped", "deselected", "xfailed", "xpassed"})
     if (any(type(value) is not int or value < 0 for value in counts.values())
             or counts["selected"] != sum(counts[name] for name in ("passed", "failed", "errors", "skipped", "xfailed", "xpassed"))
             or counts["collected"] != counts["selected"] + counts["deselected"]
             or counts["passed"] < 1 or any(counts[name] for name in ("failed", "errors", "skipped", "xfailed", "xpassed"))
             or payload["verdict"] != "pass"):
-        raise PolicyError("Focused PASS requires actual nonempty passing collection")
+        raise PolicyError("Focused PASS requires reported nonempty passing collection")
     isolation = payload["isolation"]
     if (not isinstance(isolation, dict) or isolation.get("result", {}).get("exit_code") != 0
             or isolation.get("cleanup", {}).get("status") != "confirmed"

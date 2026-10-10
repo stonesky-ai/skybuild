@@ -766,7 +766,7 @@ def test_focused_real_builder_inspect_cleanup_sign_and_verify(monkeypatch, tmp_p
     receipt = json.loads(Path(result["attestation"]).read_bytes())
     payload = policy.verify_focused(receipt, {"key_id": "key-1", "principal": "trusted-validator", "key_path": str(key)},
                                     {"source_head": predicate["candidate_commit"], "stage": "unit"})
-    assert payload["counts"]["passed"] == 5 and payload["counts"]["collected"] == 24
+    assert payload["reported_counts"]["passed"] == 5 and payload["reported_counts"]["collected"] == 24
     assert payload["command"] == policy.FOCUSED_COMMANDS["petri-client-unit-v1"]
     assert "bundle_id" not in payload["isolation"] and "pr_number" not in payload["isolation"]
     assert result["validation_passed"] is True and model.released
