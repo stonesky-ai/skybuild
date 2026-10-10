@@ -1,0 +1,104 @@
+#!/bin/sh
+# Start the qualified existing database, current API, and real-data Workbench.
+set -eu
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+project_root=$(CDPATH='' cd -- "$script_dir/.." && pwd -P)
+SKYBUILD_PILOT_STATE=${SKYBUILD_PILOT_STATE:-/home/kevin/my_code/skybuild-pilot-state}
+SKYBUILD_PILOT_TLS_UID=${SKYBUILD_PILOT_TLS_UID:-1000}
+SKYBUILD_PILOT_TAILNET_IP=${SKYBUILD_PILOT_TAILNET_IP:-100.95.249.118}
+export SKYBUILD_PILOT_STATE SKYBUILD_PILOT_TLS_UID SKYBUILD_PILOT_TAILNET_IP
+database=$("$project_root/scripts/project_python" - "$SKYBUILD_PILOT_STATE" <<'PY'
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+def require(condition):
+    if not condition:
+        raise ValueError("Pilot qualification mismatch")
+
+
+try:
+    state = Path(sys.argv[1]).resolve(strict=True)
+    expected_id = "072a77f1cc5e35a07296ab60fe9c9962ee358285f5dad7bbcc8dff966c0a0fcf"
+    result = subprocess.run(["docker", "inspect", "skybuild-pilot-pg"],
+                            capture_output=True, text=True, check=True, timeout=10)
+    container, = json.loads(result.stdout)
+    require(container["Id"] == expected_id)
+    require(container["Image"] == "sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54")
+    config = container["Config"]
+    require(config["Image"] == "postgres:16")
+    require(config["Labels"]["com.docker.compose.project"] == "skybuild-pilot")
+    require(config["Labels"]["com.docker.compose.service"] == "db")
+    environment = dict(item.split("=", 1) for item in config["Env"])
+    require(environment["PGDATA"] == "/var/lib/postgresql/data")
+    require(environment["POSTGRES_PASSWORD_FILE"] == "/run/secrets/admin-password")
+    require(environment.get("POSTGRES_USER", "postgres") == "postgres")
+    require(environment.get("POSTGRES_DB", "postgres") == "postgres")
+    mounts = {mount["Destination"]: mount for mount in container["Mounts"]}
+    data = mounts["/var/lib/postgresql/data"]
+    require(data["Type"] == "bind" and data["RW"] is True)
+    require(Path(data["Source"]).resolve(strict=True) == state / "pgdata")
+    secret = mounts["/run/secrets/admin-password"]
+    require(secret["Type"] == "bind" and secret["RW"] is False)
+    require(Path(secret["Source"]).resolve(strict=True) == state / "secrets/admin-password")
+except Exception:
+    # The inspected environment can contain secrets. Never print it or driver errors.
+    print("Existing database identity or configuration is not the qualified SkyBuild pilot.", file=sys.stderr)
+    sys.exit(1)
+print(expected_id)
+PY
+)
+if [ "$(docker inspect --format '{{.State.Running}}' "$database")" != true ]; then
+    docker start "$database" >/dev/null
+fi
+attempt=0
+until [ "$(docker inspect --format '{{.State.Health.Status}}' "$database")" = healthy ]; do
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge 60 ]; then
+        echo 'Existing SkyBuild database did not become healthy within 60 seconds.' >&2
+        exit 1
+    fi
+    sleep 1
+done
+system_identifier=$(docker exec --user postgres "$database" psql -X -U postgres -d postgres -Atqc \
+    'SELECT system_identifier FROM pg_control_system()')
+if [ "$system_identifier" != 7694565377149345831 ]; then
+    echo 'Existing PostgreSQL cluster identity does not match the qualified SkyBuild pilot.' >&2
+    exit 1
+fi
+
+compose() {
+    docker compose \
+        -f "$project_root/ops/manual-pilot/compose.yaml" \
+        -f "$project_root/ops/manual-pilot/compose.tls.yaml" \
+        -f "$project_root/ops/runtime-ui/backend.yaml" \
+        -f "$project_root/ops/runtime-ui/compose.yaml" "$@"
+}
+
+wait_ready() {
+    port=$1
+    component=$2
+    hostname=jeltz.tail991ac1.ts.net
+    attempt=0
+    while [ "$attempt" -lt 30 ]; do
+        if response=$(curl --fail --silent --noproxy '*' \
+            --connect-timeout 1 --max-time 2 \
+            --cacert "$SKYBUILD_PILOT_STATE/tls/ca.crt" \
+            --resolve "$hostname:$port:127.0.0.1" \
+            "https://$hostname:$port/health/ready" 2>/dev/null) && \
+            [ "$response" = '{"status":"ready"}' ]; then
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        sleep 1
+    done
+    echo "$component did not become TLS-verified ready within 90 seconds." >&2
+    return 1
+}
+
+compose up -d --no-deps --no-build api
+wait_ready 8000 'SkyBuild API'
+compose up -d --no-deps --no-build workbench
+wait_ready 8443 'SkyBuild Workbench'
+echo 'SkyBuild database, API, and Workbench are ready.'

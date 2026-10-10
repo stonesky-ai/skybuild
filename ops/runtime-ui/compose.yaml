@@ -1,0 +1,45 @@
+name: skybuild-pilot
+services:
+  workbench:
+    image: sha256:77bc01222c9c018d44968198e26d0be4618825b35ba07bb8c993002bce4f51c5
+    pull_policy: never
+    container_name: skybuild-workbench
+    user: "1000"
+    read_only: true
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+    command:
+      - python
+      - /runtime-ui/runtime_ui.py
+      - --ui-checkout
+      - /runtime-ui/ui
+      - --api-checkout
+      - /runtime-ui/api-source
+      - --ca-file
+      - /tls/ca.crt
+      - --backend-hostname
+      - jeltz.tail991ac1.ts.net
+      - --backend-connect-host
+      - api
+      - --backend-port
+      - "8000"
+      - --host
+      - 0.0.0.0
+      - --container-listener
+      - --port
+      - "8443"
+      - --ssl-certfile
+      - /tls/server.crt
+      - --ssl-keyfile
+      - /tls/server.key
+    ports:
+      - "127.0.0.1:8443:8443"
+      - "100.95.249.118:8443:8443"
+    volumes:
+      - /home/kevin/my_code/skybuild-live-workbench-stack/ops/runtime-ui:/runtime-ui:ro
+      - /home/kevin/my_code/skybuild-pilot-state/tls/ca.crt:/tls/ca.crt:ro
+      - /home/kevin/my_code/skybuild-pilot-state/tls/server.crt:/tls/server.crt:ro
+      - /home/kevin/my_code/skybuild-pilot-state/tls/server.key:/tls/server.key:ro
+    mem_limit: 256m
+    pids_limit: 64
+    restart: unless-stopped
