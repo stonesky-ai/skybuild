@@ -145,15 +145,59 @@ Each slice targets roughly 30 minutes of focused work. Estimated code generation
 | 01 | Four compact classes/enums and bounded token/result serialization; preserve task identity and JSON round-trip. | None | Luna | 10–15 min | Sol |
 | 02 | Transition catalogue and Ready, Working, Validating, Integrating and Done kernel; reject every unnamed movement, expose disabled reasons. | 01 | Luna | 15–20 min | Sol |
 | 03 | Validation substages, fault-to-Ready, hold/defer/resume and Done reopening; cover all legal source places and evidence invalidation. | 02 | Sol | 20–30 min | Sol |
-| 04 | Store transaction, next numbered migration and claim-to-Working atomicity; journal/idempotency/fence/rollback checks. | 03 | Sol | 25–40 min | Sol |
-| 05 | Existing API/client action adaptation and computed capabilities; compatible fields, auth and stale-edit checks. | 04 | Sol | 15–25 min | Sol |
+| 04 | Store transaction, next numbered migration and claim-to-Working atomicity; journal/idempotency/fence/rollback checks. | 02 | Sol | 25–40 min | Sol |
+| 05 | Existing API/client action adaptation and computed capabilities; compatible fields, auth and stale-edit checks. | 03, 04 | Sol | 15–25 min | Sol |
 | 06 | Worker/dispatcher/result wiring for Ready, Working and Validating, plus Working failure; reject stale/duplicate assignments and results. | 05 | Sol | 15–25 min | Grok* |
-| 07 | Check/review/rebase result wiring; all five substages, independent review, exact inputs and late-pass-after-failure check. | 06 | Sol | 20–30 min | Grok* |
-| 08 | Bundle freeze/exclusion/gate/publication wiring for Validating, Integrating and Done, plus Integrating failure; retain unknown publication and exact inclusion checks. | 07 | Sol | 25–40 min | Sol |
-| 09 | Existing dependency/due/reconciliation/structural actions adapted; preserve generation, lineage, effects and hold/defer semantics. | 08 | Sol | 25–40 min | Sol |
-| 10 | Board/count/next-work query and seven-column accessible workbench; global totals, badges and safe rendering. | 05, 09 | Luna | 20–30 min | Sol |
-| 11 | Guarded workbench controls, dependency/evidence detail and shared-contract diagram; expected revisions and keyboard flow. | 10 | Luna | 20–30 min | Sol |
-| 12 | Full transition/race coverage, two-project acceptance and migration/promotion handoff. | 11 | Sol | 20–35 min | Sol |
+| 07 | Check/review/rebase result wiring; all five substages, independent review, exact inputs and late-pass-after-failure check. | 05 | Sol | 20–30 min | Grok* |
+| 08 | Bundle freeze/exclusion/gate/publication wiring for Validating, Integrating and Done, plus Integrating failure; retain unknown publication and exact inclusion checks. | 05 | Sol | 25–40 min | Sol |
+| 09 | Existing dependency/due/reconciliation/structural actions adapted; preserve generation, lineage, effects and hold/defer semantics. | 05 | Sol | 25–40 min | Sol |
+| 10 | Board/count/next-work query and seven-column accessible workbench; global totals, badges and safe rendering. | 05 | Luna | 20–30 min | Sol |
+| 11 | Guarded workbench controls, dependency/evidence detail and shared-contract diagram; expected revisions and keyboard flow. | 09, 10 | Luna | 20–30 min | Sol |
+| 12 | Full transition/race coverage, two-project acceptance and migration/promotion handoff. | 06, 07, 08, 09, 11 | Sol | 20–35 min | Sol |
+
+### Dependencies and parallel generation
+
+The table lists **required implementation prerequisites**, not a preferred serial order. After a prerequisite's contract and exact source revision are accepted for downstream work, independent children may generate in isolated worktrees. Generation does not require waiting for an unrelated sibling. Final integration and acceptance still require every relevant dependency and review to pass.
+
+| Group | Tasks available for generation | What unlocks the group |
+| --- | --- | --- |
+| 1 | 01 | Initial task selection. |
+| 2 | 02 | Token/result contracts from 01. |
+| 3 | **03 and 04 in parallel** | Transition/event interface from 02. |
+| 4 | 05 | Both complete kernel behavior (03) and transactional Store boundary (04). |
+| 5 | **06, 07, 08, 09 and 10 in parallel** | Stable guarded API/client and capability contract from 05. |
+| 6 | 11 | Dependency/structural semantics from 09 and board from 10; other group-5 adapters may still be running. |
+| 7 | 12 | Worker (06), validation (07), integration (08), reconciliation (09) and complete workbench (11). |
+
+These groups describe opportunities, not fleet/model launch instructions. Maximum planned author width is **five**, subject to actual approved slots and resource limits. Fewer slots can execute the same graph without changing its dependencies.
+
+~~~mermaid
+flowchart LR
+    Contracts[01 Token and result contracts] --> Catalogue[02 Transition and event interface]
+    Catalogue --> Behavior[03 Validation and control behavior]
+    Catalogue --> Persistence[04 Store and claim transaction]
+    Behavior --> API[05 API and client]
+    Persistence --> API
+    API --> Workers[06 Worker adapters]
+    API --> Validation[07 Check review and rebase adapters]
+    API --> Integration[08 Bundle and publication adapters]
+    API --> Reconciliation[09 Dependencies and reconciliation]
+    API --> Board[10 Board and read queries]
+    Reconciliation --> Controls[11 Workbench controls and detail]
+    Board --> Controls
+    Workers --> Acceptance[12 Combined acceptance]
+    Validation --> Acceptance
+    Integration --> Acceptance
+    Reconciliation --> Acceptance
+    Controls --> Acceptance
+~~~
+
+Keep the parallel boundaries concrete:
+
+- **02 freezes the interface:** event names/payloads, result inputs, transition signatures and journal facts. **03 owns pure kernel behavior; 04 owns Store/claim/migration code.** Store tests may use the frozen interface while 03 is in progress; 05 verifies the real combination before opening its downstream group.
+- **05 freezes the adapter seam:** one guarded mutation path, typed result envelope, capabilities and compatible response shape. **06, 07 and 08 own their separate producer adapters and fixtures.** They test against that seam with fake counterpart events, so the validation adapter does not wait for the worker adapter, and the integration adapter does not wait for the validation adapter. End-to-end sequencing remains unchanged.
+- **09 owns dependency/due/structural Store and scheduler changes. 10 owns read-only board/count queries and board rendering.** Task 10 consumes the existing dependency graph and the frozen response shape; it does not need new structural mutations. **11 waits for both**, then adds controls and detail to the completed board.
+- Pin owned files/symbols in each assignment. Keep shared `workflow.py`, Store mutation entry points, migration numbering and API result schemas with their named owner. Parallel adapters call those interfaces instead of editing them independently. If an actual missing interface requires a shared edit, resolve it with that owner and update the dependency graph before dispatch. Task 12 combines exact reviewed heads and checks the complete behavior.
 
 ### Estimate assumptions and total build time
 
@@ -171,7 +215,7 @@ Use Luna for bounded records, a fixed transition catalogue and UI work against a
 | Final combined gate and bundle handling | 60–120 min | One combined candidate assumed; use actual required suite duration when known. |
 | **Total serial build budget** | **506–870 min (about 8.5–14.5 hours)** | Excludes unavailable capacity, new missing components and production promotion. |
 
-The current dependency chain is mostly serial, so extra author models do not divide this total by worker count. Some review and CPU tests can overlap later work after their prerequisite boundary is accepted, but the estimate does not assume those savings. Allow roughly one to two working days when qualified model slots and the existing component seams are available. Keep the earlier 30-minute slice target as a checkpoint rule; slices 04, 08, 09 and 12 may overrun it and should split at a real interface if needed. Re-estimate from actual generation, review and gate times after slices 01–03 instead of treating these ranges as observed performance.
+Total generation work remains **230–360 model-minutes**. With enough author slots for the graph above, the ideal generation-only critical path is **130–205 minutes (2 hours 10 minutes to 3 hours 25 minutes)**: 01, 02, 04, 05, 09, 11, 12. This calculation takes the slower prerequisite at each join; task 10 also gates 11 but does not lengthen the current range. It excludes prerequisite reviews, CPU tests, correction rounds, slot waits, shared-file coordination and final integration. Do not divide the total serial build budget by five or promise that the full build fits this generation-only window. Review/test overlap may reduce elapsed time; retain **8.5–14.5 hours as the conservative serial build budget** until actual throughput is measured. Keep the earlier 30-minute slice target as a checkpoint rule; slices 04, 08, 09 and 12 may overrun it and should split at a real interface if needed. Re-estimate from actual generation, review and gate times after slices 01–03 instead of treating these ranges as observed performance.
 
 Every code task gets applicable checks and separate independent exact-head review. Integrate eligible reviewed tasks using the existing frozen-bundle process, in dependency order, at most 20 tasks per bundle. No task-specific PR or new delivery machinery is required. Reuse accepted controls/components rather than blocking slices on unfinished umbrella tasks. If a required component seam is absent, name the missing interface and split only that actual gap.
 
@@ -185,7 +229,7 @@ Every code task gets applicable checks and separate independent exact-head revie
 
 The initial draft had 30 slices, eight domain/service types, a SNAKES adapter, and an ephemeral executable net per transaction. That was more machinery than this task model warrants. This revision reduces the design to four classes, one transition table, existing Store/API seams and 12 slices. The optional library experiment is not a prerequisite. No new database, token authority, event bus, worker daemon, scheduler or policy framework is needed.
 
-For quickest useful insertion, deliver slices 01–05 as the kernel and compatible API, then wire existing producers in 06–09 and expose them in 10–11. Do not migrate live tasks or claim finished wiring after the kernel alone. Slice 12 verifies the integrated behavior. Start priority ordering with existing explicit priority, unmet dependency display and ready age; add transitive urgency only if the simple ordering actually fails to surface useful work.
+For quickest useful insertion, deliver slices 01–05 as the kernel and compatible API, with 03 and 04 in parallel. Then generate adapters 06–09 and the board 10 concurrently; controls 11 follow 09 and 10. Do not migrate live tasks or claim finished wiring after the kernel alone. Slice 12 verifies the integrated behavior. Start priority ordering with existing explicit priority, unmet dependency display and ready age; add transitive urgency only if the simple ordering actually fails to surface useful work.
 
 Open implementation choices are limited to the exact observed legacy-phase mapping, current project check profile, and any missing accepted component seams. Existing fixed guards and the shared catalogue are sufficient; no configurable guard language is planned.
 
