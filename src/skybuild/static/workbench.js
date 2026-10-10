@@ -9,6 +9,9 @@
   const structure = byId("structure-form");
   let token = "", project = "", selected = null, busy = false, stale = false, epoch = 0, controller = null, reconcileCursor = null, structuralPlan = null, historyOffset = 0, historyHasMore = false, taskCursor = null, taskHasMore = false;
 
+  let boardOffset = 0, boardNext = null;
+  const places = ["ready", "working", "validating", "integrating", "done", "deferred", "hold"];
+
   class ApiError extends Error {
     constructor(status) { super(`Request failed (${status})`); this.status = status; }
   }
@@ -24,6 +27,10 @@
     byId("token").disabled = connected || busy;
     byId("connect").disabled = connected || busy;
     byId("logout").disabled = !connected;
+    byId("refresh-board").disabled = !connected || busy;
+    byId("first-board").disabled = !connected || busy || boardOffset === 0;
+    byId("next-board").disabled = !connected || busy || boardNext === null;
+    for (const button of byId("workflow-board").querySelectorAll("button")) button.disabled = busy || !connected;
     byId("refresh-tasks").disabled = !connected || busy;
     byId("first-tasks").disabled = !connected || busy || taskCursor === null;
     byId("next-tasks").disabled = !connected || busy || !taskHasMore;
@@ -51,6 +58,9 @@
     byId("task-list").replaceChildren(); byId("history").replaceChildren();
     byId("lineage").replaceChildren();
     byId("task-count").textContent = "Not connected";
+    boardOffset = 0; boardNext = null;
+    byId("workflow-board").replaceChildren();
+    byId("board-summary").textContent = "Not connected";
     byId("selection").textContent = "Select a task to view its definition and history.";
     byId("full-task-record").textContent = "No task selected.";
     controls();
@@ -130,6 +140,46 @@
     return true;
   }
 
+  async function loadBoard(offset = 0) {
+    const board = await request(`workflow-board?limit=100&offset=${offset}`);
+    const root = byId("workflow-board"); root.replaceChildren();
+    for (const place of places) {
+      const column = board.columns.find(item => item.place === place);
+      const section = document.createElement("section"), heading = document.createElement("h3");
+      section.className = "workflow-column";
+      heading.textContent = `${place[0].toUpperCase() + place.slice(1)} (${column.count})`;
+      const age = document.createElement("p");
+      age.className = "hint";
+      age.textContent = column.oldest_age_seconds === null ? "Oldest age unknown" : `Oldest: ${Math.floor(column.oldest_age_seconds / 60)} minutes`;
+      if (column.unknown_age_count) age.textContent += ` · ${column.unknown_age_count} unknown age(s)`;
+      const list = document.createElement("ul"); list.className = "task-list";
+      for (const task of board.tasks.filter(item => item.place === place)) {
+        const item = document.createElement("li"), button = document.createElement("button");
+        button.type = "button"; button.dataset.taskId = task.task_id;
+        const stages = ["unit_tests", "scans", "long_tests", "code_review", "needs_rebase"].map(stage => {
+          const results = (task.validation || []).filter(result => result.stage === stage);
+          return `${stage}: ${results.length ? results.map(result => result.state).join(", ") : "unavailable"}`;
+        }).join(" · ");
+        button.textContent = `${task.task_id}: ${task.title}\nPriority ${task.priority} · ${task.responsible}\n${task.blocker || task.next_action || "No next action"}`;
+        if (task.blocked_dependencies.length) button.textContent += `\nWaiting for: ${task.blocked_dependencies.join(", ")}`;
+        button.textContent += `\nEvidence: ${task.evidence_freshness || "unavailable"}\n${stages}`;
+        button.setAttribute("aria-current", String(selected?.task_id === task.task_id));
+        button.addEventListener("click", () => perform(async () => { await selectTask(task.task_id); notice("Task loaded."); }));
+        item.append(button); list.append(item);
+      }
+      section.append(heading, age, list); root.append(section);
+    }
+    boardOffset = offset; boardNext = board.next_offset;
+    byId("board-summary").textContent = `${board.total} workflow tasks for ${project}. ${board.tasks.length} cards shown. Ready: ${board.ready_dependencies_complete} with current dependency acceptance, ${board.ready_dependencies_blocked} waiting for dependencies. ${board.unenrolled_count} task(s) await workflow enrollment.`;
+  }
+
+  byId("refresh-board").addEventListener("click", () => perform(async () => { await loadBoard(); notice("Workflow refreshed."); }));
+  byId("first-board").addEventListener("click", () => perform(async () => { await loadBoard(); notice("First workflow page loaded."); }));
+  byId("next-board").addEventListener("click", () => perform(async () => { if (boardNext !== null) await loadBoard(boardNext); notice("Workflow page loaded."); }));
+  byId("board-view").addEventListener("change", () => {
+    byId("workflow-board").classList.toggle("list-view", byId("board-view").value === "list");
+  });
+
   function appendHistory(history) {
     const events = byId("history");
     for (const event of history) {
@@ -178,7 +228,7 @@
     event.preventDefault();
     token = byId("token").value; project = byId("project").value;
     byId("token").value = "";
-    perform(async () => { await loadTasks(); notice(`Connected to ${project}.`); });
+    perform(async () => { await loadTasks(); await loadBoard(); notice(`Connected to ${project}.`); });
   });
   byId("logout").addEventListener("click", () => { disconnect(); notice("Logged out. Private task data and token cleared."); });
   byId("refresh-tasks").addEventListener("click", () => perform(async () => { await loadTasks(); notice("Task list refreshed."); }));
