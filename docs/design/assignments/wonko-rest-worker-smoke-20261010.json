@@ -1,0 +1,25 @@
+{
+  "schema": "manual-work-brief-v1",
+  "assignment_id": "WONKO-REST-SMOKE-20261010-001",
+  "task_id": "SKYBUILD-WONKO-REST-WORKER-SMOKE",
+  "worker": "wonko_cpu_smoke_01",
+  "dispatcher": "pilot_dispatcher",
+  "branch": "task/wonko-rest-worker-smoke-20261010",
+  "owned_paths": [
+    "docs/design/research/README.md"
+  ],
+  "checks": [
+    "Run one bounded automatic CPU invocation on Wonko after qualified Petri runtime, explicit six-grant worker preflight and a pinned current REST/Cord assignment.",
+    "Receive and verify the assignment, acquire its fenced claim, preserve the durable binding and renew before lease expiry; stop on changed inputs or ownership.",
+    "Prepare a clean owned worktree from the exact pinned development base; modify only docs/design/research/README.md.",
+    "Append exactly one line containing 'modified on' and the actual execution datetime in ISO 8601 format with the America/Chicago UTC offset; preserve all prior bytes.",
+    "Assert the timestamp is parseable with the actual America/Chicago offset and the diff contains exactly the appended line in the single owned README.",
+    "Run git diff --check against the pinned base; require clean committed source, exact task branch/head and base ancestry.",
+    "Push the exact checked head, verify the remote head and submit the exact branch/head/base/attempt/fence/input binding through REST before sending its Cord result.",
+    "Preserve task, assignment, claim, renewal, timestamp, check, Git and submission artifacts; report concrete blockers without claiming review or acceptance.",
+    "Do not open a task PR or merge. Separate validation producers, qualified independent review and the frozen bundle/full gate must precede owner-attested REST acceptance.",
+    "The committed brief has no base SHA and grants no dispatch authority. Dispatch binds it to a current published dev base, brief hash and current task revision."
+  ],
+  "model_limit": "One bounded CPU-only worker invocation. No model, paid API, service daemon, or new task launch.",
+  "next_action": "After runtime, credential and task qualification, automatically receive, claim, renew, append, check, commit, push and submit this one bounded Wonko task. Return the exact pushed output for separate validation, independent review and bundled integration."
+}
