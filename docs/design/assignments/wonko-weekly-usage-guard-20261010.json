@@ -1,0 +1,28 @@
+{
+  "schema": "manual-work-brief-v1",
+  "assignment_id": "WONKO-USAGE-GUARD-20261010-001",
+  "task_id": "SKYBUILD-WEEKLY-USAGE-GUARD",
+  "worker": "wonko_cpu_smoke_01",
+  "dispatcher": "pilot_dispatcher",
+  "branch": "task/weekly-usage-guard-20261010",
+  "owned_paths": [
+    "scripts/weekly_usage_guard.py",
+    "tests/test_weekly_usage_guard.py"
+  ],
+  "checks": [
+    "Use architecture A45 and its matching implementation plan. Dispatch only after qualified runtime/profile, with this exact committed brief already in the actual published dev-006 base.",
+    "Bind the current Ready task revision, assignment, approved patch SHA-256, exact base/brief bytes, branch and owned paths; receive, fence-claim and renew through REST/Cord.",
+    "Use one clean owned branch/worktree and one explicitly approved nonsecret CPU patch. No model, provider query, paid API, service deployment or candidate-code execution.",
+    "Require the approved shared native weekly pool/reset/config and fresh quota lease before each new mutating Git/API/file call. At >=50%, unknown/stale usage or deadline, drain and checkpoint; never bypass by switching accounts.",
+    "Run finite AST syntax checks and git diff --check against the pinned base. Require exact index/committed bytes, modes, sole parent and owned paths; refuse hooks, filters and normalization drift.",
+    "Push and verify the exact checked head; submit the current branch/head/base/attempt/fence/input binding through REST before Cord. Preserve actual claim, renewal, patch, Git, checks and submission artifacts.",
+    "Separate actual validation producers record all five current Petri stages. Obtain independent exact-head review, component tests and the frozen bundle default full gate; never manufacture passing or not-applicable evidence.",
+    "Admit no next task until confirmed dev inclusion, owner-attested REST acceptance and current Done. Unknown publication or response retains ownership and requires observation, never blind replay.",
+    "Apply the approved portable guard patch: passive bounded native weekly metadata reads with explicit approved source/session/pool/plan/reset/budget pins and a configuration hash; no private source paths in committed code.",
+    "Enforce finite 0..100 weekly percentages, expected duration/reset, freshness, source ownership/session and bounded append-only reads. Unknown, stale, replacement, truncation or over-budget input fails closed.",
+    "Retain every matching-week >=50% crossing in private high-water/cache state across lower later readings and restarts. Consumers require the same configuration, a short fresh lease and the permanent drain latch.",
+    "Commit meaningful public tests for threshold/high-water, previous-reset exclusion, malformed/partial input, source/session/privacy, config/plan/pool/reset/freshness and cache lease. Tests import the actual repository script."
+  ],
+  "model_limit": "One bounded CPU-only hash-pinned patch. No model, paid API, provider request, service daemon or new task launch.",
+  "next_action": "After the README proof and separate runtime/profile/assignment qualification, apply the approved portable weekly guard patch, check, commit, push and submit this useful task. Await real validation, independent review, frozen gate and dev acceptance before the next task."
+}
