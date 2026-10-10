@@ -466,6 +466,13 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
                 connection.execute(sql.SQL('INSERT INTO tasks (project_id, task_id, {}) VALUES (%s, %s, {})').format(sql.SQL(', ').join(map(sql.Identifier, columns)), sql.SQL(', ').join(sql.Placeholder() for _ in columns)), (project_id, task_id, *parameters))
                 self._dependencies(connection, project_id, task_id, values['dependencies'])
                 result = self._task(connection, project_id, task_id)
+                from .enrollment import enrollment_token, install_token
+                metadata = json.loads(json.dumps(result['metadata']))
+                install_token(metadata, enrollment_token(result, input_generation=1, revision=result['revision'], new=True))
+                _validate_metadata(metadata)
+                connection.execute('UPDATE tasks SET metadata = %s WHERE project_id = %s AND task_id = %s',
+                                   (Jsonb(metadata), project_id, task_id))
+                result = self._task(connection, project_id, task_id)
                 self._journal(connection, principal, result)
                 return result
             return self._idempotent(connection, principal, project_id, 'task.create', idempotency_key, body, mutation)
@@ -601,23 +608,14 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
                 if task['revision'] != expected_revision:
                     raise DomainError('stale_revision', 'Task revision has changed', 409)
                 if self._petri(task):
-                    raise DomainError('workflow_conflict', 'Task already has Petri workflow', 409)
+                    return self._workflow_view(connection, principal, task)
                 self._require_no_effect_exposure(connection, project_id, task_id)
-                place = (Place.DONE if current_completion(task) else Place.DEFERRED if task['status'] == 'deferred'
-                         else Place.READY if task['status'] == 'ready' else Place.HOLD)
                 readiness = connection.execute('SELECT input_generation FROM task_readiness WHERE project_id = %s AND task_id = %s',
                                                (project_id, task_id)).fetchone()
-                trigger = task['metadata'].get('_skybuild_workflow', {}).get('deferral', {})
-                token = TaskToken(project_id, task_id, place, definition_revision=task['revision'],
-                                  input_generation=readiness['input_generation'], revision=task['revision'] + 1,
-                                  hold_reason=(trigger.get('reason') or task['blocker']) if place == Place.DEFERRED else
-                                  'Review legacy task definition and evidence' if place == Place.HOLD else None,
-                                  deferred_until=trigger.get('until') if place == Place.DEFERRED else None,
-                                  milestone_task_id=trigger.get('milestone_task_id') if place == Place.DEFERRED else None,
-                                  superseded=task['status'] == 'superseded')
+                from .enrollment import enrollment_token, install_token
+                token = enrollment_token(task, input_generation=readiness['input_generation'], revision=task['revision'] + 1)
                 metadata = json.loads(json.dumps(task['metadata']))
-                metadata.setdefault('_skybuild_workflow', {})['petri'] = {
-                    'schema_version': 1, 'token': token.to_dict(), 'place_entered_at': datetime.now(timezone.utc).isoformat()}
+                install_token(metadata, token)
                 _validate_metadata(metadata)
                 connection.execute('UPDATE tasks SET metadata = %s, revision = revision + 1 WHERE project_id = %s AND task_id = %s',
                                    (Jsonb(metadata), project_id, task_id))
@@ -917,7 +915,7 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
         if token.superseded or token.pending_action:
             raise DomainError('workflow_conflict', 'Resolve the pending or retired task before reassessment', 409)
         if action == 'ready':
-            if (token.place != Place.HOLD or not before['acceptance_criteria'] or
+            if (token.place not in {Place.HOLD, Place.READY} or not before['acceptance_criteria'] or
                     self._has_started_history(connection, project_id, before['task_id'])):
                 raise DomainError('workflow_conflict', 'Readiness requires acceptance and no started history', 409)
         elif action == 'rework':
