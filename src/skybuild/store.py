@@ -323,9 +323,20 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
     def _replace_task(self, connection, principal, project_id, task_id, before, changes, *, operation, reason):
         self._require_no_effect_exposure(connection, project_id, task_id)
         values = self._task_values(changes, before)
+        preserve_acceptance = False
+        if self._petri(before) and operation == 'reassess':
+            from .completion import current_completion
+            preserve_acceptance = current_completion(before)
+            if preserve_acceptance:
+                values['metadata']['_skybuild_workflow']['generation'] = before['metadata']['_skybuild_workflow'].get('generation', 0)
+                values.update(blocker=before['blocker'], next_action=before['next_action'])
         self._advance_readiness(connection, project_id, task_id, values,
-                                acknowledge=operation in {'ready', 'completed'},
-                                preserve_input=operation == 'completed')
+                                acknowledge=operation in {'ready', 'completed', 'rework', 'reassess', 'resume'},
+                                preserve_input=operation == 'completed' or preserve_acceptance)
+        from .reconciliation import synchronize_token
+        synchronize_token(before, values, operation=operation, reason=reason)
+        # Synchronization adds retained token fields to the same metadata budget.
+        self._task_values(values, before)
         columns = [key for key in values if key != 'dependencies']
         parameters = [Jsonb(values[key]) if key == 'metadata' else values[key] for key in columns]
         assignments = sql.SQL(', ').join(sql.SQL('{} = %s').format(sql.Identifier(key)) for key in columns)
@@ -333,7 +344,8 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
         self._dependencies(connection, project_id, task_id, values['dependencies'])
         after = self._task(connection, project_id, task_id)
         self._journal(connection, principal, after, before, operation=operation, reason=reason)
-        self._invalidate_dependents(connection, principal, project_id, task_id)
+        if not preserve_acceptance:
+            self._invalidate_dependents(connection, principal, project_id, task_id)
         return after
 
     @staticmethod
@@ -381,6 +393,10 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
                                self._has_started_history(connection, project_id, dependent_id) else
                                'Reassess current definition and dependencies'})
             self._advance_readiness(connection, project_id, dependent_id, values)
+            from .reconciliation import synchronize_token
+            synchronize_token(before, values, operation='dependency_invalidated',
+                              reason=f'Dependency {task_id} changed')
+            self._task_values(values, before)
             columns = [key for key in values if key != 'dependencies']
             assignments = sql.SQL(', ').join(sql.SQL('{} = %s').format(sql.Identifier(key)) for key in columns)
             parameters = [Jsonb(values[key]) if key == 'metadata' else values[key] for key in columns]
@@ -498,7 +514,8 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
                    ('source_head', 'target_base', 'definition_revision', 'input_generation', 'policy_version')}
         readiness = connection.execute('SELECT * FROM task_readiness WHERE project_id = %s AND task_id = %s',
                                        (task['project_id'], task['task_id'])).fetchone()
-        context['current_inputs'] = bool(readiness and readiness['input_generation'] == token.input_generation
+        context['current_inputs'] = bool(task.get('acceptance_criteria') and readiness
+                                         and readiness['input_generation'] == token.input_generation
                                          and readiness['assessed_generation'] == token.input_generation)
         context['effects_resolved'] = not connection.execute(
             "SELECT 1 FROM task_effects WHERE project_id = %s AND task_id = %s AND exposure_held "
@@ -537,10 +554,30 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
                 'enabled_actions': [], 'evidence_freshness': 'current' if token.evidence and fresh else
                 'stale' if token.evidence else 'unavailable'}
 
+    def _workflow_control_context(self, connection, principal, task, context):
+        """Control requests wait for held ownership, including an expired claim.
+
+        Worker submission retains its separate fenced claim checks. This helper
+        changes only owner control facts and grants no execution permission.
+        """
+        checked = dict(context)
+        if connection.execute('SELECT 1 FROM task_claims WHERE project_id = %s AND task_id = %s AND held',
+                              (task['project_id'], task['task_id'])).fetchone():
+            checked['effects_resolved'] = False
+        if principal.is_admin:
+            marker = connection.execute('SELECT input_generation FROM task_readiness WHERE project_id = %s AND task_id = %s',
+                                        (task['project_id'], task['task_id'])).fetchone()
+            checked['current_inputs'] = bool(marker and marker['input_generation'] == self.workflow_token(task).input_generation)
+        return checked
+
     def _workflow_view(self, connection, principal, task):
         from .workflow import TaskWorkflow, TRANSITIONS
         token = self.workflow_token(task)
-        enabled = TaskWorkflow().enabled(token, self._workflow_context(connection, principal, task))
+        context = self._workflow_context(connection, principal, task)
+        names = {'hold', 'defer', 'release_hold', 'resume_deferred', 'reopen', 'update_control'}
+        enabled = tuple(name for name in TaskWorkflow().enabled(token, context) if name not in names)
+        controls = self._workflow_control_context(connection, principal, task, context)
+        enabled += tuple(name for name in TaskWorkflow().enabled(token, controls) if name in names)
         return {'task': {**task, **self.workflow_projection(task), 'enabled_actions': list(enabled)},
                 'token': token.to_dict(), 'available_actions': list(enabled),
                 'transitions': [spec.to_dict() for spec in TRANSITIONS],
@@ -575,9 +612,14 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
                          else Place.READY if task['status'] == 'ready' else Place.HOLD)
                 readiness = connection.execute('SELECT input_generation FROM task_readiness WHERE project_id = %s AND task_id = %s',
                                                (project_id, task_id)).fetchone()
+                trigger = task['metadata'].get('_skybuild_workflow', {}).get('deferral', {})
                 token = TaskToken(project_id, task_id, place, definition_revision=task['revision'],
                                   input_generation=readiness['input_generation'], revision=task['revision'] + 1,
-                                  hold_reason='Review legacy task definition and evidence' if place == Place.HOLD else None)
+                                  hold_reason=(trigger.get('reason') or task['blocker']) if place == Place.DEFERRED else
+                                  'Review legacy task definition and evidence' if place == Place.HOLD else None,
+                                  deferred_until=trigger.get('until') if place == Place.DEFERRED else None,
+                                  milestone_task_id=trigger.get('milestone_task_id') if place == Place.DEFERRED else None,
+                                  superseded=task['status'] == 'superseded')
                 metadata = json.loads(json.dumps(task['metadata']))
                 metadata.setdefault('_skybuild_workflow', {})['petri'] = {
                     'schema_version': 1, 'token': token.to_dict(), 'place_entered_at': datetime.now(timezone.utc).isoformat()}
@@ -596,13 +638,30 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
         kernel = TaskWorkflow()
         token = self.workflow_token(before)
         after_token = kernel.apply(token, event, verified_context)
+        if event['event'] in {'reopen', 'release_hold', 'resume_deferred'}:
+            self._require_no_effect_exposure(connection, before['project_id'], before['task_id'])
+            values = self._task_values({}, before)
+            self._advance_readiness(connection, before['project_id'], before['task_id'], values,
+                                    acknowledge=True, preserve_input=event['event'] != 'reopen')
+            from dataclasses import replace
+            after_token = replace(after_token, input_generation=values['metadata']['_skybuild_workflow']['readiness']['input_generation'])
         facts = kernel.journal_facts(token, after_token, event)
         if receipt is not None:
             facts['author_output_receipt'] = receipt
         metadata = json.loads(json.dumps(before['metadata']))
         metadata['_skybuild_workflow']['petri']['token'] = after_token.to_dict()
+        if event['event'] in {'reopen', 'release_hold', 'resume_deferred'}:
+            metadata['_skybuild_workflow']['readiness'] = values['metadata']['_skybuild_workflow']['readiness']
+            if event['event'] == 'reopen':
+                metadata['_skybuild_workflow']['generation'] = metadata['_skybuild_workflow'].get('generation', 0) + 1
         if after_token.place != token.place:
             metadata['_skybuild_workflow']['petri']['place_entered_at'] = datetime.now(timezone.utc).isoformat()
+        if after_token.place == Place.DEFERRED:
+            trigger = ({'until': after_token.deferred_until} if after_token.deferred_until else
+                       {'milestone_task_id': after_token.milestone_task_id} if after_token.milestone_task_id else {})
+            metadata['_skybuild_workflow']['deferral'] = {'reason': after_token.hold_reason, **trigger}
+        elif after_token.place in {Place.READY, Place.HOLD}:
+            metadata['_skybuild_workflow'].pop('deferral', None)
         if event['event'] == 'claim':
             metadata['_skybuild_workflow']['petri']['attempt_binding'] = {
                 'task_revision': after_token.revision, 'input_generation': after_token.input_generation,
@@ -620,6 +679,8 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
         after = self._task(connection, before['project_id'], before['task_id'])
         self._journal(connection, principal, after, journal_before or before, operation='workflow.' + facts['event'],
                       reason=event.get('reason') or 'Workflow ' + facts['event'], event_facts=facts)
+        if event['event'] == 'reopen':
+            self._invalidate_dependents(connection, principal, before['project_id'], before['task_id'])
         return after
 
     def _submit_workflow_receipt(self, connection, principal, before, body, operation_id):
@@ -699,6 +760,11 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
                     after = self._submit_workflow_receipt(connection, principal, before, body, idempotency_key)
                 else:
                     context = self._workflow_context(connection, principal, before)
+                    if event in {'hold', 'defer', 'release_hold', 'resume_deferred', 'reopen', 'update_control'} and principal.is_admin:
+                        # Control release reassesses a stored generation without execution approval.
+                        if event in {'release_hold', 'resume_deferred', 'reopen'}:
+                            self._require_no_effect_exposure(connection, project_id, task_id)
+                        context = self._workflow_control_context(connection, principal, before, context)
                     if event == 'validation_result' and 'result' in body:
                         from .workflow import ValidationResult, ValidationStage
                         result = ValidationResult.from_dict(body['result'])
@@ -802,7 +868,7 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
                 return body
             updated = dict(body)
             workflow = json.loads(json.dumps(before['metadata']['_skybuild_workflow']))
-            workflow['generation'] += 1
+            workflow['generation'] = workflow.get('generation', 0) + 1
             workflow['last_action'] = 'definition_edit'
             workflow['reason'] = 'Task fields edited'
             workflow.pop('deferral', None)
@@ -821,6 +887,8 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
             _invalid('Unsupported task action')
         _body(body, ACTION_FIELDS)
         def changes(before, connection):
+            if self._petri(before):
+                return self._petri_manual_change(connection, principal, project_id, before, action, body)
             if action == 'ready':
                 if not before['acceptance_criteria'] or self._has_started_history(connection, project_id, task_id):
                     raise DomainError('workflow_conflict', 'Readiness requires acceptance and no started history', 409)
@@ -836,6 +904,50 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
                                  'task.action.' + action,
                                  {'task_id': task_id, 'revision': expected_revision, 'body': body}, changes,
                                  reason=body.get('reason'))
+
+    def _petri_manual_change(self, connection, principal, project_id, before, action, body):
+        """Bridge existing owner controls without letting legacy actions bypass Petri."""
+        from dataclasses import replace
+        from .workflow import Place, TaskWorkflow, action_change
+        current = self._principal(connection, principal.principal_id)
+        if not current.is_admin:
+            raise DomainError('authorization', 'Only owner/admin may change workflow controls', 403)
+        self._require_no_effect_exposure(connection, project_id, before['task_id'])
+        token = self.workflow_token(before)
+        if token.superseded or token.pending_action:
+            raise DomainError('workflow_conflict', 'Resolve the pending or retired task before reassessment', 409)
+        if action == 'ready':
+            if (token.place != Place.HOLD or not before['acceptance_criteria'] or
+                    self._has_started_history(connection, project_id, before['task_id'])):
+                raise DomainError('workflow_conflict', 'Readiness requires acceptance and no started history', 409)
+        elif action == 'rework':
+            if token.place in {Place.HOLD, Place.DEFERRED}:
+                raise DomainError('workflow_conflict', 'Release or resume the task before rework', 409)
+        action_before = {**before, 'status': 'blocked'} if action == 'reassess' and token.place == Place.DEFERRED else before
+        result = action_change(action_before, action, body)
+        # A deferral is a control change, never execution or spending approval.
+        if action == 'defer':
+            context = self._workflow_context(connection, current, before)
+            context['current_inputs'] = True
+            event = {'event': 'defer', 'operation_id': 'manual-defer', 'expected_revision': token.revision, **body}
+            token = TaskWorkflow().apply(token, event, context)
+        elif action == 'resume':
+            if token.place != Place.DEFERRED:
+                raise DomainError('workflow_conflict', 'Only a deferred task can resume', 409)
+        if action == 'defer':
+            result['metadata']['_skybuild_workflow']['petri']['token'] = token.to_dict()
+        return result
+
+    def _require_structural_change(self, connection, project_id, task):
+        """Permit resolved Petri scope changes while retaining legacy history guards."""
+        if self._petri(task):
+            from .workflow import Place
+            token = self.workflow_token(task)
+            if token.place == Place.DONE or token.superseded or token.pending_action is not None:
+                raise DomainError('workflow_conflict', 'Reopen or resolve the task before structural changes', 409)
+            self._require_no_effect_exposure(connection, project_id, task['task_id'])
+        elif task['status'] != 'proposed' or self._has_started_history(connection, project_id, task['task_id']):
+            raise DomainError('workflow_conflict', 'Structural changes require a proposed task with no execution history', 409)
 
     def _require_current_dependencies(self, connection, project_id, task):
         """The caller holds the graph lock throughout evaluation and publication."""
@@ -868,9 +980,8 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
                                  reason=body.get('reason'))
 
     def reconcile_due_deferrals(self, principal, project_id, idempotency_key: str, *, limit=100, after_task_id=None, now=None) -> dict:
-        """Perform one bounded CPU-only catch-up page by immutable task ID."""
+        """Perform bounded CPU-only catch-up with graph-locked milestone proof."""
         from .workflow import due_deferral
-
         self._page(limit, 0)
         if after_task_id is not None:
             _identifier(after_task_id, 'after_task_id')
@@ -878,33 +989,54 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
         now = now or datetime.now(timezone.utc)
         if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
             _invalid('Reconciliation time must include a timezone')
-        with self._connection() as connection:
-            self._authorize(connection, principal, project_id, 'tasks:write')
         tasks = self.list_tasks(principal, project_id, limit=limit, after_task_id=after_task_id, by_id=True)
         changed = []
-        for task in tasks:
-            if task['status'] != 'deferred':
+        for snapshot in tasks:
+            if snapshot['status'] != 'deferred':
                 continue
-            milestone = task['metadata'].get('_skybuild_workflow', {}).get('deferral', {}).get('milestone_task_id')
-            milestone_done = False
-            if milestone:
+            key = hashlib.sha256(f'{idempotency_key}:{snapshot["task_id"]}:{snapshot["revision"]}'.encode()).hexdigest()
+            with self._connection() as connection:
+                actor = self._authorize(connection, principal, project_id, 'tasks:write')
+                def mutation():
+                    self._graph_lock(connection, project_id)
+                    task = self._task(connection, project_id, snapshot['task_id'], lock=True)
+                    if task['revision'] != snapshot['revision'] or task['status'] != 'deferred':
+                        return False
+                    milestone = task['metadata'].get('_skybuild_workflow', {}).get('deferral', {}).get('milestone_task_id')
+                    milestone_done = False
+                    if milestone:
+                        try:
+                            self._require_current_dependencies(connection, project_id, {'dependencies': [milestone]})
+                        except DomainError as error:
+                            if error.code not in {'workflow_conflict', 'not_found'}:
+                                raise
+                        else:
+                            milestone_done = True
+                    if not due_deferral(task, now, milestone_done):
+                        return False
+                    # A missed trigger resumes to Ready for reassessment, never starts work.
+                    self._require_no_effect_exposure(connection, project_id, task['task_id'])
+                    if self._petri(task):
+                        token = self.workflow_token(task)
+                        if token.superseded or token.pending_action:
+                            return False
+                    from .workflow import action_change
+                    values = action_change(task, 'resume', {'reason': 'Deferral trigger reached',
+                                                           'next_action': 'Reassess current definition and dependencies'})
+                    self._replace_task(connection, actor, project_id, task['task_id'], task, values,
+                                       operation='resume', reason='Deferral trigger reached')
+                    return True
                 try:
-                    milestone_done = self.get_task(principal, project_id, milestone)['status'] == 'done'
+                    resumed = self._idempotent(connection, actor, project_id, 'task.resume_due', key,
+                                               {'task_id': snapshot['task_id'], 'revision': snapshot['revision'],
+                                                'trigger_check': True}, mutation)
                 except DomainError as error:
-                    if error.code != 'not_found':
+                    if error.code not in {'claim_conflict', 'capacity_conflict', 'effect_conflict'}:
                         raise
-            if not due_deferral(task, now, milestone_done):
-                continue
-            key = hashlib.sha256(f'{idempotency_key}:{task["task_id"]}:{task["revision"]}'.encode()).hexdigest()
-            try:
-                self.task_action(principal, project_id, task['task_id'], 'resume',
-                                 {'reason': 'Deferral trigger reached', 'next_action': 'Reassess current definition and dependencies'},
-                                 task['revision'], key)
-            except DomainError as error:
-                if error.code != 'stale_revision':
-                    raise
-            else:
-                changed.append(task['task_id'])
+                    # Existing ownership remains visible. The next sweep can retry.
+                    continue
+                if resumed:
+                    changed.append(snapshot['task_id'])
         return {'scanned': len(tasks), 'reassessed': changed,
                 'next_after_task_id': tasks[-1]['task_id'] if len(tasks) == limit else None}
 
@@ -971,15 +1103,13 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
                 source = self._task(connection, project_id, task_id, lock=True)
                 if source['revision'] != expected_revision:
                     raise DomainError('stale_revision', 'Task revision has changed', 409)
-                if source['status'] != 'proposed' or self._has_started_history(connection, project_id, task_id):
-                    raise DomainError('workflow_conflict', 'Split requires a proposed task with no execution history', 409)
+                self._require_structural_change(connection, project_id, source)
                 dependents = connection.execute('SELECT task_id FROM task_dependencies WHERE project_id = %s AND dependency_id = %s ORDER BY task_id', (project_id, task_id)).fetchall()
                 if set(incoming) != {row['task_id'] for row in dependents}:
                     raise DomainError('workflow_conflict', 'Incoming dependency mapping is incomplete or stale', 409)
                 for dependent in incoming:
                     state = self._task(connection, project_id, dependent, lock=True)
-                    if state['status'] != 'proposed' or self._has_started_history(connection, project_id, dependent):
-                        raise DomainError('workflow_conflict', 'Cannot rewire a dependent unless proposed with no execution history', 409)
+                    self._require_structural_change(connection, project_id, state)
                 for child_id in child_ids:
                     if connection.execute('SELECT 1 FROM tasks WHERE project_id = %s AND task_id = %s', (project_id, child_id)).fetchone():
                         raise DomainError('conflict', 'Child task ID already exists', 409)
@@ -998,6 +1128,9 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
                     values = self._task_values({key: value for key, value in child.items() if key != 'task_id'})
                     values['priority'] = source['priority']
                     values['metadata'] = {'_skybuild_workflow': {'generation': 0, 'split_from': task_id}}
+                    if self._petri(source):
+                        from .reconciliation import replacement_token
+                        replacement_token(project_id, child_id, values)
                     columns = [key for key in values if key != 'dependencies']
                     parameters = [Jsonb(values[key]) if key == 'metadata' else values[key] for key in columns]
                     connection.execute(sql.SQL('INSERT INTO tasks (project_id, task_id, {}) VALUES (%s, %s, {})').format(
@@ -1093,8 +1226,7 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
                 for source in sources:
                     if source['revision'] != expected_revisions[source['task_id']]:
                         raise DomainError('stale_revision', 'Source task revision has changed', 409)
-                    if source['status'] != 'proposed' or self._has_started_history(connection, project_id, source['task_id']):
-                        raise DomainError('workflow_conflict', 'Merge requires proposed sources with no execution history', 409)
+                    self._require_structural_change(connection, project_id, source)
                 rows = connection.execute(
                     'SELECT DISTINCT task_id FROM task_dependencies WHERE project_id = %s AND dependency_id = ANY(%s) '
                     'AND NOT (task_id = ANY(%s)) ORDER BY task_id',
@@ -1104,8 +1236,7 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
                     raise DomainError('workflow_conflict', 'Incoming dependency list is incomplete or stale', 409)
                 for dependent in incoming_dependents:
                     state = self._task(connection, project_id, dependent, lock=True)
-                    if state['status'] != 'proposed' or self._has_started_history(connection, project_id, dependent):
-                        raise DomainError('workflow_conflict', 'Cannot rewire a dependent with execution history', 409)
+                    self._require_structural_change(connection, project_id, state)
                 if connection.execute('SELECT 1 FROM tasks WHERE project_id = %s AND task_id = %s', (project_id, target_id)).fetchone():
                     raise DomainError('conflict', 'Merged target task ID already exists', 409)
                 required_dependencies = set().union(*(set(source['dependencies']) for source in sources)) - set(source_task_ids)
@@ -1117,6 +1248,9 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
                 values = self._task_values({key: value for key, value in target.items() if key != 'task_id'})
                 values['priority'] = min(source['priority'] for source in sources)
                 values['metadata'] = {'_skybuild_workflow': {'generation': 0, 'merged_from': sorted(source_task_ids)}}
+                if any(self._petri(source) for source in sources):
+                    from .reconciliation import replacement_token
+                    replacement_token(project_id, target_id, values)
                 columns = [key for key in values if key != 'dependencies']
                 parameters = [Jsonb(values[key]) if key == 'metadata' else values[key] for key in columns]
                 connection.execute(sql.SQL('INSERT INTO tasks (project_id, task_id, {}) VALUES (%s, %s, {})').format(
@@ -1164,7 +1298,9 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
         return bool(connection.execute(
             "SELECT 1 FROM task_journal WHERE project_id = %s AND task_id = %s AND ("
             "before_state->>'status' IN ('in-progress', 'done') OR after_state->>'status' IN ('in-progress', 'done') "
-            "OR before_state->>'phase' IN ('working', 'integrating') OR after_state->>'phase' IN ('working', 'integrating')) LIMIT 1",
+            "OR before_state->>'phase' IN ('working', 'validating', 'integrating') OR after_state->>'phase' IN ('working', 'validating', 'integrating') "
+            "OR before_state #>> '{metadata,_skybuild_workflow,petri,token,place}' IN ('working','validating','integrating','done') "
+            "OR after_state #>> '{metadata,_skybuild_workflow,petri,token,place}' IN ('working','validating','integrating','done')) LIMIT 1",
             (project_id, task_id),
         ).fetchone())
 
