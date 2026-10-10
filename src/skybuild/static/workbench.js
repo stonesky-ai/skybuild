@@ -7,7 +7,13 @@
   const edit = byId("edit-form");
   const action = byId("action-form");
   const structure = byId("structure-form");
+  const workflowForm = byId("workflow-form");
+  let workflowView = null, pendingWorkflow = null;
+  const controlNames = {claim: "Claim work", hold: "Hold", release_hold: "Release hold", defer: "Defer", resume_deferred: "Resume deferred task", reopen: "Reopen", update_control: "Change hold or deferral details"};
   let token = "", project = "", selected = null, busy = false, stale = false, epoch = 0, controller = null, reconcileCursor = null, structuralPlan = null, historyOffset = 0, historyHasMore = false, taskCursor = null, taskHasMore = false;
+
+  let boardOffset = 0, boardNext = null;
+  const places = ["ready", "working", "validating", "integrating", "done", "deferred", "hold"];
 
   class ApiError extends Error {
     constructor(status) { super(`Request failed (${status})`); this.status = status; }
@@ -20,23 +26,32 @@
 
   function controls() {
     const connected = Boolean(token);
+    const unresolved = Boolean(pendingWorkflow?.unknown);
     byId("project").disabled = connected || busy;
     byId("token").disabled = connected || busy;
     byId("connect").disabled = connected || busy;
     byId("logout").disabled = !connected;
+    byId("refresh-board").disabled = !connected || busy;
+    byId("first-board").disabled = !connected || busy || boardOffset === 0;
+    byId("next-board").disabled = !connected || busy || boardNext === null;
+    for (const button of byId("workflow-board").querySelectorAll("button")) button.disabled = busy || !connected;
     byId("refresh-tasks").disabled = !connected || busy;
     byId("first-tasks").disabled = !connected || busy || taskCursor === null;
     byId("next-tasks").disabled = !connected || busy || !taskHasMore;
-    byId("reconcile-due").disabled = !connected || busy;
+    byId("reconcile-due").disabled = !connected || busy || unresolved;
     byId("refresh-selected").disabled = !connected || busy || !selected;
     byId("load-more-history").disabled = !connected || busy || !selected || !historyHasMore;
-    for (const field of create.elements) field.disabled = !connected || busy;
+    for (const field of create.elements) field.disabled = !connected || busy || unresolved;
     for (const field of edit.elements) field.disabled = !connected || busy || !selected;
     for (const id of ["edit-status", "edit-phase", "edit-blocker"]) byId(id).disabled = true;
-    byId("save").disabled = !connected || busy || !selected || stale;
-    for (const field of action.elements) field.disabled = !connected || busy || !selected || stale;
-    for (const field of structure.elements) field.disabled = !connected || busy || !selected || stale;
-    byId("apply-structure").disabled = !connected || busy || !selected || stale || !structuralPlan;
+    byId("save").disabled = !connected || busy || !selected || stale || unresolved;
+    for (const field of action.elements) field.disabled = !connected || busy || !selected || stale || unresolved;
+    for (const field of workflowForm.elements) field.disabled = !connected || busy || !selected || stale || unresolved || !workflowView;
+    byId("workflow-submit").disabled = !connected || busy || !selected || stale || unresolved || !workflowView || !(workflowView.available_actions || []).some(name => controlNames[name]);
+    byId("workflow-retry").disabled = !connected || busy || !unresolved;
+    for (const button of byId("workflow-dependencies").querySelectorAll("button")) button.disabled = !connected || busy;
+    for (const field of structure.elements) field.disabled = !connected || busy || !selected || stale || unresolved;
+    byId("apply-structure").disabled = !connected || busy || !selected || stale || unresolved || !structuralPlan;
     for (const button of byId("task-list").querySelectorAll("button")) button.disabled = busy || !connected;
   }
 
@@ -51,8 +66,12 @@
     byId("task-list").replaceChildren(); byId("history").replaceChildren();
     byId("lineage").replaceChildren();
     byId("task-count").textContent = "Not connected";
+    boardOffset = 0; boardNext = null;
+    byId("workflow-board").replaceChildren();
+    byId("board-summary").textContent = "Not connected";
     byId("selection").textContent = "Select a task to view its definition and history.";
     byId("full-task-record").textContent = "No task selected.";
+    workflowView = null; pendingWorkflow = null; clearWorkflow();
     controls();
   }
 
@@ -63,7 +82,7 @@
     const headers = { Authorization: `Bearer ${token}` };
     if (options.body !== undefined) {
       headers["Content-Type"] = "application/json";
-      headers["Idempotency-Key"] = crypto.randomUUID();
+      headers["Idempotency-Key"] = options.operationKey || crypto.randomUUID();
     }
     if (options.revision !== undefined) headers["If-Match"] = String(options.revision);
     const timeout = setTimeout(() => activeController.abort(), 15000);
@@ -83,8 +102,8 @@
     }
   }
 
-  async function perform(operation, mutation = false) {
-    if (busy) return;
+  async function perform(operation, mutation = false, replay = false) {
+    if (busy || (mutation && pendingWorkflow?.unknown && !replay)) return;
     const session = epoch;
     busy = true; controls(); notice("Working…");
     try {
@@ -130,6 +149,167 @@
     return true;
   }
 
+  async function loadBoard(offset = 0) {
+    const board = await request(`workflow-board?limit=100&offset=${offset}`);
+    const root = byId("workflow-board"); root.replaceChildren();
+    for (const place of places) {
+      const column = board.columns.find(item => item.place === place);
+      const section = document.createElement("section"), heading = document.createElement("h3");
+      section.className = "workflow-column";
+      heading.textContent = `${place[0].toUpperCase() + place.slice(1)} (${column.count})`;
+      const age = document.createElement("p");
+      age.className = "hint";
+      age.textContent = column.oldest_age_seconds === null ? "Oldest age unknown" : `Oldest: ${Math.floor(column.oldest_age_seconds / 60)} minutes`;
+      if (column.unknown_age_count) age.textContent += ` · ${column.unknown_age_count} unknown age(s)`;
+      const list = document.createElement("ul"); list.className = "task-list";
+      for (const task of board.tasks.filter(item => item.place === place)) {
+        const item = document.createElement("li"), button = document.createElement("button");
+        button.type = "button"; button.dataset.taskId = task.task_id;
+        const stages = ["unit_tests", "scans", "long_tests", "code_review", "needs_rebase"].map(stage => {
+          const results = (task.validation || []).filter(result => result.stage === stage);
+          return `${stage}: ${results.length ? results.map(result => result.state).join(", ") : "unavailable"}`;
+        }).join(" · ");
+        button.textContent = `${task.task_id}: ${task.title}\nPriority ${task.priority} · ${task.responsible}\n${task.blocker || task.next_action || "No next action"}`;
+        if (place === "hold") button.textContent += `\nHold reason: ${task.hold_reason || task.blocker || "Unavailable"}. Release: explicit release after active effects are resolved.`;
+        if (place === "deferred") button.textContent += `\nDeferred reason: ${task.hold_reason || task.blocker || "Unavailable"}. Resume condition: ${task.deferred_until ? `date ${task.deferred_until}` : task.milestone_task_id ? `milestone ${task.milestone_task_id}` : "explicit owner decision"}.`;
+        if (task.blocked_dependencies.length) button.textContent += `\nWaiting for: ${task.blocked_dependencies.join(", ")}`;
+        button.textContent += `\nEvidence: ${task.evidence_freshness || "unavailable"}\n${stages}`;
+        button.setAttribute("aria-current", String(selected?.task_id === task.task_id));
+        button.addEventListener("click", () => perform(async () => { await selectTask(task.task_id); notice("Task loaded."); }));
+        item.append(button); list.append(item);
+      }
+      section.append(heading, age, list); root.append(section);
+    }
+    boardOffset = offset; boardNext = board.next_offset;
+    byId("board-summary").textContent = `${board.total} workflow tasks for ${project}. ${board.tasks.length} cards shown. Ready: ${board.ready_dependencies_complete} with current dependency acceptance, ${board.ready_dependencies_blocked} waiting for dependencies. ${board.unenrolled_count} task(s) await workflow enrollment.`;
+  }
+
+  byId("refresh-board").addEventListener("click", () => perform(async () => { await loadBoard(); notice("Workflow refreshed."); }));
+  byId("first-board").addEventListener("click", () => perform(async () => { await loadBoard(); notice("First workflow page loaded."); }));
+  byId("next-board").addEventListener("click", () => perform(async () => { if (boardNext !== null) await loadBoard(boardNext); notice("Workflow page loaded."); }));
+  byId("board-view").addEventListener("change", () => {
+    byId("workflow-board").classList.toggle("list-view", byId("board-view").value === "list");
+  });
+
+  function clearWorkflow() {
+    for (const id of ["workflow-requirements", "workflow-dependencies", "workflow-evidence", "workflow-findings", "workflow-disabled", "workflow-event", "workflow-path", "workflow-transitions"]) byId(id).replaceChildren();
+    workflowForm.reset();
+    byId("workflow-state").textContent = "No task selected.";
+    byId("workflow-condition").textContent = "";
+    showPendingWorkflow();
+  }
+
+  function showPendingWorkflow() {
+    byId("workflow-operation").textContent = pendingWorkflow ? `Operation ${pendingWorkflow.key} for ${pendingWorkflow.taskId} at revision ${pendingWorkflow.revision}.${pendingWorkflow.unknown ? " Outcome unknown. Refresh can inspect state. Retry unchanged operation to retrieve the original outcome." : ""}` : "No pending operation.";
+  }
+
+  async function sendWorkflowOperation(operation) {
+    try {
+      await request(operation.path, {method: "POST", body: operation.body, revision: operation.revision, operationKey: operation.key});
+      pendingWorkflow = null;
+      await loadTasks(); await loadBoard(); await selectTask(operation.taskId);
+      notice("Workflow operation confirmed. Current state loaded.");
+    } catch (error) {
+      if (pendingWorkflow === operation) {
+        // A client rejection is definitive. Transport and server failures can follow a commit.
+        if (error.status && error.status < 500) pendingWorkflow = null;
+        else operation.unknown = true;
+      }
+      stale = true; showPendingWorkflow(); throw error;
+    }
+  }
+
+  byId("workflow-retry").addEventListener("click", () => {
+    if (!pendingWorkflow?.unknown || pendingWorkflow.project !== project) return;
+    const operation = pendingWorkflow;
+    perform(() => sendWorkflowOperation(operation), true, true);
+  });
+
+  function textItem(listId, value) {
+    const item = document.createElement("li"); item.textContent = value; byId(listId).append(item); return item;
+  }
+
+  function referenceItem(value) {
+    const item = document.createElement("li");
+    try {
+      const url = new URL(value);
+      if (!["https:", "http:"].includes(url.protocol)) throw new Error();
+      const link = document.createElement("a"); link.href = url.href; link.textContent = value;
+      link.rel = "noreferrer noopener"; item.append(link);
+    } catch { item.textContent = value; }
+    byId("workflow-evidence").append(item);
+  }
+
+  function renderWorkflow() {
+    clearWorkflow();
+    if (!workflowView) { byId("workflow-state").textContent = "This task awaits workflow enrollment."; return; }
+    const token = workflowView.token;
+    const placeLabel = name => name ? name[0].toUpperCase() + name.slice(1) : "Same place";
+    const transitions = workflowView.transitions || [];
+    const normal = ["claim", "submit", "freeze", "accept"].map(event => transitions.find(spec => spec.event === event)).filter(Boolean);
+    if (normal.length) {
+      textItem("workflow-path", placeLabel(normal[0].sources[0]));
+      for (const spec of normal) textItem("workflow-path", placeLabel(spec.destination));
+    }
+    for (const spec of transitions) textItem("workflow-transitions", `${spec.event.replaceAll("_", " ")}: ${spec.sources.map(placeLabel).join(", ")} to ${placeLabel(spec.destination)}`);
+
+    byId("workflow-state").textContent = `${token.place[0].toUpperCase() + token.place.slice(1)} · Revision ${selected.revision} · Evidence: ${selected.evidence_freshness || "unavailable"}${token.pending_action ? ` · Pending: ${token.pending_action}` : ""}`;
+    if (token.place === "hold") byId("workflow-condition").textContent = `Hold reason: ${token.hold_reason || selected.blocker || "Unavailable"}. Release: explicit release after active effects are resolved.`;
+    if (token.place === "deferred") byId("workflow-condition").textContent = `Deferred reason: ${token.hold_reason || selected.blocker || "Unavailable"}. Resume condition: ${token.deferred_until ? `date ${token.deferred_until}` : token.milestone_task_id ? `milestone ${token.milestone_task_id}` : "explicit owner decision"}.`;
+    for (const requirement of [...new Set([...(selected.acceptance_criteria || []), ...(token.requirements || [])])]) textItem("workflow-requirements", requirement);
+    for (const dependency of selected.dependencies || []) {
+      const item = document.createElement("li"), button = document.createElement("button");
+      button.type = "button"; button.textContent = dependency;
+      button.addEventListener("click", () => perform(async () => { await selectTask(dependency); notice("Dependency loaded."); }));
+      item.append(button); byId("workflow-dependencies").append(item);
+    }
+    if (token.milestone_task_id) {
+      const item = document.createElement("li"), button = document.createElement("button");
+      button.type = "button"; button.textContent = `Milestone: ${token.milestone_task_id}`;
+      button.addEventListener("click", () => perform(async () => { await selectTask(token.milestone_task_id); notice("Milestone loaded."); }));
+      item.append(button); byId("workflow-dependencies").append(item);
+    }
+    for (const result of token.evidence || []) {
+      textItem("workflow-evidence", `${result.stage}: ${result.state} · ${result.producer || "Unknown producer"} · Source ${result.source_head || "unavailable"} · Base ${result.target_base || "unavailable"}`);
+      for (const artifact of result.artifacts || []) referenceItem(artifact);
+      for (const finding of result.findings || []) textItem("workflow-findings", finding);
+    }
+    for (const link of token.links || []) referenceItem(link);
+    for (const finding of [...(token.findings || []), ...(token.faults || [])]) textItem("workflow-findings", finding);
+    const available = new Set(workflowView.available_actions || []);
+    for (const [name, label] of Object.entries(controlNames)) {
+      const option = document.createElement("option"); option.value = name; option.textContent = label; option.disabled = !available.has(name);
+      byId("workflow-event").append(option);
+      if (!available.has(name)) textItem("workflow-disabled", `${label}: ${workflowView.disabled_actions?.[name] || "Required permission or state is unavailable"}`);
+    }
+    byId("workflow-event").value = Object.keys(controlNames).find(name => available.has(name)) || "";
+    for (const name of available) if (!controlNames[name]) textItem("workflow-disabled", `${name.replaceAll("_", " ")}: The responsible component records this transition.`);
+    for (const [name, reason] of Object.entries(workflowView.disabled_actions || {})) if (!controlNames[name]) textItem("workflow-disabled", `${name.replaceAll("_", " ")}: ${reason}`);
+  }
+
+  workflowForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!selected || stale || !workflowView || pendingWorkflow?.unknown) return;
+    const name = byId("workflow-event").value;
+    if (!controlNames[name] || !(workflowView.available_actions || []).includes(name)) return;
+    const body = name === "claim" ? {lease_seconds: 300} : {event: name, reason: byId("workflow-reason").value};
+    if (name !== "claim") {
+      if (!body.reason.trim()) { notice("A workflow reason is required.", true); return; }
+      if (byId("workflow-next").value) body.next_action = byId("workflow-next").value;
+      if (name === "defer" || name === "update_control") {
+        if (byId("workflow-until").value) body.until = byId("workflow-until").value;
+        if (byId("workflow-milestone").value) body.milestone_task_id = byId("workflow-milestone").value;
+      }
+    }
+    const taskId = selected.task_id, revision = selected.revision;
+    const signature = JSON.stringify({taskId, revision, body});
+    pendingWorkflow = {signature, key: crypto.randomUUID(), taskId, revision, project,
+      body: JSON.parse(JSON.stringify(body)), path: `tasks/${encodeURIComponent(taskId)}/${name === "claim" ? "claim" : "workflow"}`, unknown: false};
+    showPendingWorkflow();
+    const operation = pendingWorkflow;
+    perform(() => sendWorkflowOperation(operation), true);
+  });
+
   function appendHistory(history) {
     const events = byId("history");
     for (const event of history) {
@@ -145,10 +325,12 @@
 
   async function selectTask(taskId) {
     const path = `tasks/${encodeURIComponent(taskId)}`;
-    const task = await request(path);
+    let task = await request(path);
+    const workflow = task.place ? await request(`${path}/workflow`) : null;
+    if (workflow) task = workflow.task;
     const history = await request(`${path}/history?limit=100&offset=0`);
     const lineage = await request(`${path}/lineage`);
-    selected = task; stale = false;
+    selected = task; stale = false; workflowView = workflow; renderWorkflow();
     byId("full-task-record").textContent = JSON.stringify(task, null, 2);
     structuralPlan = null; byId("structure-preview").textContent = "No plan previewed.";
     byId("selection").textContent = `${task.task_id} · Revision ${task.revision}`;
@@ -169,7 +351,7 @@
       item.textContent = `${edge.source_task_id} → ${edge.target_task_id} (${edge.action})`;
       links.append(item);
     }
-    for (const button of byId("task-list").querySelectorAll("button")) {
+    for (const button of [...byId("task-list").querySelectorAll("button"), ...byId("workflow-board").querySelectorAll("button")]) {
       button.setAttribute("aria-current", String(button.dataset.taskId === task.task_id));
     }
   }
@@ -178,7 +360,7 @@
     event.preventDefault();
     token = byId("token").value; project = byId("project").value;
     byId("token").value = "";
-    perform(async () => { await loadTasks(); notice(`Connected to ${project}.`); });
+    perform(async () => { await loadTasks(); await loadBoard(); notice(`Connected to ${project}.`); });
   });
   byId("logout").addEventListener("click", () => { disconnect(); notice("Logged out. Private task data and token cleared."); });
   byId("refresh-tasks").addEventListener("click", () => perform(async () => { await loadTasks(); notice("Task list refreshed."); }));
@@ -199,7 +381,7 @@
       pages += 1;
       if (reconcileCursor === null) break;
     } while (pages < 20);
-    await loadTasks(); notice(`${total} due task(s) sent for reassessment.${reconcileCursor ? " Continue scan for more tasks." : ""}`);
+    await loadTasks(); await loadBoard(); notice(`${total} due task(s) sent for reassessment.${reconcileCursor ? " Continue scan for more tasks." : ""}`);
   }, true));
   byId("refresh-selected").addEventListener("click", () => perform(async () => { await selectTask(selected.task_id); notice("Task and history refreshed. Current revision loaded."); }));
   byId("load-more-history").addEventListener("click", () => perform(async () => {
@@ -213,7 +395,7 @@
       const task = await request("tasks", { method: "POST", body: {
         task_id: byId("new-id").value, title: byId("new-title").value, description: byId("new-description").value,
       } });
-      create.reset(); await loadTasks(); await selectTask(task.task_id); notice("Task created. Execution is not authorized.");
+      create.reset(); await loadTasks(); await loadBoard(); await selectTask(task.task_id); notice("Task created. Execution is not authorized.");
     });
   });
   edit.addEventListener("submit", (event) => {
@@ -238,7 +420,7 @@
         architecture_refs: architecture,
       };
       await request(`tasks/${encodeURIComponent(selected.task_id)}`, { method: "PATCH", body, revision: selected.revision });
-      await loadTasks(); await selectTask(selected.task_id); notice("Task changes saved.");
+      await loadTasks(); await loadBoard(); await selectTask(selected.task_id); notice("Task changes saved.");
     }, true);
   });
   action.addEventListener("submit", (event) => {
@@ -254,7 +436,7 @@
       }
       await request(`tasks/${encodeURIComponent(selected.task_id)}/actions/${kind}`,
                     {method: "POST", body, revision: selected.revision});
-      action.reset(); await loadTasks(); await selectTask(selected.task_id); notice("Task action recorded.");
+      action.reset(); await loadTasks(); await loadBoard(); await selectTask(selected.task_id); notice("Task action recorded.");
     }, true);
   });
   function clearStructuralPreview() {
@@ -313,7 +495,7 @@
       const path = kind === "split" ? `tasks/${encodeURIComponent(selected.task_id)}/split` : "tasks/merge";
       const result = await request(path, {method: "POST", body, revision: kind === "split" ? selected.revision : undefined});
       structure.reset(); structuralPlan = null;
-      await loadTasks(); await selectTask(kind === "split" ? result.children[0].task_id : result.target.task_id);
+      await loadTasks(); await loadBoard(); await selectTask(kind === "split" ? result.children[0].task_id : result.target.task_id);
       notice("Structural task mapping recorded.");
     }, true);
   });

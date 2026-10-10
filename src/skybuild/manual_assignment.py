@@ -40,14 +40,26 @@ def _git(repo: Path, *args: str) -> bytes:
 
 
 def verify_assignment(envelope: dict, repo: Path, *, worker: str, git_runner=None) -> dict:
-    """Check a Cord snapshot against committed Git bytes; never grant task authority."""
+    """Check committed Git bytes and the shape of any API task snapshot."""
     git = git_runner or _git
+    if not isinstance(envelope, dict):
+        raise AssignmentError("Assignment fields do not match manual-work contract")
+    schema = envelope.get("schema")
+    if not isinstance(schema, str):
+        raise AssignmentError("Unknown assignment schema")
     required = {"schema", "assignment_id", "task_id", "worker", "dispatcher", "base_sha",
                 "brief_path", "brief_sha256", "branch", "owned_paths", "checks", "model_limit"}
-    if not isinstance(envelope, dict) or set(envelope) != required:
-        raise AssignmentError("Assignment fields do not match manual-work-v1")
-    if envelope["schema"] != "manual-work-v1":
+    if schema == "manual-work-v2":
+        required |= {"task_status", "task_revision"}
+    if set(envelope) != required:
+        raise AssignmentError("Assignment fields do not match manual-work contract")
+    if schema not in {"manual-work-v1", "manual-work-v2"}:
         raise AssignmentError("Unknown assignment schema")
+    if schema == "manual-work-v2":
+        if (type(envelope["task_revision"]) is not int or envelope["task_revision"] < 1
+                or not isinstance(envelope["task_status"], str)
+                or envelope["task_status"] not in {"ready", "in-progress"}):
+            raise AssignmentError("Assignment needs a valid task status and revision")
     if not isinstance(worker, str) or not worker or envelope["worker"] != worker:
         raise AssignmentError("Assignment names another worker")
     for field in ("assignment_id", "dispatcher"):
@@ -105,9 +117,13 @@ def verify_assignment(envelope: dict, repo: Path, *, worker: str, git_runner=Non
             or not isinstance(document.get("next_action"), str) or not document["next_action"].strip()
             or any(document[field] != envelope[field] for field in committed_fields)):
         raise AssignmentError("Cord assignment differs from committed brief")
-    return {"assignment_id": envelope["assignment_id"], "task_id": task_id, "worker": worker,
-            "base_sha": base, "brief_path": brief_path, "branch": branch, "owned_paths": paths,
-            "verified": True, "authority": "markdown"}
+    snapshot = {"assignment_id": envelope["assignment_id"], "task_id": task_id, "worker": worker,
+                "base_sha": base, "brief_path": brief_path, "branch": branch, "owned_paths": paths,
+                "verified": True, "authority": "markdown"}
+    if schema == "manual-work-v2":
+        snapshot.update(task_status=envelope["task_status"], task_revision=envelope["task_revision"],
+                        brief_authority="git", authority="git")
+    return snapshot
 
 
 def main() -> int:

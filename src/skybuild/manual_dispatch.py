@@ -6,6 +6,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import re
 import stat
 import subprocess
 import tempfile
@@ -31,18 +32,21 @@ def _git(repo: Path, *args: str) -> bytes:
     return result.stdout
 
 
-def _published_head(repo: Path) -> str:
-    remote = _git(repo, "ls-remote", "--exit-code", "origin", "refs/heads/dev-002").decode().strip()
+def _published_head(repo: Path, base_ref: str) -> str:
+    if not re.fullmatch(r"refs/heads/dev-[0-9]{3}", base_ref):
+        raise DispatchError("Base ref must name a development branch")
+    remote = _git(repo, "ls-remote", "--exit-code", "origin", base_ref).decode().strip()
     fields = remote.split()
-    if len(fields) != 2 or fields[1] != "refs/heads/dev-002":
+    if len(fields) != 2 or fields[1] != base_ref:
         raise DispatchError("Published development head is invalid")
     base = fields[0]
-    if _git(repo, "rev-parse", "--verify", "refs/remotes/origin/dev-002").decode().strip() != base:
+    if _git(repo, "rev-parse", "--verify", "refs/remotes/origin/" + base_ref.removeprefix("refs/heads/")).decode().strip() != base:
         raise DispatchError("Fetch the published development head before dispatch")
     return base
 
 
-def build_envelope(repo: Path, brief_path: str, *, worker: str, dispatcher: str) -> dict:
+def build_envelope(repo: Path, brief_path: str, *, worker: str, dispatcher: str,
+                   base_ref: str = "refs/heads/dev-003") -> dict:
     """Bind a committed brief to the current published development head."""
     if not valid_identifier(worker) or not valid_identifier(dispatcher):
         raise DispatchError("Worker or dispatcher identifier is invalid")
@@ -53,7 +57,7 @@ def build_envelope(repo: Path, brief_path: str, *, worker: str, dispatcher: str)
     if not brief_path.startswith("docs/design/assignments/") or not brief_path.endswith(".json"):
         raise DispatchError("Brief must be an assignment JSON path")
     repo = repo.resolve()
-    base = _published_head(repo)
+    base = _published_head(repo, base_ref)
     brief = _git(repo, "show", f"{base}:{brief_path}")
     if len(brief) > 65536:
         raise DispatchError("Brief exceeds size limit")
@@ -144,7 +148,7 @@ def _read_state(path: Path) -> dict | None:
 
 def dispatch(repo: Path, brief_path: str, *, worker: str, dispatcher: str, project: str,
              principal: str, url: str, token_file: Path, state_dir: Path,
-             ca_file: Path | None = None,
+             ca_file: Path | None = None, base_ref: str = "refs/heads/dev-003",
              resolve: Callable[[str], Iterable[str]] = _resolved_addresses,
              client_factory: Callable[..., Client] = Client) -> dict:
     """Record intent before I/O; retry only the same Cord body and key."""
@@ -173,7 +177,7 @@ def dispatch(repo: Path, brief_path: str, *, worker: str, dispatcher: str, proje
         fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
         state = _read_state(path)
         if state is None:
-            envelope = build_envelope(repo, brief_path, worker=worker, dispatcher=dispatcher)
+            envelope = build_envelope(repo, brief_path, worker=worker, dispatcher=dispatcher, base_ref=base_ref)
             mode = "new"
         else:
             envelope = state.get("assignment")
@@ -185,6 +189,8 @@ def dispatch(repo: Path, brief_path: str, *, worker: str, dispatcher: str, proje
                 raise DispatchError("Pinned assignment no longer verifies") from error
             if envelope["dispatcher"] != dispatcher or envelope["brief_path"] != brief_path:
                 raise DispatchError("Dispatch request differs from pinned assignment")
+            if envelope.get("schema") == "manual-work-v1" and state.get("status") == "sending":
+                raise DispatchError("Legacy sending intent needs manual reconciliation")
             mode = "pinned_retry" if state.get("status") == "sending" else "prepared_retry"
         identity = hashlib.sha256(f"{project}\0{envelope['assignment_id']}".encode()).hexdigest()
         key = f"manual-work-v1:{identity}"
@@ -195,6 +201,8 @@ def dispatch(repo: Path, brief_path: str, *, worker: str, dispatcher: str, proje
             raise DispatchError("Cord assignment exceeds message size limit")
         intended = {"schema": "manual-dispatch-intent-v1", "project": project, "principal": principal,
                     "endpoint": endpoint, "idempotency_key": key, "message": body, "assignment": envelope}
+        if state is None or "base_ref" in state:
+            intended["base_ref"] = base_ref
         if ca_sha256 is not None:
             intended["ca_sha256"] = ca_sha256
         if state is None:
@@ -221,10 +229,46 @@ def dispatch(repo: Path, brief_path: str, *, worker: str, dispatcher: str, proje
                 if (not isinstance(identity_response, dict) or identity_response.get("principal_id") != principal
                         or identity_response.get("is_admin") is not False or not isinstance(grants, dict)
                         or set(grants) != {project} or not isinstance(grants[project], list)
-                        or sorted(grants[project]) != ["cord:handle", "cord:read", "cord:send"]):
+                        or sorted(grants[project]) != ["cord:handle", "cord:read", "cord:send", "tasks:read"]):
                     raise DispatchError("Token does not identify the scoped dispatcher")
                 if state["status"] == "prepared":
-                    if mode == "new" and _published_head(repo) != envelope["base_sha"]:
+                    if envelope["schema"] == "manual-work-v1":
+                        task = client.get_task(project, envelope["task_id"])
+                        if (not isinstance(task, dict) or task.get("task_id") != envelope["task_id"]
+                                or not isinstance(task.get("status"), str)
+                                or task["status"] not in {"ready", "in-progress"}
+                                or type(task.get("revision")) is not int or task["revision"] < 1):
+                            raise DispatchError("Task is unavailable or not ready for manual dispatch")
+                        _require_dispatchable_place(task)
+                        envelope = {**envelope, "schema": "manual-work-v2",
+                                    "task_status": task["status"], "task_revision": task["revision"]}
+                        try:
+                            verify_assignment(envelope, repo, worker=worker)
+                        except AssignmentError as error:
+                            raise DispatchError("Task-bound assignment no longer verifies") from error
+                        body = {"recipient": worker, "subject": f"Manual assignment {envelope['assignment_id']}",
+                                "body": json.dumps(envelope, sort_keys=True, separators=(",", ":")),
+                                "category": "manual-work", "urgency": "normal"}
+                        if len(body["body"]) > 32768 or len(body["subject"]) > 500:
+                            raise DispatchError("Cord assignment exceeds message size limit")
+                        intended = {"schema": "manual-dispatch-intent-v1", "project": project,
+                                    "principal": principal, "endpoint": endpoint, "idempotency_key": key,
+                                    "message": body, "assignment": envelope}
+                        if "base_ref" in state:
+                            intended["base_ref"] = state["base_ref"]
+                        if ca_sha256 is not None:
+                            intended["ca_sha256"] = ca_sha256
+                        state = {**intended, "status": "prepared", "result": None}
+                        _atomic_json(path, state)
+                    else:
+                        task = client.get_task(project, envelope["task_id"])
+                        if (not isinstance(task, dict) or task.get("task_id") != envelope["task_id"]
+                                or task.get("status") != envelope["task_status"]
+                                or type(task.get("revision")) is not int
+                                or task["revision"] != envelope["task_revision"]):
+                            raise DispatchError("Task changed before assignment send")
+                        _require_dispatchable_place(task)
+                    if mode == "new" and _published_head(repo, base_ref) != envelope["base_sha"]:
                         raise DispatchError("Published development head changed before send")
                     state = {**intended, "status": "sending", "result": None}
                     _atomic_json(path, state)
@@ -241,6 +285,14 @@ def dispatch(repo: Path, brief_path: str, *, worker: str, dispatcher: str, proje
         os.close(lock_descriptor)
 
 
+def _require_dispatchable_place(task):
+    petri = task.get("metadata", {}).get("_skybuild_workflow", {}).get("petri")
+    if isinstance(petri, dict) and petri.get("schema_version") == 1:
+        token = petri.get("token", {})
+        if token.get("place") != "ready" or token.get("pending_action") is not None or token.get("superseded"):
+            raise DispatchError("Petri task is not permitted Ready work")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkout", type=Path, required=True)
@@ -253,12 +305,13 @@ def main() -> int:
     parser.add_argument("--token-file", type=Path, required=True)
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--ca-file", type=Path)
+    parser.add_argument("--base-ref", default="refs/heads/dev-003")
     args = parser.parse_args()
     try:
         print(json.dumps(dispatch(args.checkout, args.brief_path, worker=args.worker,
                                   dispatcher=args.dispatcher, project=args.project, principal=args.principal,
                                   url=args.url, token_file=args.token_file, state_dir=args.state_dir,
-                                  ca_file=args.ca_file), sort_keys=True))
+                                  ca_file=args.ca_file, base_ref=args.base_ref), sort_keys=True))
         return 0
     except (DispatchError, AssignmentError, OSError, ValueError, UnicodeError, subprocess.TimeoutExpired) as error:
         reason = str(error) if isinstance(error, DispatchError) else "Dispatch input or environment is invalid"

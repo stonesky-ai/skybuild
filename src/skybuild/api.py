@@ -8,13 +8,14 @@ from typing import Annotated, Any, Literal
 from fastapi import Depends, FastAPI, Header, Path, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field, StrictBool, StrictInt, StringConstraints, field_validator
+from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field, StrictBool, StrictInt, StringConstraints, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
 
 from . import __version__
 from .contracts import DomainError, Principal, valid_identifier
 from .web import install_workbench
+from .workflow import TRANSITIONS, _workflow_event
 
 
 def _identifier(value: str) -> str:
@@ -59,6 +60,8 @@ class TaskFields(Input):
     @classmethod
     def bounded_metadata(cls, value: dict | None) -> dict | None:
         if value is not None:
+            if set(value) & {"_skybuild_workflow", "_skybuild_completion"}:
+                raise ValueError("Workflow metadata is managed by task actions")
             try:
                 encoded = json.dumps(value, allow_nan=False, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
             except (ValueError, RecursionError) as error:
@@ -87,6 +90,89 @@ class TaskAction(Input):
     responsible: WorkflowText | None = None
     until: AwareDatetime | None = None
     milestone_task_id: Identifier | None = None
+
+
+class SubmissionReceipt(Input):
+    """Author output identity. This receipt does not attest validation or acceptance."""
+
+    source_head: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")]
+    target_base: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")]
+    source_branch: Annotated[str, StringConstraints(min_length=12, max_length=200)]
+    attempt_id: Identifier
+    claim_fence: Annotated[StrictInt, Field(ge=1, lt=2**63)]
+    input_generation: Annotated[StrictInt, Field(ge=0, lt=2**63)]
+    definition_revision: Annotated[StrictInt, Field(ge=0, lt=2**63)]
+    policy_version: Annotated[str, StringConstraints(max_length=200)]
+
+    @field_validator("source_branch")
+    @classmethod
+    def branch_reference(cls, value):
+        if (not value.startswith("refs/heads/") or ".." in value or "@{" in value or
+                any(ord(char) <= 32 or ord(char) == 127 or char in "~^:?*[\\" for char in value) or
+                any(not part or part.startswith(".") or part.endswith((".", ".lock")) for part in value.split("/"))):
+            raise ValueError("Submission requires a full branch reference")
+        return value
+
+    @field_validator("policy_version")
+    @classmethod
+    def policy_text(cls, value):
+        if "\x00" in value:
+            raise ValueError("Policy version cannot contain NUL")
+        return value
+
+
+class WorkflowTransition(Input):
+    """Caller details only. Headers supply revision and operation identity."""
+
+    event: Identifier
+    reason: OptionalText | None = None
+    next_action: OptionalText | None = None
+    responsible: WorkflowText | None = None
+    until: AwareDatetime | None = None
+    milestone_task_id: Identifier | None = None
+    result: dict[str, Any] | None = None
+    source_head: str | None = None
+    target_base: str | None = None
+    source_branch: str | None = None
+    attempt_id: str | None = None
+    claim_fence: StrictInt | None = None
+    input_generation: StrictInt | None = None
+    definition_revision: StrictInt | None = None
+    policy_version: str | None = None
+
+    @model_validator(mode="after")
+    def bounded_event(self):
+        body = self.model_dump(mode="json", exclude_unset=True)
+        if self.event not in {spec.event for spec in TRANSITIONS} | {"initialize"}:
+            raise ValueError("Unknown workflow event")
+        details = set(body) - {"event"}
+        receipt_fields = set(SubmissionReceipt.model_fields)
+        if self.event == "submit":
+            if details != receipt_fields:
+                raise ValueError("Submission requires the complete output receipt only")
+            SubmissionReceipt.model_validate({name: body[name] for name in receipt_fields})
+            try:
+                json.dumps(body, allow_nan=False, ensure_ascii=False).encode()
+            except (ValueError, UnicodeError):
+                raise ValueError("Submission receipt must be finite UTF-8 JSON") from None
+            return self
+        if details & receipt_fields:
+            raise ValueError("Only submission accepts an output receipt")
+        _workflow_event({**body, "operation_id": "validate", "expected_revision": 0})
+        if self.event in {"initialize", "claim", "freeze", "accept"}:
+            if details:
+                raise ValueError("This event does not accept caller details")
+        elif self.event == "validation_result":
+            if details != {"result"}:
+                raise ValueError("Validation progress requires only a result")
+        else:
+            if "result" in details or not isinstance(self.reason, str) or not self.reason.strip():
+                raise ValueError("Control events require a reason")
+            if self.event not in {"defer", "update_control"} and details & {"until", "milestone_task_id"}:
+                raise ValueError("This event does not accept a deferral trigger")
+            if self.event == "defer" and (("until" in details) == ("milestone_task_id" in details)):
+                raise ValueError("Deferral requires exactly one trigger")
+        return self
 
 
 class CPULocalControl(Input):
@@ -319,11 +405,34 @@ def create_app(store: Any) -> FastAPI:
     @app.get(base + "/tasks")
     def list_tasks(project_id: ProjectPath, actor: Actor, limit: Limit = 100, offset: Offset = 0,
                    after_task_id: Identifier | None = None, by_id: bool = False) -> list:
-        return store.list_tasks(actor, project_id, limit=limit, offset=offset, after_task_id=after_task_id, by_id=by_id)
+        from .store import Store
+        tasks = store.list_tasks(actor, project_id, limit=limit, offset=offset, after_task_id=after_task_id, by_id=by_id)
+        return [{**task, **Store.workflow_projection(task)} for task in tasks]
+
+    @app.get(base + "/workflow-board")
+    def workflow_board(project_id: ProjectPath, actor: Actor, limit: Limit = 100, offset: Offset = 0) -> dict:
+        return store.workflow_board(actor, project_id, limit=limit, offset=offset)
 
     @app.get(base + "/tasks/{task_id}")
     def get_task(project_id: ProjectPath, task_id: RecordPath, actor: Actor) -> dict:
-        return store.get_task(actor, project_id, task_id)
+        from .store import Store
+        task = store.get_task(actor, project_id, task_id)
+        return {**task, **Store.workflow_projection(task)}
+
+    @app.get(base + "/tasks/{task_id}/workflow")
+    def task_workflow(project_id: ProjectPath, task_id: RecordPath, actor: Actor) -> dict:
+        return store.task_workflow(actor, project_id, task_id)
+
+    @app.post(base + "/tasks/{task_id}/workflow")
+    def workflow_transition(project_id: ProjectPath, task_id: RecordPath, body: WorkflowTransition,
+                            actor: Actor, idem: Key, expected: Revision) -> dict:
+        if not valid_identifier(idem):
+            raise DomainError("validation", "Workflow operation key must be addressable", 422)
+        details = body.model_dump(mode="json", exclude_unset=True)
+        event = details.pop("event")
+        if event == "initialize":
+            return store.initialize_workflow(actor, project_id, task_id, expected, idem)
+        return store.workflow_transition(actor, project_id, task_id, event, details, expected, idem)
 
     @app.get(base + "/tasks/{task_id}/execution-status")
     def execution_status(project_id: ProjectPath, task_id: RecordPath, actor: Actor,

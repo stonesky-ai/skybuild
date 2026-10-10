@@ -278,10 +278,13 @@ def test_binding_order_does_not_change_owned_addresses(promotion):
     assert controller.promotion_preflight(**arguments)['ready_for_operator_promotion'] is True
 
 
-def test_schema_010_role_audit_and_atomic_011_requalification(monkeypatch):
+def test_schema_010_role_audit_and_atomic_candidate_requalification(monkeypatch):
     from uuid import uuid4
     from psycopg import sql
+    from psycopg.types.json import Jsonb
     from psycopg.conninfo import conninfo_to_dict, make_conninfo
+    from fastapi.testclient import TestClient
+    from skybuild.api import create_app
     from skybuild.store import Store
 
     base = os.environ.get('SKYBUILD_HTTP_TEST_DSN')
@@ -290,15 +293,17 @@ def test_schema_010_role_audit_and_atomic_011_requalification(monkeypatch):
     database = conninfo_to_dict(base).get('dbname', '')
     if not database.startswith('skybuild_') or not database.endswith('_test'):
         pytest.fail('Promotion rehearsal requires an explicitly disposable database')
-    target, role = 'skybuild_promotion_' + uuid4().hex + '_test', 'runtime_' + uuid4().hex
+    target, role, role_password = ('skybuild_promotion_' + uuid4().hex + '_test',
+                                  'runtime_' + uuid4().hex, uuid4().hex + uuid4().hex)
     dsn = make_conninfo(base, dbname=target)
+    runtime_dsn = make_conninfo(base, dbname=target, user=role, password=role_password)
     migrations = sorted((Path(skybuild.__file__).parent / 'migrations').glob('*.sql'))
     old = [path for path in migrations if int(path.name.split('_', 1)[0]) <= 10]
-    expansion = next(path for path in migrations if path.name == '011_cpu_fake_dispatch.sql')
-    authority = next(path for path in migrations if path.name == '012_api_task_authority.sql')
+    expansions = [path for path in migrations if int(path.name.split('_', 1)[0]) > 10]
+    candidate_version = int(expansions[-1].name.split('_', 1)[0])
     with psycopg.connect(base, autocommit=True) as cluster:
         cluster.execute(sql.SQL('CREATE DATABASE {}').format(sql.Identifier(target)))
-        cluster.execute(sql.SQL('CREATE ROLE {} LOGIN PASSWORD {}').format(sql.Identifier(role), sql.Literal(uuid4().hex)))
+        cluster.execute(sql.SQL('CREATE ROLE {} LOGIN PASSWORD {}').format(sql.Identifier(role), sql.Literal(role_password)))
     try:
         store = Store(dsn, target)
         with store._connection() as connection:
@@ -321,19 +326,101 @@ def test_schema_010_role_audit_and_atomic_011_requalification(monkeypatch):
 
         def upgrade(connection):
             connection.execute('SET LOCAL search_path TO skybuild, pg_catalog')
-            connection.execute(expansion.read_text())
-            connection.execute('INSERT INTO schema_migrations VALUES (11, %s)',
-                               (hashlib.sha256(expansion.read_bytes()).hexdigest(),))
-            assert runtime_role.provision_runtime_role(connection, target, role)['ok'] is True
-            connection.execute(authority.read_text())
-            connection.execute('INSERT INTO schema_migrations VALUES (12, %s)',
-                               (hashlib.sha256(authority.read_bytes()).hexdigest(),))
+            for expansion in expansions:
+                connection.execute(expansion.read_text())
+                connection.execute('INSERT INTO schema_migrations VALUES (%s, %s)',
+                                   (int(expansion.name.split('_', 1)[0]),
+                                    hashlib.sha256(expansion.read_bytes()).hexdigest()))
             assert runtime_role.provision_runtime_role(connection, target, role)['ok'] is True
 
-        with pytest.raises(RuntimeError, match='Qualification boundary failure'):
-            with psycopg.connect(dsn) as connection:
-                upgrade(connection)
-                raise RuntimeError('Qualification boundary failure')
+        class Accepted010Store(Store):
+            # Model the accepted controller's schema-010 write contract exactly.
+            # Current production Store remains strict about schema-013 enrollment.
+            @staticmethod
+            def _new_task_metadata(task):
+                return task['metadata']
+
+            @staticmethod
+            def _journal(connection, principal, after, before=None, *, operation=None,
+                         reason=None, event_facts=None):
+                assert event_facts is None, 'Schema-010 controller cannot write Petri events'
+                operation = operation or ('updated' if before else 'created')
+                if operation == 'created':
+                    connection.execute(
+                        'INSERT INTO task_readiness (project_id, task_id) VALUES (%s, %s) ON CONFLICT DO NOTHING',
+                        (after['project_id'], after['task_id']))
+                connection.execute(
+                    'INSERT INTO task_journal (event_id, project_id, task_id, actor, operation, revision, reason, before_state, after_state) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)',
+                    (uuid4(), after['project_id'], after['task_id'], principal.principal_id,
+                     operation, after['revision'], reason or 'Task ' + operation,
+                     Jsonb(before) if before else None, Jsonb(after)))
+
+            def readiness(self):
+                with self._connection() as connection:
+                    versions = connection.execute(
+                        'SELECT version, digest FROM schema_migrations ORDER BY version').fetchall()
+                expected = [
+                    {'version': int(path.name.split('_', 1)[0]),
+                     'digest': hashlib.sha256(path.read_bytes()).hexdigest()}
+                    for path in old
+                ]
+                if versions != expected:
+                    raise RuntimeError('Accepted schema-010 controller found incompatible database')
+                return {'ready': True, 'schema_version': 10}
+
+        owner, worker = 'owner-' + uuid4().hex, 'worker-' + uuid4().hex
+        owner_token, worker_token = uuid4().hex + uuid4().hex, uuid4().hex + uuid4().hex
+        project = 'promotion-' + uuid4().hex
+        registry = Store(dsn, target)
+        registry.provision_principal(owner, owner_token, is_admin=True)
+        registry.provision_principal(worker, worker_token, grants={project: [
+            'tasks:read', 'tasks:write', 'cord:send', 'cord:read', 'cord:handle']})
+
+        def headers(token, key=None):
+            return {'Authorization': 'Bearer ' + token, 'Idempotency-Key': key or uuid4().hex}
+
+        def preserved_state(client):
+            api = f'/api/v1/projects/{project}'
+            assert client.get('/health/ready').json() == {'status': 'ready'}
+            task_history = client.get(api + '/tasks/promotion-task/history',
+                                      headers=headers(owner_token))
+            assert task_history.status_code == 200, task_history.text
+            assert len(task_history.json()) == 1
+            inbox = client.get(api + '/cord/inbox', headers=headers(worker_token))
+            assert inbox.status_code == 200, inbox.text
+            assert [message['subject'] for message in inbox.json()] == ['Pinned assignment']
+            history = task_history.json()
+            # Migration 013 adds a nullable column to these unchanged records.
+            # Remove only its empty projection; retain any unexpected event facts.
+            for event in history:
+                if event.get('event_facts') is None:
+                    event.pop('event_facts', None)
+            return history, inbox.json()
+
+        accepted = Accepted010Store(runtime_dsn, target)
+        with TestClient(create_app(accepted)) as client:
+            assert client.get('/health/ready').json() == {'status': 'ready'}
+            api = f'/api/v1/projects/{project}'
+            task = client.post(api + '/tasks', headers=headers(owner_token, 'create-task'), json={
+                'task_id': 'promotion-task', 'title': 'Retain task history', 'description': 'Schema rehearsal'})
+            assert task.status_code == 201, task.text
+            message = client.post(api + '/cord/messages', headers=headers(owner_token, 'send-cord'), json={
+                'recipient': worker, 'subject': 'Pinned assignment', 'body': 'Keep this record'})
+            assert message.status_code == 201, message.text
+
+            # Candidate preparation is represented by bounded migration/source hashing only.
+            candidate_schema_digest = hashlib.sha256(
+                b''.join(path.read_bytes() for path in expansions)).hexdigest()
+            assert len(candidate_schema_digest) == 64
+            retained_records = preserved_state(client)
+
+            with pytest.raises(RuntimeError, match='Qualification boundary failure'):
+                with psycopg.connect(dsn) as connection:
+                    upgrade(connection)
+                    raise RuntimeError('Qualification boundary failure')
+            assert client.get('/health/ready').json() == {'status': 'ready'}
+            assert preserved_state(client) == retained_records
+
         with psycopg.connect(dsn) as connection:
             assert connection.execute('SELECT max(version) FROM skybuild.schema_migrations').fetchone()[0] == 10
             assert connection.execute("SELECT to_regclass('skybuild.cpu_fake_dispatches')").fetchone()[0] is None
@@ -341,9 +428,23 @@ def test_schema_010_role_audit_and_atomic_011_requalification(monkeypatch):
                 'missing table: cpu_fake_dispatches', 'missing table: cpu_fake_receipts']
         with psycopg.connect(dsn) as connection:
             upgrade(connection)
-        assert store.readiness() == {'ready': True, 'schema_version': 12}
+        assert store.readiness() == {'ready': True, 'schema_version': candidate_version}
         with psycopg.connect(dsn) as connection:
             assert runtime_role.audit_runtime_role(connection, target, role)['ok'] is True
+
+        with pytest.raises(RuntimeError, match='incompatible database'):
+            accepted.readiness()
+
+        class FailedCandidateStore(Store):
+            def readiness(self):
+                raise RuntimeError('Injected candidate readiness failure')
+
+        with TestClient(create_app(FailedCandidateStore(runtime_dsn, target))) as failed_candidate:
+            assert failed_candidate.get('/health/ready').status_code == 503
+
+        recovered_candidate = Store(runtime_dsn, target)
+        with TestClient(create_app(recovered_candidate)) as client:
+            assert preserved_state(client) == retained_records
     finally:
         with psycopg.connect(base, autocommit=True) as cluster:
             cluster.execute(sql.SQL('DROP DATABASE {}').format(sql.Identifier(target)))

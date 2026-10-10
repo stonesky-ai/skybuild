@@ -19,7 +19,7 @@ class PreflightError(ValueError):
 
 
 _WORKER_SCOPES = {"tasks:read", "cord:read", "cord:send", "cord:handle"}
-_REQUIRED_SCOPES = {"cord:read", "cord:send", "cord:handle"}
+_REQUIRED_SCOPES = {"tasks:read", "cord:read", "cord:send", "cord:handle"}
 _TAILNET_V4 = ipaddress.ip_network("100.64.0.0/10")
 _TAILNET_V6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
 
@@ -53,7 +53,8 @@ def _token_from_file(path: Path) -> str:
 def probe_private_api(url: str, project_id: str, token_file: Path, expected_principal: str,
                       *, transport: httpx.BaseTransport | None = None,
                       ca_file: Path | None = None,
-                      resolve: Callable[[str], Iterable[str]] = _resolved_addresses) -> dict:
+                      resolve: Callable[[str], Iterable[str]] = _resolved_addresses,
+                      workflow: bool = False) -> dict:
     """Require trusted HTTPS, ready service, exact worker identity and narrow grants."""
     endpoint = httpx.URL(url)
     if (endpoint.scheme != "https" or not endpoint.host or not endpoint.host.endswith(".ts.net")
@@ -82,16 +83,22 @@ def probe_private_api(url: str, project_id: str, token_file: Path, expected_prin
             if identity.get("is_admin") is not False or not isinstance(grants, dict) or set(grants) != {project_id}:
                 raise PreflightError("Token is not confined to this worker project")
             scopes = grants[project_id]
+            permitted = _WORKER_SCOPES | ({"tasks:claim", "tasks:write"} if workflow else set())
+            required = _REQUIRED_SCOPES | ({"tasks:claim", "tasks:write"} if workflow else set())
             if (not isinstance(scopes, list) or not all(isinstance(scope, str) for scope in scopes)
                     or len(scopes) != len(set(scopes))
-                    or not _REQUIRED_SCOPES <= set(scopes) <= _WORKER_SCOPES):
+                    or not required <= set(scopes) <= permitted):
                 raise PreflightError("Token grants are missing or broader than the pilot contract")
             if not isinstance(client.inbox(project_id, limit=1), list):
                 raise PreflightError("Cord inbox response is invalid")
+            tasks = client.list_tasks(project_id, limit=1, by_id=True)
+            if not isinstance(tasks, list) or len(tasks) > 1:
+                raise PreflightError("Task list response is invalid")
     except ClientError as error:
         raise PreflightError(f"SkyBuild API check failed ({error.code})") from None
     return {"ready": True, "project_id": project_id, "principal_id": expected_principal,
-            "scopes": sorted(scopes), "inbox_access": True, "host": endpoint.host}
+            "scopes": sorted(scopes), "inbox_access": True, "task_list_access": True,
+            "host": endpoint.host}
 
 
 def main() -> int:
@@ -102,10 +109,11 @@ def main() -> int:
     parser.add_argument("--token-file", type=Path, required=True)
     parser.add_argument("--principal", required=True)
     parser.add_argument("--ca-file", type=Path)
+    parser.add_argument("--workflow", action="store_true", help="Require the explicit Petri worker scope profile")
     args = parser.parse_args()
     try:
         print(json.dumps(probe_private_api(args.url, args.project, args.token_file, args.principal,
-                                           ca_file=args.ca_file), sort_keys=True))
+                                           ca_file=args.ca_file, workflow=args.workflow), sort_keys=True))
         return 0
     except (PreflightError, ValueError, httpx.HTTPError):
         print(json.dumps({"ready": False, "reason": "Private API or worker scope check failed"}))

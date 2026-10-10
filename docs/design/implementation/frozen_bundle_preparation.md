@@ -4,7 +4,7 @@ Task: `SKYBUILD-BUNDLED-INTEGRATION`. Implementation source base:
 `42c3256d1dd05af2c1c457d214231cce9f69c066` (architecture A38, working
 contract and automatic bundled integration in section 2). This is the bounded
 preparation slice of the existing integration workflow, not a new readiness
-authority. The Markdown ledgers retain task authority.
+authority. The SkyBuild task API remains authoritative; this helper changes no task state.
 
 `scripts/prepare_bundle.py` composes only caller-supplied, already-reviewed full
 commit SHAs, in supplied dependency order, into a detached candidate. It checks
@@ -46,8 +46,22 @@ and reviewer reference are caller attestations to existing independent review;
 the helper cannot qualify a reviewer or interpret prose findings. Supply the
 accepted project/member gate requirements as `policy_evidence`; its bytes are
 hashed with the inputs, not interpreted or weakened. The existing review and
-one full combined disposable gate remain required. The 64-member and 256 KiB
-input limits bound one invocation, not project batching policy.
+one full combined disposable gate remain required. The helper enforces a hard
+limit of 20 unique task members per bundle. At freeze, include all tasks ready
+for integration up to this cap, in dependency order. Do not make a one-task
+bundle while another ready task can fit. The 256 KiB input limits also bound
+one invocation. Preparation requires at most 62 existing worktrees, reserving
+two slots under the 64-worktree host limit for the retained prepared candidate
+and the disposable integration candidate. The integration helper refuses to
+start at the worktree limit. Clean only finished worktrees owned by the current
+session after verifying their work is pushed or otherwise preserved; never
+remove locked, dirty, or unknown-owner worktrees. Preparation and integration
+serialize slot reservations with a shared lock in the common Git directory.
+Integration holds a separate repository-local publication lock through its gate
+and publication, releasing capacity immediately after candidate registration.
+Preparation can therefore proceed during a gate when capacity allows. Refs are
+rechecked after acquiring publication ownership; a moved base requires a new
+freeze before another gate starts. See [overlapped preparation](overlapped_bundle_preparation.md).
 
 Run from a clean, explicitly owned SkyBuild checkout whose origin fetch/push
 URLs identify `stonesky-ai/skybuild`. Use a new output directory outside every
@@ -61,7 +75,7 @@ python scripts/prepare_bundle.py \
 ```
 
 Git commands run at nice 10. Before fetch/worktree creation and each merge,
-available memory must be at least 8 GiB. The helper uses no model, REST endpoint,
+available memory must be at least 6 GiB. The helper uses no model, REST endpoint,
 daemon, PostgreSQL process, test gate, publisher or runtime deployment.
 Inherited `GIT_*` environment variables other than RTK's inert `GIT_PAGER` are
 rejected before even the repository guard runs. The helper's Git subprocesses
@@ -87,6 +101,24 @@ automatically retried; diagnose it, preserve evidence and explicitly prepare a
 new candidate. Keep output artifacts with the bundle handoff. Candidate review,
 the full combined gate, publication and confirmed per-task inclusion follow as
 separate operations under the existing policy.
+
+### Reviewed publication gate evidence
+
+`SKYBUILD-INTEGRATION-GATE-PINS` hardens the existing publication helper from
+source base `b9ee24ebd6d70bcd56e102c4af4017d5f49aef91`. Its default full gate
+receives an exclusive durable artifact, unique run ID, and exact candidate
+commit/tree pins. Acceptance requires terminal passing evidence for that same
+run and candidate, confirmed container cleanup, a clean unchanged commit/tree,
+and the existing remote-ref and published-tree checks. An empty commit during
+the gate invalidates acceptance even when the tree is identical.
+
+Use `--gate-artifact /absolute/private/evidence/run.json` to select the retained
+record. Its parent must already be an owned private directory outside the
+candidate. When omitted, the helper allocates a private evidence directory and
+reports the artifact path. Failed records are preserved and must not be reused.
+Custom validation-only gates still cannot publish, and do not accept this
+artifact option. This implements existing frozen-candidate acceptance; it does
+not qualify an atomic GitHub expected-base publisher.
 
 Reuse is deliberately narrow: SkyBuild `integrate_reviewed_pr.py` supplies the
 guarded exact-ref/detached-candidate mechanics and `_repo_guard` is reused

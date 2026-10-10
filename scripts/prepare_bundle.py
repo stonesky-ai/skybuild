@@ -13,10 +13,15 @@ import subprocess
 
 from _repo_guard import RepoGuardError, verify_skybuild
 from disposable_pg_gate import available_memory_bytes
+from _worktree_capacity import MAX_WORKTREES, WorktreeCapacityError, reserve_worktree_slots
 
 
 class PreparationError(RuntimeError):
     """The supplied frozen inputs cannot produce a reusable candidate."""
+
+
+MAX_BUNDLE_TASKS = 20
+PREPARE_WORKTREE_RESERVE = 2
 
 
 def _git_environment() -> dict[str, str]:
@@ -56,8 +61,8 @@ def frozen_inputs(root: Path, manifest: Path) -> dict:
     if not isinstance(supplied, dict) or supplied.get("schema") != "skybuild.bundle-input.v1":
         raise PreparationError("Unknown manifest schema")
     members = supplied.get("members")
-    if not isinstance(members, list) or not members or len(members) > 64:
-        raise PreparationError("Supply 1..64 explicit reviewed members")
+    if not isinstance(members, list) or not members or len(members) > MAX_BUNDLE_TASKS:
+        raise PreparationError(f"Supply 1..{MAX_BUNDLE_TASKS} explicit reviewed members")
 
     def revision(ref, sha):
         if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
@@ -115,8 +120,8 @@ def _clean(root: Path) -> None:
 
 
 def _reserve() -> None:
-    if available_memory_bytes() < 8 * 1024**3:
-        raise PreparationError("Available memory is below the required 8 GiB reserve")
+    if available_memory_bytes() < 6 * 1024**3:
+        raise PreparationError("Available memory is below the required 6 GiB reserve")
 
 
 def _assert_candidate(root: Path, candidate: Path) -> None:
@@ -138,14 +143,20 @@ def prepare(checkout: Path, manifest: Path, output: Path) -> dict:
         raise PreparationError("Output must not be a symlink")
     output = output.resolve()
     # A candidate must not sit within any existing checkout, or contain one.
-    for line in git(root, "worktree", "list", "--porcelain").splitlines():
-        if line.startswith("worktree "):
-            worktree = Path(line[9:]).resolve()
-            # A successful rerun owns exactly this detached candidate.
-            if worktree == output / "candidate":
-                continue
-            if output.is_relative_to(worktree) or worktree.is_relative_to(output):
-                raise PreparationError("Output must be isolated from existing worktrees")
+    worktree_lines = git(root, "worktree", "list", "--porcelain").splitlines()
+    worktree_paths = [Path(line[9:]).resolve() for line in worktree_lines
+                      if line.startswith("worktree ")]
+    needs_new_candidate = not (output / "report.json").exists()
+    if needs_new_candidate and len(worktree_paths) > MAX_WORKTREES - PREPARE_WORKTREE_RESERVE:
+        raise PreparationError(
+            f"Need at most {MAX_WORKTREES - PREPARE_WORKTREE_RESERVE} existing worktrees "
+            f"to reserve {PREPARE_WORKTREE_RESERVE} slots for bundle preparation and integration")
+    for worktree in worktree_paths:
+        # A successful rerun owns exactly this detached candidate.
+        if worktree == output / "candidate":
+            continue
+        if output.is_relative_to(worktree) or worktree.is_relative_to(output):
+            raise PreparationError("Output must be isolated from existing worktrees")
     if not output.exists():
         output.mkdir(mode=0o700, parents=False)
         _write(output / "inputs.json", {"fingerprint": fingerprint, "inputs": inputs})
@@ -193,8 +204,12 @@ def prepare(checkout: Path, manifest: Path, output: Path) -> dict:
             check_refs(root, inputs)
             for item in [inputs["target"], *inputs["members"]]:
                 git(root, "cat-file", "-e", item["sha"] + "^{commit}")
-            git(root, "-c", "core.hooksPath=/dev/null", "worktree", "add", "--detach",
-                str(candidate), inputs["target"]["sha"])
+            try:
+                with reserve_worktree_slots(root, PREPARE_WORKTREE_RESERVE):
+                    git(root, "-c", "core.hooksPath=/dev/null", "worktree", "add", "--detach",
+                        str(candidate), inputs["target"]["sha"])
+            except WorktreeCapacityError as error:
+                raise PreparationError(str(error)) from error
             for member in inputs["members"]:
                 _reserve()
                 _assert_candidate(root, candidate)

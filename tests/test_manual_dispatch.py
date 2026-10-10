@@ -36,7 +36,7 @@ def test_build_envelope_from_committed_bytes(tmp_path, monkeypatch):
     _git(repo, "add", ".")
     _git(repo, "commit", "-qm", "test brief")
     base = _git(repo, "rev-parse", "HEAD")
-    monkeypatch.setattr(manual_dispatch, "_published_head", lambda _repo: base)
+    monkeypatch.setattr(manual_dispatch, "_published_head", lambda _repo, _base_ref: base)
     envelope = manual_dispatch.build_envelope(repo, path, worker="wonko", dispatcher="pilot_dispatcher")
     assert envelope["base_sha"] == base
     assert envelope["brief_sha256"] == hashlib.sha256(raw).hexdigest()
@@ -49,7 +49,9 @@ class FakeClient:
     def __init__(self):
         self.calls = []
         self.fail_once = False
-        self.grants = {"skybuild": ["cord:send", "cord:read", "cord:handle"]}
+        self.task = {"task_id": "SKYBUILD-TASK-CUTOVER", "status": "ready", "revision": 2}
+        self.task_reads = 0
+        self.grants = {"skybuild": ["cord:send", "cord:read", "cord:handle", "tasks:read"]}
 
     def __enter__(self):
         return self
@@ -63,6 +65,11 @@ class FakeClient:
 
     def whoami(self):
         return {"principal_id": "pilot_dispatcher", "is_admin": False, "grants": self.grants}
+
+    def get_task(self, project, task_id):
+        assert (project, task_id) == ("skybuild", "SKYBUILD-TASK-CUTOVER")
+        self.task_reads += 1
+        return self.task
 
     def send_message(self, project, body, *, idempotency_key):
         self.calls.append((project, body, idempotency_key))
@@ -87,7 +94,7 @@ def _dispatch(tmp_path, monkeypatch, client):
                 "model_limit": "One existing subscription worker"}
     monkeypatch.setattr(manual_dispatch, "build_envelope", lambda *_args, **_kwargs: envelope)
     monkeypatch.setattr(manual_dispatch, "verify_assignment", lambda *_args, **_kwargs: {"verified": True})
-    monkeypatch.setattr(manual_dispatch, "_published_head", lambda _repo: "a" * 40)
+    monkeypatch.setattr(manual_dispatch, "_published_head", lambda _repo, _base_ref: "a" * 40)
     kwargs = {"worker": "wonko", "dispatcher": "pilot_dispatcher", "project": "skybuild",
               "principal": "pilot_dispatcher", "url": "https://controller.ts.net",
               "token_file": token, "state_dir": state,
@@ -157,15 +164,48 @@ def test_retry_uses_same_intent_and_key(tmp_path, monkeypatch):
     prepared = list(state_dir.glob("*.json"))
     assert len(prepared) == 1
     assert json.loads(prepared[0].read_text())["status"] == "sending"
-    monkeypatch.setattr(manual_dispatch, "_published_head", lambda _repo: "c" * 40)
+    sent_envelope = json.loads(client.calls[0][1]["body"])
+    assert (sent_envelope["schema"], sent_envelope["task_status"], sent_envelope["task_revision"]) == (
+        "manual-work-v2", "ready", 2)
+    client.task = {"task_id": "SKYBUILD-TASK-CUTOVER", "status": "blocked", "revision": 3}
+    monkeypatch.setattr(manual_dispatch, "_published_head", lambda _repo, _base_ref: "c" * 40)
     sent = manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
     assert sent["status"] == "sent"
     assert sent["mode"] == "pinned_retry"
     assert len(client.calls) == 2
     assert client.calls[0] == client.calls[1]
+    assert client.task_reads == 1
     assert json.loads(prepared[0].read_text())["status"] == "sent"
     manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
     assert len(client.calls) == 2
+
+
+@pytest.mark.parametrize("change", [{"status": "blocked"}, {"status": "done"},
+                                     {"revision": True}, {"revision": 0},
+                                     {"task_id": "OTHER"}])
+def test_ineligible_task_never_sends(tmp_path, monkeypatch, change):
+    client = FakeClient()
+    client.task.update(change)
+    repo, state, _, kwargs = _dispatch(tmp_path, monkeypatch, client)
+    with pytest.raises(manual_dispatch.DispatchError, match="not ready"):
+        manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
+    assert client.calls == []
+    assert json.loads(next(state.glob("*.json")).read_text())["status"] == "prepared"
+
+
+def test_prepared_bound_retry_rechecks_without_repinning(tmp_path, monkeypatch):
+    client = FakeClient()
+    repo, state, _, kwargs = _dispatch(tmp_path, monkeypatch, client)
+    monkeypatch.setattr(manual_dispatch, "_published_head", lambda _repo, _base_ref: "c" * 40)
+    with pytest.raises(manual_dispatch.DispatchError, match="head changed"):
+        manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
+    path = next(state.glob("*.json"))
+    before = path.read_bytes()
+    client.task["revision"] = 3
+    with pytest.raises(manual_dispatch.DispatchError, match="Task changed"):
+        manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
+    assert path.read_bytes() == before
+    assert client.calls == []
 
 
 def test_changed_current_brief_cannot_replace_pinned_intent(tmp_path, monkeypatch):
@@ -212,7 +252,7 @@ def test_retry_cannot_change_controller_port(tmp_path, monkeypatch):
 def test_moved_development_head_blocks_send(tmp_path, monkeypatch):
     client = FakeClient()
     repo, state_dir, _, kwargs = _dispatch(tmp_path, monkeypatch, client)
-    monkeypatch.setattr(manual_dispatch, "_published_head", lambda _repo: "c" * 40)
+    monkeypatch.setattr(manual_dispatch, "_published_head", lambda _repo, _base_ref: "c" * 40)
     with pytest.raises(manual_dispatch.DispatchError, match="head changed"):
         manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
     assert client.calls == []
@@ -226,8 +266,8 @@ def test_prepared_retry_reuses_pinned_body_after_head_moves(tmp_path, monkeypatc
     with pytest.raises(manual_dispatch.DispatchError, match="scoped dispatcher"):
         manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
     assert json.loads(next(state_dir.glob("*.json")).read_text())["status"] == "prepared"
-    monkeypatch.setattr(manual_dispatch, "_published_head", lambda _repo: "c" * 40)
-    client.grants = {"skybuild": ["cord:send", "cord:read", "cord:handle"]}
+    monkeypatch.setattr(manual_dispatch, "_published_head", lambda _repo, _base_ref: "c" * 40)
+    client.grants = {"skybuild": ["cord:send", "cord:read", "cord:handle", "tasks:read"]}
     sent = manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
     assert sent["mode"] == "prepared_retry"
     assert json.loads(client.calls[0][1]["body"])["base_sha"] == "a" * 40
@@ -256,3 +296,32 @@ def test_dispatcher_must_match_authenticated_principal(tmp_path, monkeypatch):
                                  **{**kwargs, "dispatcher": "jeltz"})
     assert not state_dir.exists()
     assert client.calls == []
+
+
+def test_published_head_uses_selected_development_ref(monkeypatch, tmp_path):
+    calls = []
+    def git(repo, *args):
+        calls.append(args)
+        if args[0] == "ls-remote":
+            return ("a" * 40 + "\trefs/heads/dev-004\n").encode()
+        return ("a" * 40 + "\n").encode()
+    monkeypatch.setattr(manual_dispatch, "_git", git)
+    assert manual_dispatch._published_head(tmp_path, "refs/heads/dev-004") == "a" * 40
+    assert calls[-1][-1] == "refs/remotes/origin/dev-004"
+    with pytest.raises(manual_dispatch.DispatchError, match="development branch"):
+        manual_dispatch._published_head(tmp_path, "refs/heads/main")
+
+
+def test_retry_cannot_change_frozen_development_ref(tmp_path, monkeypatch):
+    client = FakeClient()
+    client.fail_once = True
+    repo, state, _, kwargs = _dispatch(tmp_path, monkeypatch, client)
+    with pytest.raises(manual_dispatch.DispatchError, match="unavailable"):
+        manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
+    before = next(state.glob("*.json")).read_bytes()
+    assert json.loads(before)["base_ref"] == "refs/heads/dev-003"
+    with pytest.raises(manual_dispatch.DispatchError, match="durable intent"):
+        manual_dispatch.dispatch(repo, "docs/design/assignments/test.json",
+                                 base_ref="refs/heads/dev-004", **kwargs)
+    assert next(state.glob("*.json")).read_bytes() == before
+    assert len(client.calls) == 1

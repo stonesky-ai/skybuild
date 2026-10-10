@@ -11,6 +11,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import prepare_bundle as bundle
+import _worktree_capacity as capacity
 
 
 def git(root, *args):
@@ -158,6 +159,42 @@ def test_unreviewed_or_ambiguous_members_refused(repository, change):
     assert not output.exists()
 
 
+def test_more_than_twenty_members_refused(repository):
+    root, manifest, output, values, member, save = repository
+    member("one")
+    values["members"] *= 21
+    save()
+    with pytest.raises(bundle.PreparationError, match=r"1\.\.20 explicit reviewed members"):
+        bundle.prepare(root, manifest, output)
+    assert not output.exists()
+
+
+def test_twenty_members_are_allowed(repository):
+    root, manifest, output, _, member, _ = repository
+    for index in range(20):
+        member(f"task-{index:02d}")
+    result = bundle.prepare(root, manifest, output)
+    assert result["ok"]
+    assert len(result["included"]) == 20
+
+
+def test_preparation_reserves_worktree_slots(repository, monkeypatch):
+    root, manifest, output, _, member, _ = repository
+    member("one")
+    original_git = bundle.git
+
+    def over_limit(checkout, *arguments):
+        if arguments == ("worktree", "list", "--porcelain"):
+            return "\n\n".join(f"worktree /tmp/worktree-{index}" for index in range(63))
+        return original_git(checkout, *arguments)
+
+    monkeypatch.setattr(bundle, "git", over_limit)
+    monkeypatch.setattr(capacity, "_worktree_count", lambda _: 63)
+    with pytest.raises(bundle.PreparationError, match="reserve 2 slots"):
+        bundle.prepare(root, manifest, output)
+    assert not output.exists()
+
+
 @pytest.mark.parametrize("dirty", ["source", "candidate", "moved-candidate", "attached-candidate"])
 def test_dirty_or_changed_checkout_refused(repository, dirty):
     root, manifest, output, values, member, _ = repository
@@ -205,11 +242,18 @@ def test_foreign_or_nested_output_never_adopted(repository):
     assert not (root / "nested").exists()
 
 
+def test_exact_memory_threshold_allows_preparation(repository, monkeypatch):
+    root, manifest, output, _, member, _ = repository
+    member("one")
+    monkeypatch.setattr(bundle, "available_memory_bytes", lambda: 6 * 1024**3)
+    assert bundle.prepare(root, manifest, output)["ok"] is True
+
+
 def test_low_memory_retains_failure_without_candidate(repository, monkeypatch):
     root, manifest, output, _, member, _ = repository
     member("one")
-    monkeypatch.setattr(bundle, "available_memory_bytes", lambda: 8 * 1024**3 - 1)
-    with pytest.raises(bundle.PreparationError, match="8 GiB reserve"):
+    monkeypatch.setattr(bundle, "available_memory_bytes", lambda: 6 * 1024**3 - 1)
+    with pytest.raises(bundle.PreparationError, match="6 GiB reserve"):
         bundle.prepare(root, manifest, output)
     assert not (output / "candidate").exists()
     assert not json.loads((output / "report.json").read_text())["ok"]

@@ -1,8 +1,10 @@
 """Offline workflow tests: no GitHub writes or live database access."""
 import importlib.util
 import json
+from contextlib import nullcontext
 from pathlib import Path
 import sys
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -65,17 +67,32 @@ def test_pr_comment_uses_rest_and_verifies_response(tmp_path, monkeypatch, capsy
     assert json.loads(capsys.readouterr().out)["verified"]
 
 
-@pytest.mark.parametrize("change", ["gate_failure", "base_changed", "wrong_initial_base", "pass", "default_gate"])
+@pytest.mark.parametrize("change", [
+    "gate_failure", "base_changed", "base_changed_waiting", "wrong_initial_base", "pass", "overlap", "default_gate", "default_gate_publish",
+    "head_changed", "custom_head_changed", "wrong_artifact", "nonterminal_artifact",
+    "missing_artifact", "cleanup_unknown", "malformed_artifact", "wrong_run", "gate_malformed",
+])
 def test_candidate_gate_cleanup_and_ref_checks(tmp_path, monkeypatch, change):
     module = load("integrate_reviewed_pr")
     head, base = "a" * 40, "b" * 40
     evidence = tmp_path / "review.txt"
     evidence.write_text("Independent reviewer approved " + head + " against " + base)
+    default_gate = change in {"default_gate", "default_gate_publish", "head_changed", "wrong_artifact", "nonterminal_artifact",
+                              "missing_artifact", "cleanup_unknown", "malformed_artifact", "wrong_run", "gate_malformed"}
     args = SimpleNamespace(checkout=tmp_path, review_evidence=evidence, remote="origin",
                            repo=None, expected_head=head, expected_base=base, base="dev-002", pr=12,
-                           gate_argv=None if change == "default_gate" else ["fake-gate", "{checkout}"], merge=False)
+                           gate_argv=None if default_gate else ["fake-gate", "{checkout}"],
+                           merge=default_gate and change != "default_gate")
     monkeypatch.setattr(module, "verify_skybuild", lambda path: path)
     monkeypatch.setattr(module, "verify_skybuild_remote", lambda *_: None)
+    monkeypatch.setattr(module, "reserve_worktree_slots", lambda *_: nullcontext())
+    monkeypatch.setattr(module, "serialize_integrations", lambda *_: nullcontext(), raising=False)
+    if change == "overlap":
+        import _worktree_capacity as capacity
+        monkeypatch.setattr(capacity, "_git", lambda *_: str(tmp_path))
+        monkeypatch.setattr(capacity, "_worktree_count", lambda _: 1)
+        monkeypatch.setattr(module, "reserve_worktree_slots", capacity.reserve_worktree_slots)
+        monkeypatch.setattr(module, "serialize_integrations", capacity.serialize_integrations, raising=False)
     calls = []
     base_reads = 0
     def fake_run(argv, cwd):
@@ -84,16 +101,23 @@ def test_candidate_gate_cleanup_and_ref_checks(tmp_path, monkeypatch, change):
         if argv[:3] == ["git", "remote", "get-url"]:
             return "git@github.com:stonesky-ai/skybuild.git"
         if argv[:3] == ["gh", "pr", "view"]:
+            if "mergeCommit" in argv[-1]:
+                return json.dumps({"state": "MERGED", "mergeCommit": {"oid": "f" * 40}})
             return json.dumps(dict(state="OPEN", isDraft=False, headRefOid=head,
                                    baseRefName="dev-002", mergeable="MERGEABLE", mergeStateStatus="CLEAN"))
         if "ls-remote" in argv:
             if argv[-1] == "refs/heads/dev-002":
                 base_reads += 1
-                oid = "c" * 40 if change == "wrong_initial_base" or change == "base_changed" and base_reads > 1 else base
+                changed = (change == "wrong_initial_base"
+                           or change == "base_changed" and base_reads > 2
+                           or change == "base_changed_waiting" and base_reads > 1)
+                oid = "c" * 40 if changed else base
             else:
                 oid = head
             return oid + "\t" + argv[-1]
         if "rev-parse" in argv:
+            if argv[-1] == "HEAD" and gate_commands and change in {"head_changed", "custom_head_changed"}:
+                return "e" * 40
             return "d" * 40
         return ""
     gate_commands = []
@@ -101,33 +125,99 @@ def test_candidate_gate_cleanup_and_ref_checks(tmp_path, monkeypatch, change):
         gate_commands.append(argv)
         if change == "gate_failure":
             raise RuntimeError("gate failed")
-        return {"ok": True, "passed": 17}
+        if change == "overlap":
+            entered = threading.Event()
+            def prepare_during_gate():
+                with capacity.reserve_worktree_slots(tmp_path, 2):
+                    entered.set()
+            thread = threading.Thread(target=prepare_during_gate, daemon=True)
+            thread.start()
+            assert entered.wait(1), "Integration retained the capacity lock during its gate"
+            thread.join(1)
+            assert not thread.is_alive()
+        if "--artifact" in argv:
+            def value(flag):
+                return argv[argv.index(flag) + 1]
+            record = {
+                "schema": "skybuild.gate-run.v1", "run_id": value("--run-id"),
+                "checkout": str(cwd), "head": value("--expected-head"), "tree": value("--expected-tree"),
+                "phase": "terminal", "status": "passed", "cleanup": "confirmed", "ok": True, "exit_code": 0}
+            if change == "wrong_artifact":
+                record["head"] = "f" * 40
+            if change == "nonterminal_artifact":
+                record["phase"] = "running"
+            if change == "wrong_run":
+                record["run_id"] = "another-run"
+            if change != "missing_artifact":
+                Path(value("--artifact")).write_text("not-json" if change == "malformed_artifact" else json.dumps(record))
+        if change == "gate_malformed":
+            return []
+        return {"ok": True, "passed": 17, "cleaned_up": change != "cleanup_unknown"}
     monkeypatch.setattr(module, "run", fake_run)
     monkeypatch.setattr(module, "run_gate", fake_gate)
-    if change in {"pass", "default_gate"}:
+    if change in {"pass", "overlap", "default_gate", "default_gate_publish"}:
         result = module.integrate(args)
-        assert result["merged"] is False
-        assert result["gate"] == {"ok": True, "passed": 17}
+        assert result["merged"] is (change == "default_gate_publish")
+        assert result["gate"] == {"ok": True, "passed": 17, "cleaned_up": True}
         assert result["expected_base"] == base
-        if change == "default_gate":
-            assert gate_commands[0][-2:] == ["--min-available-gib", "10"]
+        if default_gate:
+            assert gate_commands[0][gate_commands[0].index("--min-available-gib") + 1] == "6"
+            assert gate_commands[0][gate_commands[0].index("--expected-head") + 1] == "d" * 40
+            assert Path(result["gate_artifact"]).is_file()
     else:
-        with pytest.raises(RuntimeError, match="gate failed|Remote refs changed|Remote base differs"):
+        with pytest.raises((OSError, RuntimeError, ValueError)) as failure:
             module.integrate(args)
-    if change != "wrong_initial_base":
+        if default_gate:
+            artifact = gate_commands[0][gate_commands[0].index("--artifact") + 1]
+            assert "artifact=" + artifact in str(failure.value)
+    if change not in {"wrong_initial_base", "base_changed_waiting"}:
         assert any(argv[:3] == ["git", "worktree", "remove"] for argv in calls)
     else:
         assert not any(argv[:3] == ["git", "worktree", "add"] for argv in calls)
-    assert not any(argv[:3] == ["gh", "pr", "merge"] for argv in calls)
+        assert gate_commands == []
+    assert any(argv[:3] == ["gh", "pr", "merge"] for argv in calls) is (change == "default_gate_publish")
+
+
+def test_gate_environment_selects_candidate_not_author(monkeypatch, tmp_path):
+    module = load('integrate_reviewed_pr')
+    monkeypatch.setenv('UV_PROJECT_ENVIRONMENT', '/author/.venv')
+    monkeypatch.setenv('PYTHONPATH', '/author/src')
+    monkeypatch.setenv('UV_NO_SYNC', '1')
+    monkeypatch.setenv('UV_WORKING_DIR', '/author')
+    calls = []
+    def run(argv, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(returncode=0, stdout='{"ok":true}', stderr='')
+    monkeypatch.setattr(module.subprocess, 'run', run)
+    assert module.run_gate(['gate'], tmp_path) == {'ok': True}
+    assert 'env' in calls[0], 'Nested gate inherited the author environment'
+    env = calls[0]['env']
+    assert env['UV_PROJECT_ENVIRONMENT'] == str(tmp_path / '.venv')
+    assert env['PYTHONPATH'] == ':'.join(map(str, [tmp_path / 'src', tmp_path / 'scripts', tmp_path]))
+    assert env['PYTHONSAFEPATH'] == '1' and 'UV_NO_SYNC' not in env
+    assert 'UV_WORKING_DIR' not in env
 
 
 def test_failed_gate_retains_log_without_test_output(monkeypatch, tmp_path):
     module = load("integrate_reviewed_pr")
     monkeypatch.setattr(module.subprocess, "run", lambda *a, **kw: SimpleNamespace(
-        returncode=1, stdout='{"ok":false,"log":"/tmp/skybuild-gate.log"}', stderr="secret stderr"))
-    with pytest.raises(RuntimeError, match=r"Gate failed.*log=/tmp/skybuild-gate.log") as failure:
+        returncode=1, stdout='{"ok":false,"error_detail":"Available memory below gate minimum: '
+                            '1 bytes available; 10737418240 bytes required",'
+                            '"log":"/tmp/skybuild-gate.log"}', stderr="secret stderr"))
+    with pytest.raises(RuntimeError) as failure:
         module.run_gate(["gate"], tmp_path)
+    assert "reason=Available memory below gate minimum: 1 bytes available; 10737418240 bytes required" in str(failure.value)
+    assert "log=/tmp/skybuild-gate.log" in str(failure.value)
     assert "secret" not in str(failure.value)
+
+
+def test_failed_gate_hides_untrusted_error_detail(monkeypatch, tmp_path):
+    module = load("integrate_reviewed_pr")
+    monkeypatch.setattr(module.subprocess, "run", lambda *a, **kw: SimpleNamespace(
+        returncode=1, stdout='{"ok":false,"error_detail":"private secret detail"}', stderr=""))
+    with pytest.raises(RuntimeError) as failure:
+        module.run_gate(["gate"], tmp_path)
+    assert "private secret detail" not in str(failure.value)
 
 
 def test_custom_gate_cannot_publish(monkeypatch, tmp_path):

@@ -27,15 +27,44 @@ events share an append-only `cpu_journal` transaction with their state changes.
 SkyBuild is being built toward a running system that rebuilds and extends itself with parallel workers. The current code is the launch-free bootstrap: a PostgreSQL task service, append-only task and Cord history, durable messages, a shared HTTP client, explicit administrative commands, and a thin browser task workbench. The deployed manual pilot serves the imported task ledger through the authenticated REST API and does not launch workers or models.
 
 The [architecture](docs/design/architecture.md) governs the [MVP sequence](docs/design/implementation_plan.md). The selected [bootstrap contract](docs/design/implementation/bootstrap.md) describes the current slice. [Session handoff](docs/design/session_handoff.md) records actual progress and remaining gates.
+At cycle closeout, merge the current `dev-NNN` branch to `main`, start the next sequential development branch with a one-line README commit, and open its standing pull request.
 
 ## Local development
 
 Use Python 3.12 or later and `uv`:
 
 ```sh
-uv sync --extra test
-uv run python -m pytest
+scripts/project_python -m pytest
 ```
+
+`scripts/project_python` runs Python through `uv` with this checkout's locked
+runtime and test dependencies, its own `.venv`, and its absolute `src` and
+`scripts` paths. Use
+it for repository scripts too, including help:
+
+```sh
+scripts/project_python scripts/marshall_bundle.py --help
+```
+
+The launcher preserves your working directory and Python arguments. From another
+directory, use absolute launcher and script/test paths. It replaces inherited
+`PYTHONPATH` and `UV_PROJECT_ENVIRONMENT`, so another checkout's editable install
+cannot select the package for this command. Dependency synchronization failure
+stops the invocation; no fallback to system Python occurs. The launcher requires
+`uv`, a POSIX shell, and the committed `pyproject.toml` and `uv.lock`. It does not
+start a service unless the Python command you explicitly supply does so.
+Its cache defaults to ignored `.uv-cache/` inside the checkout, which also works
+when the home directory is read-only. An explicit `UV_CACHE_DIR` remains supported
+for a writable shared cache.
+Python's `-P` mode suppresses implicit caller/script-directory imports; repository
+helpers resolve through the explicit `scripts` path. External scripts that depend
+on sibling imports need their own invocation instead. Python options such as
+`-E` or `-I` deliberately bypass `PYTHONPATH`; do not use them for source checks.
+The launcher clears inherited `UV_WORKING_DIR`, which could otherwise change the
+directory before Python resolves a relative script path.
+Reviewed integration and disposable PostgreSQL gates rebind the environment and
+source paths to their own candidate before running nested Python commands. The
+author checkout's launcher selection must not leak into candidate validation.
 
 PostgreSQL tests require explicit disposable targets. Without these variables, database integration tests skip:
 
@@ -43,7 +72,7 @@ PostgreSQL tests require explicit disposable targets. Without these variables, d
 export SKYBUILD_TEST_DSN='postgresql://USER:PASSWORD@127.0.0.1:PORT/skybuild_test'
 export SKYBUILD_HTTP_TEST_DSN='postgresql://USER:PASSWORD@127.0.0.1:PORT/skybuild_http_test'
 export SKYBUILD_IMPORT_TEST_DSN='postgresql://USER:PASSWORD@127.0.0.1:PORT/skybuild_import_test'
-uv run python -m pytest
+scripts/project_python -m pytest
 ```
 
 Use newly created, task-owned databases. These are example placeholders, not credentials or a command to reuse an application database. The HTTP integration suite requires a database name beginning with `skybuild_` and ending with `_test`; the importer suite requires the exact `skybuild_import_test` name and creates isolated test databases from it.
@@ -62,7 +91,7 @@ Provisioning reads a high-entropy bearer token from standard input or `SKYBUILD_
 
 `serve` binds to loopback. Tailscale exposure, browser-session handling and a restricted runtime database role require deployment qualification. Use a separate migration administrator; do not deploy the service using the disposable tests' PostgreSQL superuser. For the manual-worker pilot, `/api/v1/me` reports only the authenticated caller's identity and grants; `python -m skybuild.fleet_preflight` checks private HTTPS readiness and narrow Cord access from a worker using a mode-0600 token file. It is read-only and does not replace a Cord round trip.
 
-Open `/workbench` on that local service for task creation, paged list/detail/history, definition edits, lineage and guarded actions. It previews proposed-only split/merge plans before applying them. Enter the project and bearer token; the token stays only in page memory and is cleared on logout/reload. A stale edit requires an explicit refresh before saving. Definition and dependency changes durably invalidate readiness; this does not admit or start a worker. Migration 012 and guarded cutover are implemented and reviewed, but not deployed; the pilot still serves zero imported tasks.
+Open `/workbench` on the pilot service for task creation, paged list/detail/history, definition edits, lineage and guarded actions. It previews proposed-only split/merge plans before applying them. Enter the project and bearer token; the token stays only in page memory and is cleared on logout/reload. A stale edit requires an explicit refresh before saving. Definition and dependency changes durably invalidate readiness; this does not admit or start a worker. As verified on 2026-10-09, migration 012 and the guarded cutover are deployed: the authenticated API serves 60 tasks, including 38 imported from the frozen manifest and 22 created afterward. The three former ledger paths are retirement notices. The current manual pilot does not launch or reserve workers or models.
 
 Set `SKYBUILD_API_URL` and `SKYBUILD_TOKEN` for read-only CLI views:
 
@@ -93,3 +122,10 @@ Configure `SKYBUILD_API_URL` and a project-scoped `SKYBUILD_TOKEN` with task rea
 Each tick writes flushed JSON with confirmed progress and its continuation cursor. Exit 0 means the final sweep completed; exit 1 means an incomplete final sweep or an unconfirmed API page. Any API failure stops scheduling immediately. Restart safely begins a fresh sweep; guarded resume transitions avoid duplicate accepted transitions. Multiple callers use the existing revision checks, not independent authority. Markdown-owned imported projects remain write-blocked. The timer only requests reassessment; it never starts workers, calls models, admits work or switches authority.
 
 Restricted service-role provisioning, audit, and disposable qualification are documented in [runtime role qualification](docs/design/implementation/runtime_role.md). These tools do not authorize live changes.
+
+
+For the explicitly selected local Dunsel development preview, run `uv run uvicorn skybuild.workbench_preview:app --host 127.0.0.1 --port 8766` and open `/workbench/marshalls`. The preview exposes explicit controls for one fixed CPU-only memory/disk sampler. Starting the preview does not start Dunsel. The normal service does not register these routes. Keep the preview bound to loopback; mutation requests also require the same browser origin. No task API, database, model, or credential is used by Dunsel.
+
+Dunsel state lives in the private `~/.local/state/skybuild/dunsel/` directory, with mode 0700 and owned regular files of mode 0600. The log is `dunsel.log`; graceful stop uses `dunsel.off-now`. Symlinks, hardlinks, and non-regular state files are refused. The shared control lock and kernel-validated PID/start-time/argument record allow previews from different checkouts to control the same worker without starting duplicates. Disable only blocks later starts. Graceful stop consumes its request at the next sample; Kill uses the exact recorded worker command.
+
+A durable pre-launch intent blocks retries when a start has unknown effects, including failures to publish the child identity. If the preview reports an unresolved startup without a readable process record, reconcile the physical process before clearing state; restarting another checkout does not clear that barrier.

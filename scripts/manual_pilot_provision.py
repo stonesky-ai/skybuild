@@ -165,7 +165,7 @@ def provision(state: Path) -> dict:
         raise ValueError("Restricted runtime role provisioning failed")
     store.provision_principal("pilot_owner", _read_secret(secret_dir / "pilot_owner-token", mode=0o600), is_admin=True)
     store.provision_principal("pilot_dispatcher", _read_secret(secret_dir / "pilot_dispatcher-token", mode=0o600),
-                              grants={PROJECT: {"cord:read", "cord:send", "cord:handle"}})
+                              grants={PROJECT: {"tasks:read", "cord:read", "cord:send", "cord:handle"}})
     scopes = {PROJECT: {"tasks:read", "cord:read", "cord:send", "cord:handle"}}
     for worker in WORKERS:
         store.provision_principal(worker, _read_secret(secret_dir / f"{worker}-token", mode=0o600), grants=scopes)
