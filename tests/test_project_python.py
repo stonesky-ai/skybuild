@@ -64,7 +64,7 @@ def test_exact_checkout_arguments_and_caller_directory(runner, tmp_path, argumen
     observed = json.loads(record.read_text())
     assert observed == {
         'argv': ['run', '--locked', '--extra', 'test', '--project', str(checkout), 'python', '-P', *arguments],
-        'cwd': str(tmp_path), 'pythonpath': str(checkout / 'src') + os.pathsep + str(checkout / 'scripts'),
+        'cwd': str(tmp_path), 'pythonpath': os.pathsep.join(map(str, [checkout / 'src', checkout / 'scripts', checkout])),
         'environment': str(checkout / '.venv'), 'working_dir': None, 'no_sync': None, 'no_project': None,
         'cache': str(checkout / '.uv-cache'),
     }
@@ -84,6 +84,36 @@ def test_caller_source_cannot_shadow_checkout_and_script_helpers_work(runner, tm
                             text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert result.stdout == 'owned checkout owned helper\n'
+
+
+def test_scripts_namespace_and_bare_helper_import_from_selected_checkout(runner, tmp_path):
+    checkout, launcher, record, env = runner
+    helper = checkout / 'scripts/owned_helper.py'
+    helper.write_text('marker = "selected checkout"\n')
+    foreign = tmp_path / 'foreign checkout'
+    (foreign / 'scripts').mkdir(parents=True)
+    (foreign / 'scripts/__init__.py').write_text('raise AssertionError("foreign scripts imported")\n')
+    (foreign / 'owned_helper.py').write_text('raise AssertionError("foreign helper imported")\n')
+    inherited_path = os.pathsep.join(map(str, [foreign, foreign / 'src', foreign / 'scripts']))
+    result = subprocess.run(
+        [str(launcher), '-c', '''import json, owned_helper, scripts, scripts.owned_helper
+print(json.dumps({
+    "namespace": list(scripts.__path__),
+    "qualified": scripts.owned_helper.__file__,
+    "bare": owned_helper.__file__,
+    "marker": scripts.owned_helper.marker,
+}))
+'''], cwd=foreign,
+        env=dict(env, RUNNER_EXEC='1', UV_WORKING_DIR=str(foreign), PYTHONPATH=inherited_path),
+        text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        'namespace': [str(checkout / 'scripts')],
+        'qualified': str(helper), 'bare': str(helper), 'marker': 'selected checkout',
+    }
+    observed = json.loads(record.read_text())
+    assert observed['cwd'] == str(foreign)
+    assert observed['working_dir'] is None
 
 
 def test_real_uv_cannot_redirect_relative_script_to_inherited_working_dir(tmp_path):
