@@ -1,0 +1,23 @@
+{
+  "schema": "manual-work-brief-v1",
+  "assignment_id": "AUTO-CPU-CLIENT-RENEW-20261010-001",
+  "task_id": "SKYBUILD-MVP-AUTO-CLIENT-RENEW",
+  "worker": "wonko_auto_cpu_client_01",
+  "dispatcher": "pilot_dispatcher",
+  "branch": "task/auto-client-renew-20261010",
+  "owned_paths": [
+    "src/skybuild/client.py",
+    "src/skybuild/manual_cord.py",
+    "tests/test_petri_client.py",
+    "tests/test_petri_workers.py"
+  ],
+  "checks": [
+    "Apply only the administrator-approved deterministic patch with SHA-256 09dc41acd8592c217ae835bc9ca99531592aa24424919ad34a646e44f3c3834f; no candidate code or test execution in the worker.",
+    "Add a typed Client.renew_claim method that pins the task, fence, revision, lease duration and idempotency key through the existing REST route.",
+    "Use that method for manual Cord claim renewal while retaining the saved claim fence and current workflow revision checks.",
+    "The independent validation producer runs tests/test_petri_client.py and tests/test_petri_workers.py; the prepared patch passed these focused tests against dev-006 ec3fa9c12f560d205ddf46c08ccaef47012341c2.",
+    "Require exact owned paths, regular tracked files, Python syntax, clean diff, sole pinned parent, pushed branch head and fenced REST/Cord result before independent review and frozen bundle admission."
+  ],
+  "model_limit": "One bounded trusted CPU patch worker, 2 GiB MemoryMax, no model query, paid API, candidate execution or publisher credential.",
+  "next_action": "When this brief is included in published dev-006 and the exact Ready task has administrator patch approval, automatically select, claim and apply the approved patch in a separate unit; then submit the exact fenced result for independent review and bundled delivery."
+}
