@@ -9,7 +9,7 @@
     "docs/design/implementation/manual_pilot_controller.md"
   ],
   "checks": [
-    "Document already-provisioned pilot_dispatcher and local_worker_01 and required separate local_worker_02 provisioning. Each has only project skybuild tasks:read, cord:read, cord:send and cord:handle; inspect current provisioning CLI before documenting commands. Execute no provisioning.",
+    "Verify existing distinct pilot_dispatcher, local_worker_01 and local_worker_02 four-grant principals. local_worker_02 passed pinned-TLS preflight and access-only Cord receipt/reply/handle. Document observed scope; do not reprovision, edit credentials or treat access proof as assignment proof.",
     "Correct retired-ledger authority and stale dispatcher-grant claims. API cutover is complete. Document exact private ts.net endpoint with pinned public CA and scoped local credentials; retain restricted database role, transport, restart and recovery controls. Include no secrets.",
     "Separate access-only readiness/identity/grant/Cord proof from pinned assignment and coding proof. Qualify one local endpoint first, then both local principals for concurrent disjoint work, then remote Wonko. Preserve no-public-bind, no-global-trust and no automatic-launch limits.",
     "Read AGENTS.md, architecture working contract and relevant plan. Preparation base is e8c58d7109382c0efdf68281326f412aa6df46b6 (A41); staged local scope is in PR #66. Verify its published revision before work; reconcile conflicting source rather than editing architecture or plan.",
