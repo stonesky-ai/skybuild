@@ -1,7 +1,9 @@
 """PostgreSQL transaction checks for trusted CPU worker dispatch."""
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+import sys
 from threading import Barrier
+from types import SimpleNamespace
 from uuid import uuid4
 
 import psycopg
@@ -17,7 +19,12 @@ from test_store import seed_api_authority
 
 
 @pytest.fixture
-def cpu_dispatch(restricted_database):
+def cpu_dispatch(restricted_database, monkeypatch):
+    # The shared usage module lands in migration 016's combined source bundle.
+    # These migration-014 unit cases model a clear lineage while testing the
+    # fail-closed missing-module case separately below.
+    monkeypatch.setitem(sys.modules, "skybuild.task_usage",
+                       SimpleNamespace(unresolved_usage_exists=lambda _connection, _project, _task: False))
     admin_dsn, runtime_dsn, database, _ = restricted_database
     admin, runtime = Store(admin_dsn, database), Store(runtime_dsn, database)
     project = "cpu-worker-" + uuid4().hex
@@ -195,6 +202,40 @@ def test_begin_rollback_then_replay_never_reauthorizes_start(cpu_dispatch, monke
     assert first.json()["state"] == replay.json()["state"] == "launch-intent"
 
 
+def test_begin_fails_closed_without_shared_usage_guard(monkeypatch):
+    import builtins
+
+    original_import = builtins.__import__
+    def deny_usage_import(name, *args, **kwargs):
+        if name == "skybuild.task_usage":
+            raise ModuleNotFoundError(name)
+        return original_import(name, *args, **kwargs)
+
+    with monkeypatch.context() as scoped:
+        scoped.delitem(sys.modules, "skybuild.task_usage", raising=False)
+        scoped.setattr(builtins, "__import__", deny_usage_import)
+        with pytest.raises(DomainError) as error:
+            CPUWorkerDispatch._require_usage_clear(object(), "project", "task")
+    assert error.value.code == "usage_guard_unavailable" and error.value.status_code == 503
+
+
+def test_late_unresolved_usage_blocks_one_shot_launch(cpu_dispatch, monkeypatch):
+    admin, runtime, client, project, people, tokens = cpu_dispatch
+    request, _, _ = _make_reservation(runtime, people, project)
+    pins = _pins(request["action_id"], "operation-" + uuid4().hex)
+    assert _prepare(client, project, tokens["owner"], pins).status_code == 200
+    guard = sys.modules["skybuild.task_usage"]
+    monkeypatch.setattr(guard, "unresolved_usage_exists", lambda _connection, _project, _task: True)
+    path = f"/api/v1/projects/{project}/cpu-worker-dispatches/{pins['operation_id']}/begin"
+    blocked = client.post(path, headers=_headers(tokens["owner"]))
+    assert blocked.status_code == 409 and blocked.json()["error"]["code"] == "usage_conflict"
+    dispatch, effect, reservation, observations = _persisted(
+        admin, project, request["action_id"], pins["operation_id"])
+    assert dispatch["state"] == "prepared"
+    assert effect["exposure_held"] is True and reservation["state"] == "reserved"
+    assert observations == []
+
+
 def test_prepare_requires_live_exact_claim_fence_and_rolls_back(cpu_dispatch):
     admin, runtime, client, project, people, tokens = cpu_dispatch
     request, _, _ = _make_reservation(runtime, people, project)
@@ -292,7 +333,7 @@ def test_unknown_observation_keeps_capacity_held_and_blocks_settlement(cpu_dispa
     assert reservation["state"] == "reserved" and observations[0]["phase"] == "unknown"
 
 
-def test_exact_terminal_settles_once_and_replay_after_validating_is_idempotent(cpu_dispatch):
+def test_held_submit_is_rejected_then_terminal_settlement_allows_owner_relay(cpu_dispatch):
     admin, runtime, client, project, people, tokens = cpu_dispatch
     request, _, _ = _make_reservation(runtime, people, project)
     pins = _pins(request["action_id"], "operation-" + uuid4().hex)
@@ -301,23 +342,33 @@ def test_exact_terminal_settles_once_and_replay_after_validating_is_idempotent(c
     assert client.post(base + "/begin", headers=_headers(tokens["owner"])).status_code == 200
     identity = _unit_identity(pins)
     assert client.post(base + "/invocation", headers=_headers(tokens["owner"]), json=identity).status_code == 200
-    terminal_id = str(uuid4())
-    completed = _settleable_observation(pins, terminal_id)
-    assert client.post(base + "/observations", headers=_headers(tokens["owner"]), json=completed).status_code == 200
-    settle_body = {"observation_id": terminal_id}
-
-    first = client.post(base + "/settle", headers=_headers(tokens["owner"]), json=settle_body)
-    assert first.status_code == 200 and first.json()["state"] == "settled"
-    # Task workflow may advance after settlement; a lost settle reply can then be retried.
     current = runtime.get_task(people["owner"], project, request["task_id"])
     token = Store.workflow_token(current)
     receipt = dict(source_head="a" * 40, target_base="b" * 40, source_branch="refs/heads/result",
                    attempt_id=token.attempt_id, claim_fence=token.claim_fence,
                    input_generation=token.input_generation, definition_revision=token.definition_revision,
                    policy_version=token.policy_version)
-    submitted = runtime.workflow_transition(people["worker"], project, request["task_id"], "submit",
-                                            receipt, current["revision"], "submit-after-settlement")
+    # Worker result submission cannot cross the held effect/reservation boundary.
+    with pytest.raises(DomainError) as blocked:
+        runtime.workflow_transition(people["worker"], project, request["task_id"], "submit",
+                                    receipt, current["revision"], "manual-result-relay-once")
+    assert blocked.value.code in {"effect_conflict", "capacity_conflict", "workflow_conflict"}
+    assert Store.workflow_token(runtime.get_task(people["owner"], project, request["task_id"])).place.value == "working"
+
+    terminal_id = str(uuid4())
+    completed = _settleable_observation(pins, terminal_id)
+    assert client.post(base + "/observations", headers=_headers(tokens["owner"]), json=completed).status_code == 200
+    settle_body = {"observation_id": terminal_id}
+    first = client.post(base + "/settle", headers=_headers(tokens["owner"]), json=settle_body)
+    assert first.status_code == 200 and first.json()["state"] == "settled"
+    # Trusted owner relay uses same original task receipt after exact terminal proof.
+    latest = runtime.get_task(people["owner"], project, request["task_id"])
+    submitted = runtime.workflow_transition(people["owner"], project, request["task_id"], "submit",
+                                            receipt, latest["revision"], "manual-result-relay-once")
     assert Store.workflow_token(submitted["task"]).place.value == "validating"
+    replayed = runtime.workflow_transition(people["owner"], project, request["task_id"], "submit",
+                                           receipt, latest["revision"], "manual-result-relay-once")
+    assert Store.workflow_token(replayed["task"]).place.value == "validating"
     retry = client.post(base + "/settle", headers=_headers(tokens["owner"]), json=settle_body)
     assert retry.status_code == 200 and retry.json()["state"] == "settled"
     dispatch, effect, reservation, observations = _persisted(admin, project, request["action_id"], pins["operation_id"])

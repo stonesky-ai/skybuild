@@ -25,7 +25,13 @@ from scripts.skybuild_job_unit import JobSpec, JobUnitError, JobUnitManager, Job
 from .contracts import valid_identifier
 from . import cpu_worker_dispatch as _dispatch_module
 from . import client as _client_module
-from .client import Client
+from . import manual_cord as _manual_cord_module
+from . import auto_patch_worker as _worker_module
+from . import auto_patch_permit as _permit_module
+from . import manual_assignment as _assignment_module
+from . import manual_dispatch as _manual_dispatch_module
+from . import fleet_preflight as _preflight_module
+from .client import Client, ClientError
 
 
 PROFILE = 'bounded-trusted-cpu-patch-v1'
@@ -34,10 +40,10 @@ WORKER_SOURCE = {
     # Auto-worker client from 3bb plus this branch's CPU dispatch endpoints.
     'src/skybuild/client.py': '9a6ab69f0b3294e429375ada334d263d9df1b26878f11f928b98a5f024c9679e',
     'src/skybuild/fleet_preflight.py': 'f2ec5d39b6b1bc0c0a71354a7be89837bd153b5812a9be55f8a951a15fc9424c',
-    'src/skybuild/auto_patch_worker.py': 'b25b365ecd4da328fe8be7ef8618ce4a73eb68cd87c50cddf8dd41b4043726fc',
+    'src/skybuild/auto_patch_worker.py': '27de201da7f56a7e288f11116c6e38c02c3aef5e85311c642bb3f6b26911826e',
     'src/skybuild/auto_patch_permit.py': '5e7c5de5f3d29cd6ed1aa55d61d9ec1b2a6530163f71f06a68f99396294f7ad1',
     'src/skybuild/manual_assignment.py': '349dc9f367ba63e0bf6c2f3e2d63b7d45c6e5dadcb715f6b67295ad86b65daf7',
-    'src/skybuild/manual_cord.py': 'fff868379c3a709019a6212b6c0fcd03078ca5855f265475c2166423857583aa',
+    'src/skybuild/manual_cord.py': '3cf3b393a18c39aa5c13dd19975211caba88171fd7be19025c24d47d9d59ca90',
     'src/skybuild/manual_dispatch.py': '7baad50262ad315c4d1d48cf6edb27c592b5369b23c3fb81004994a966a667cc',
 }
 SOURCE_DIGEST = hashlib.sha256(json.dumps(WORKER_SOURCE, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
@@ -47,7 +53,16 @@ _PRIVATE_ASSIGNMENT_FILES = ('assignment.json', 'assignment.json.workflow.json.i
                              'assignment.json.workflow.json', 'preclaim.json')
 _CONTROLLER_FILES = {
     'src/skybuild/__init__.py': sys.modules['skybuild'].__file__,
+    'src/skybuild/auto_patch_controller.py': getattr(
+        sys.modules.get('skybuild.auto_patch_controller'), '__file__',
+        str(Path(__file__).with_name('auto_patch_controller.py'))),
+    'src/skybuild/auto_patch_worker.py': _worker_module.__file__,
+    'src/skybuild/auto_patch_permit.py': _permit_module.__file__,
     'src/skybuild/client.py': _client_module.__file__,
+    'src/skybuild/fleet_preflight.py': _preflight_module.__file__,
+    'src/skybuild/manual_assignment.py': _assignment_module.__file__,
+    'src/skybuild/manual_dispatch.py': _manual_dispatch_module.__file__,
+    'src/skybuild/manual_cord.py': _manual_cord_module.__file__,
     'src/skybuild/contracts.py': sys.modules['skybuild.contracts'].__file__,
     'src/skybuild/cpu_worker_bridge.py': __file__,
     'src/skybuild/cpu_worker_dispatch.py': _dispatch_module.__file__,
@@ -100,6 +115,8 @@ class PreparedCPUWorker:
     controller_profile_digest: str
     ca_digest: str
     owner_token_digest: str
+    worker_token_digest: str
+    git_token_digest: str
     assignment_digest: str
     argv_digest: str
     unit_name: str
@@ -168,11 +185,183 @@ def _trusted_client(plan: CPUWorkerPlan, expected_ca_digest: str | None = None,
     ca_digest = _digest(ca_bytes)
     if expected_ca_digest is not None and ca_digest != expected_ca_digest:
         raise CPUWorkerBridgeError('Owner API CA differs from the prepared trust pin')
+    client = None
     try:
-        return Client(plan.url, token, retries=0, timeout=10, trust_env=False,
-                      ca_file=plan.ca_file, expected_ca_sha256=ca_digest)
-    except (ValueError, OSError) as error:
+        client = Client(plan.url, token, retries=0, timeout=10, trust_env=False,
+                        ca_file=plan.ca_file, expected_ca_sha256=ca_digest)
+        identity = client.whoami()
+    except (ClientError, ValueError, OSError) as error:
+        if client is not None:
+            client.close()
         raise CPUWorkerBridgeError(f'Owner API client configuration failed: {type(error).__name__}') from None
+    if not isinstance(identity, dict) or identity.get('is_admin') is not True:
+        client.close()
+        raise CPUWorkerBridgeError('CPU bridge owner credential must authenticate as an administrator')
+    return client
+
+
+def _trusted_worker_client(prepared: PreparedCPUWorker) -> Client:
+    raw = _file_bytes(prepared.plan.worker_token_file, limit=1024, private=True)
+    if _digest(raw) != prepared.worker_token_digest:
+        raise CPUWorkerBridgeError('Worker token differs from its prepared private credential')
+    try:
+        token = raw.decode('utf-8').removesuffix('\n')
+        client = Client(prepared.plan.url, token, retries=0, timeout=10, trust_env=False,
+                        ca_file=prepared.plan.ca_file, expected_ca_sha256=prepared.ca_digest)
+        identity = client.whoami()
+    except (ClientError, UnicodeError, ValueError, OSError) as error:
+        if 'client' in locals():
+            client.close()
+        raise CPUWorkerBridgeError(f'Worker API client configuration failed: {type(error).__name__}') from None
+    grants = identity.get('grants', {}).get(prepared.plan.project_id, []) if isinstance(identity, dict) else []
+    if (not isinstance(identity, dict) or identity.get('principal_id') != prepared.plan.worker_id
+            or identity.get('is_admin') is not False
+            or not {'tasks:read', 'tasks:claim'}.issubset(set(grants))):
+        client.close()
+        raise CPUWorkerBridgeError('Claim renewal requires the exact non-admin worker principal')
+    return client
+
+
+def _renew_worker_claim(client: Client, prepared: PreparedCPUWorker, stage: str) -> dict:
+    """Renew exact worker fence with one durable idempotency key per boundary."""
+    if stage not in {'pre-settle', 'pre-submit'}:
+        raise CPUWorkerBridgeError('Claim renewal boundary is invalid')
+    assignment, preclaim, workflow, digest = _read_assignment(prepared.plan, allow_runtime=True)
+    if digest != prepared.assignment_digest:
+        raise CPUWorkerBridgeError('Saved assignment inputs changed after dispatch preparation')
+    token = workflow['token']
+    view = client.task_workflow(prepared.plan.project_id, prepared.task_id)
+    current = view.get('token') if isinstance(view, dict) else None
+    task = view.get('task') if isinstance(view, dict) else None
+    if (not isinstance(current, dict) or current.get('place') != 'working'
+            or any(current.get(name) != token.get(name) for name in
+                   ('project_id', 'task_id', 'attempt_id', 'claim_fence', 'input_generation',
+                    'definition_revision', 'policy_version', 'source_head', 'target_base'))
+            or not isinstance(task, dict) or type(task.get('revision')) is not int):
+        raise CPUWorkerBridgeError('Original worker claim or task fence changed; preserve result')
+    history = client.request('GET', Client._path(
+        prepared.plan.project_id, 'tasks/' + Client._segment(prepared.task_id) + '/claim/history'),
+        params={'limit': 100, 'offset': 0})
+    if (not isinstance(history, list) or not history
+            or not isinstance(history[-1], dict)
+            or history[-1].get('action') not in {'claim', 'renew'}
+            or not isinstance(history[-1].get('after_state'), dict)
+            or history[-1]['after_state'].get('held') is not True
+            or history[-1]['after_state'].get('holder') != prepared.plan.worker_id
+            or history[-1]['after_state'].get('fence') != prepared.claim_fence):
+        raise CPUWorkerBridgeError('Original worker claim is not current; preserve result')
+    key = 'cpu-result-' + _digest((prepared.operation_id + ':' + stage).encode())
+    intent = {'schema': 'skybuild.cpu-claim-renewal.v1', 'operation_id': prepared.operation_id,
+              'project_id': prepared.plan.project_id, 'task_id': prepared.task_id,
+              'attempt_id': prepared.attempt_id, 'claim_fence': prepared.claim_fence,
+              'expected_revision': task['revision'], 'lease_seconds': 300,
+              'idempotency_key': key, 'stage': stage}
+    path = prepared.plan.assignment_dir / ('claim-renewal-' + stage + '.json')
+    if path.exists() or path.is_symlink():
+        try:
+            saved = json.loads(_file_bytes(path, limit=4096, private=True))
+        except (CPUWorkerBridgeError, ValueError, UnicodeError):
+            raise CPUWorkerBridgeError('Saved claim renewal intent is invalid; preserve result') from None
+        if saved != intent:
+            raise CPUWorkerBridgeError('Saved claim renewal intent binds another fence')
+    else:
+        _write_exclusive(path, (json.dumps(intent, sort_keys=True) + '\n').encode())
+    response = client.request(
+        'POST', Client._path(prepared.plan.project_id,
+                             'tasks/' + Client._segment(prepared.task_id) + '/claim/renew'),
+        body={'fence': prepared.claim_fence, 'lease_seconds': 300},
+        revision=task['revision'], idempotency_key=key)
+    if (not isinstance(response, dict) or response.get('fence') != prepared.claim_fence
+            or response.get('holder') != prepared.plan.worker_id or response.get('held') is not True):
+        raise CPUWorkerBridgeError('Worker claim renewal is unconfirmed; preserve result')
+    return response
+
+
+def _result_intent(prepared: PreparedCPUWorker, assignment: dict, preclaim: dict,
+                   workflow: dict) -> tuple[dict, bytes]:
+    path = prepared.plan.assignment_dir / 'result-intent.json'
+    raw = _file_bytes(path, limit=65536, private=True)
+    try:
+        intent = json.loads(raw)
+    except (ValueError, UnicodeError):
+        raise CPUWorkerBridgeError('Worker result intent is malformed; preserve exposure') from None
+    token = workflow.get('token')
+    if not isinstance(token, dict):
+        raise CPUWorkerBridgeError('Saved workflow token is unavailable')
+    from .manual_cord import result_message
+    result = intent.get('result') if isinstance(intent, dict) else None
+    if not isinstance(result, dict):
+        raise CPUWorkerBridgeError('Worker result intent has no exact result envelope')
+    try:
+        message, key = result_message(assignment, result)
+    except (KeyError, ValueError, TypeError):
+        raise CPUWorkerBridgeError('Worker result envelope cannot be reconstructed') from None
+    expected = {
+        'schema': 'skybuild.cpu-result-intent.v1',
+        'project_id': prepared.plan.project_id,
+        'task_id': prepared.task_id,
+        'assignment_id': prepared.assignment_id,
+        'worker': prepared.plan.worker_id,
+        'attempt_id': token['attempt_id'],
+        'claim_fence': token['claim_fence'],
+        'input_generation': token['input_generation'],
+        'definition_revision': token['definition_revision'],
+        'policy_version': token['policy_version'],
+        'assignment_sha256': _digest(json.dumps(assignment, sort_keys=True, separators=(',', ':')).encode()),
+        'brief_sha256': assignment['brief_sha256'],
+        'patch_sha256': prepared.plan.patch_digest,
+        'source_head': result.get('head_sha'),
+        'source_branch': 'refs/heads/' + assignment['branch'],
+        'target_base': assignment['base_sha'],
+        'result': result,
+        'message': message,
+        'message_idempotency_key': key,
+    }
+    if (intent != expected or preclaim.get('attempt_id') != prepared.attempt_id
+            or preclaim.get('claim_fence') != prepared.claim_fence
+            or result.get('schema') != 'manual-work-v1'
+            or result.get('phase') != 'ready-for-review'
+            or not isinstance(result.get('head_sha'), str)
+            or not re.fullmatch(r'[0-9a-f]{40}', result['head_sha'])):
+        raise CPUWorkerBridgeError('Result intent differs from exact assignment or worker fence')
+    return intent, raw
+
+
+def _verify_pushed_result(prepared: PreparedCPUWorker, intent: dict) -> None:
+    worktree = prepared.plan.assignment_dir / 'source'
+    result = intent['result']
+    askpass = prepared.plan.assignment_dir / 'git-askpass.sh'
+    expected_askpass = (b'#!/bin/sh\ncase "$1" in\n'
+                        b'  *Username*) printf \'%s\\n\' \'x-access-token\' ;;\n'
+                        b'  *Password*) exec /bin/cat -- "$SKYBUILD_GIT_TOKEN_FILE" ;;\n'
+                        b'  *) exit 1 ;;\nesac\n')
+    if _file_bytes(askpass, limit=2048, private=True) != expected_askpass:
+        raise CPUWorkerBridgeError('Trusted Git credential helper differs; preserve exposure')
+    git_token = _file_bytes(prepared.plan.git_token_file, limit=1024, private=True)
+    if _digest(git_token) != prepared.git_token_digest:
+        raise CPUWorkerBridgeError('Git credential differs from prepared private reference')
+    origin = subprocess.run(['git', 'remote', 'get-url', 'origin'], cwd=worktree,
+                            capture_output=True, text=True, timeout=5, check=False)
+    branch = subprocess.run(['git', 'symbolic-ref', '--short', 'HEAD'], cwd=worktree,
+                            capture_output=True, text=True, timeout=5, check=False)
+    head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=worktree,
+                         capture_output=True, text=True, timeout=5, check=False)
+    status = subprocess.run(['git', 'status', '--porcelain=v1', '--untracked-files=all'], cwd=worktree,
+                            capture_output=True, text=True, timeout=5, check=False)
+    if (origin.returncode or origin.stdout.strip() != 'https://github.com/stonesky-ai/skybuild.git'
+            or branch.returncode or branch.stdout.strip() != result['branch']
+            or head.returncode or head.stdout.strip() != result['head_sha']
+            or status.returncode or status.stdout):
+        raise CPUWorkerBridgeError('Local pushed result snapshot differs; preserve exposure')
+    environment = {key: os.environ[key] for key in _SAFE_ENV if key in os.environ}
+    environment.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null',
+                       GIT_TERMINAL_PROMPT='0', GIT_ASKPASS=str(askpass),
+                       SKYBUILD_GIT_TOKEN_FILE=str(prepared.plan.git_token_file))
+    remote = subprocess.run(['git', 'ls-remote', '--refs', 'origin', intent['source_branch']],
+                            cwd=worktree, env=environment, capture_output=True, text=True,
+                            timeout=30, check=False)
+    if remote.returncode or remote.stdout.strip() != result['head_sha'] + '\t' + intent['source_branch']:
+        raise CPUWorkerBridgeError('Authenticated remote head does not match result intent; preserve exposure')
 
 
 def _write_exclusive(path: Path, data: bytes, mode: int = 0o600) -> None:
@@ -215,6 +404,11 @@ def _controller_pin(plan: CPUWorkerPlan, interpreter_digest: str) -> tuple[str, 
     root = Path(__file__).resolve().parents[2]
     if plan.checkout.resolve(strict=True) != root:
         raise CPUWorkerBridgeError('Worker import checkout must be the exact controller source root')
+    entrypoint = (sys.modules.get('skybuild.auto_patch_controller')
+                  or sys.modules.get('__main__'))
+    if (entrypoint is None or not getattr(entrypoint, '__file__', None)
+            or Path(entrypoint.__file__).resolve(strict=True) != root / 'src/skybuild/auto_patch_controller.py'):
+        raise CPUWorkerBridgeError('Trusted CPU bridge must run under the pinned automatic controller entrypoint')
     if plan.controller_profile_file.is_symlink():
         raise CPUWorkerBridgeError('Trusted controller profile cannot be a symlink')
     profile_path = plan.controller_profile_file.resolve(strict=True)
@@ -279,11 +473,19 @@ def _private_dir(path: Path) -> None:
         raise CPUWorkerBridgeError('Worker state directory must be owned and mode 0700')
 
 
-def _read_assignment(plan: CPUWorkerPlan) -> tuple[dict, dict, dict, str]:
+def _read_assignment(plan: CPUWorkerPlan, *, allow_runtime: bool = False) -> tuple[dict, dict, dict, str]:
     _private_dir(plan.assignment_dir)
     if plan.assignment_dir.resolve().is_relative_to(plan.checkout.resolve()):
         raise CPUWorkerBridgeError('Worker state directory must be outside the source checkout')
-    if {item.name for item in plan.assignment_dir.iterdir()} != set(_PRIVATE_ASSIGNMENT_FILES):
+    names = {item.name for item in plan.assignment_dir.iterdir()}
+    allowed_runtime = {'intent.json', 'push-intent.json', 'result-intent.json', 'source',
+                       'git-askpass.sh', 'observation-intent.json', 'submitted.json',
+                       'assignment.json.workflow.json.submit', 'claim-renewal-pre-settle.json',
+                       'claim-renewal-pre-submit.json'}
+    allowed_runtime.update(name for name in names if re.fullmatch(r'observation-[0-9a-f-]{36}\.json', name))
+    if (not set(_PRIVATE_ASSIGNMENT_FILES).issubset(names)
+            or (not allow_runtime and names != set(_PRIVATE_ASSIGNMENT_FILES))
+            or (allow_runtime and names - set(_PRIVATE_ASSIGNMENT_FILES) - allowed_runtime)):
         raise CPUWorkerBridgeError('Worker directory must contain exactly one pinned preclaim')
     blobs = {name: _file_bytes(plan.assignment_dir / name, limit=32768, private=True)
              for name in _PRIVATE_ASSIGNMENT_FILES}
@@ -468,8 +670,99 @@ def prepare_worker(plan: CPUWorkerPlan, *, action_id: str, operation_id: str) ->
                              preclaim['claim_fence'], approved_until, source_head, SOURCE_DIGEST,
                              interpreter_digest, controller_head, controller_source_digest,
                              controller_profile_digest, ca_digest,
-                             owner_token_digest,
+                             owner_token_digest, _digest(worker_token_bytes),
+                             _digest(git_token_bytes),
                              assignment_digest, argv_digest, unit_name, launch_nonce)
+
+
+def _submit_after_settlement(owner: Client, worker_client: Client,
+                             prepared: PreparedCPUWorker, intent: dict) -> dict:
+    assignment, _, workflow, digest = _read_assignment(prepared.plan, allow_runtime=True)
+    if digest != prepared.assignment_digest:
+        raise CPUWorkerBridgeError('Saved assignment inputs changed after dispatch preparation')
+    result = intent['result']
+    workflow_path = prepared.plan.assignment_dir / 'assignment.json.workflow.json'
+    submit_path = workflow_path.with_name(workflow_path.name + '.submit')
+    current = owner.task_workflow(prepared.plan.project_id, prepared.task_id)
+    token = current.get('token') if isinstance(current, dict) else None
+    saved_token = workflow.get('token')
+    stable_fields = ('project_id', 'task_id', 'attempt_id', 'claim_fence',
+                     'definition_revision', 'policy_version')
+    if (not isinstance(token, dict) or not isinstance(saved_token, dict)
+            or any(token.get(name) != saved_token.get(name) for name in stable_fields)):
+        return {'submitted': False, 'settled': True,
+                'reason': 'task fence changed after settlement; preserve exact result for owner reconciliation'}
+    expected_receipt = {name: saved_token[name] for name in
+                        ('attempt_id', 'claim_fence', 'input_generation',
+                         'definition_revision', 'policy_version')}
+    expected_receipt.update(source_head=result['head_sha'],
+                            source_branch=intent['source_branch'],
+                            target_base=intent['target_base'])
+    saved_submit = None
+    if submit_path.exists() or submit_path.is_symlink():
+        try:
+            saved_submit = json.loads(_file_bytes(submit_path, limit=8192, private=True))
+        except (CPUWorkerBridgeError, ValueError, UnicodeError):
+            raise CPUWorkerBridgeError('Saved owner submission intent is invalid; preserve settled result') from None
+        if saved_submit.get('body') != expected_receipt or saved_submit.get('idempotency_key') != intent['message_idempotency_key']:
+            raise CPUWorkerBridgeError('Saved owner submission intent differs; preserve settled result')
+    if token.get('place') == 'working':
+        if any(token.get(name) != saved_token.get(name) for name in
+               ('input_generation', 'source_head', 'target_base')):
+            return {'submitted': False, 'settled': True,
+                    'reason': 'working task inputs changed after settlement; preserve result'}
+        try:
+            _renew_worker_claim(worker_client, prepared, 'pre-submit')
+        except Exception as error:
+            return {'submitted': False, 'settled': True,
+                    'reason': f'original worker lease needs owner reconciliation ({type(error).__name__})'}
+    elif token.get('place') == 'validating':
+        if (token.get('source_head') != result['head_sha']
+                or token.get('target_base') != intent['target_base']):
+            return {'submitted': False, 'settled': True,
+                    'reason': 'validating task source differs from result intent'}
+        if saved_submit is None:
+            return {'submitted': False, 'settled': True,
+                    'reason': 'validating task has no durable matching submit intent'}
+        history = owner.task_history(prepared.plan.project_id, prepared.task_id, limit=100, offset=0)
+        accepted = any(isinstance(item, dict) and item.get('operation') == 'workflow.submit'
+                       and isinstance(item.get('event_facts'), dict)
+                       and item['event_facts'].get('author_output_receipt') == expected_receipt
+                       for item in history)
+        if not accepted:
+            return {'submitted': False, 'settled': True,
+                    'reason': 'submit outcome is not confirmed in task history; preserve idempotency intent'}
+    else:
+        return {'submitted': False, 'settled': True,
+                'reason': 'task is no longer at its original submit boundary; preserve result for owner reconciliation'}
+    # On retry, this GET/history read precedes replay of manual_cord's durable
+    # .submit and deterministic Cord message key. It never creates a new key.
+    owner.task_workflow(prepared.plan.project_id, prepared.task_id)
+    if saved_submit is not None:
+        owner.task_history(prepared.plan.project_id, prepared.task_id, limit=100, offset=0)
+    from .manual_cord import send_result
+    sent = send_result(owner, prepared.plan.project_id, prepared.plan.checkout,
+                       prepared.plan.assignment_dir / 'source', worker=prepared.plan.worker_id,
+                       assignment=assignment, result=result, workflow_state=workflow_path,
+                       relay_worker=prepared.plan.worker_id)
+    receipt = {'schema': 'skybuild.cpu-submitted-result.v1',
+               'assignment_id': prepared.assignment_id, 'task_id': prepared.task_id,
+               'attempt_id': prepared.attempt_id, 'claim_fence': prepared.claim_fence,
+               'head_sha': result['head_sha'], 'message_id': sent.get('message_id'),
+               'message_idempotency_key': intent['message_idempotency_key'],
+               'result_intent_sha256': _digest(json.dumps(intent, sort_keys=True,
+                                                          separators=(',', ':')).encode()),
+               'sender_principal': owner.whoami().get('principal_id'),
+               'relay_worker': prepared.plan.worker_id, 'sent': sent.get('sent') is True}
+    receipt_path = prepared.plan.assignment_dir / 'submitted.json'
+    if receipt_path.exists() or receipt_path.is_symlink():
+        saved = json.loads(_file_bytes(receipt_path, limit=8192, private=True))
+        if saved != receipt:
+            raise CPUWorkerBridgeError('Saved submission receipt differs from owner relay result')
+    else:
+        _write_exclusive(receipt_path, (json.dumps(receipt, sort_keys=True) + '\n').encode())
+    return {'submitted': receipt['sent'], 'settled': True, 'state': 'settled',
+            'message_id': receipt['message_id']}
 
 
 def launch_worker(prepared: PreparedCPUWorker) -> dict:
@@ -533,7 +826,7 @@ def reconcile_worker(prepared: PreparedCPUWorker) -> dict:
 
 
 def _reconcile_worker(client: Client, prepared: PreparedCPUWorker) -> dict:
-    """Persist exact natural completion; any mismatch or uncertainty stays held."""
+    """Settle exact natural completion, then relay the same immutable result."""
     def verify_pins() -> None:
         if _controller_pin(prepared.plan, prepared.interpreter_digest) != (
                 prepared.controller_head, prepared.controller_source_digest,
@@ -543,95 +836,106 @@ def _reconcile_worker(client: Client, prepared: PreparedCPUWorker) -> dict:
     _private_dir(prepared.plan.external_state_dir)
     manager = _unit_manager(prepared.plan.external_state_dir)
     current = client.get_cpu_worker_dispatch(prepared.plan.project_id, prepared.operation_id)
-    if current.get('state') == 'settled':
-        return {'observed': True, 'settled': True, 'state': 'settled'}
     latest = current.get('latest_observation')
     if isinstance(latest, dict) and latest.get('phase') == 'failed':
         return {'observed': True, 'settled': False, 'state': current.get('state'),
                 'reason': 'failed terminal unit remains held for owner reconciliation'}
-    if current.get('state') == 'terminal':
+    if current.get('state') in {'terminal', 'settled'}:
         state = manager.observe(prepared.unit_name)
+    else:
+        state = manager.observe(prepared.unit_name)
+        if (state.launch_nonce != prepared.launch_nonce or not state.invocation_id):
+            return {'observed': False, 'settled': False, 'reason': 'unit identity remains unknown'}
+        verify_pins()
+        client.record_cpu_worker_invocation(prepared.plan.project_id, prepared.operation_id,
+            {'host_id': socket.gethostname(), 'unit_name': state.unit,
+             'launch_nonce': state.launch_nonce, 'invocation_id': state.invocation_id})
+    if (state.unit != prepared.unit_name or state.launch_nonce != prepared.launch_nonce
+            or not state.invocation_id):
+        return {'observed': False, 'settled': False, 'reason': 'exact unit invocation remains unknown'}
+    if state.phase != 'completed' or state.result != 'success' or state.exit_status != 0:
+        if current.get('state') in {'terminal', 'settled'}:
+            return {'observed': False, 'settled': current.get('state') == 'settled',
+                    'reason': 'persisted success conflicts with current exact invocation; preserve exposure'}
+        record = {'observation_id': str(uuid4()), 'host_id': socket.gethostname(),
+                  'unit_name': state.unit, 'launch_nonce': state.launch_nonce,
+                  'invocation_id': state.invocation_id,
+                  'phase': 'running' if state.phase == 'running' else 'unknown',
+                  'result': None, 'exit_status': None, 'worker_result_digest': None}
+        if state.phase == 'completed':
+            record.update(phase='failed', result=state.result or 'unknown-terminal-result',
+                          exit_status=state.exit_status)
+        observed = client.observe_cpu_worker_dispatch(prepared.plan.project_id,
+                                                       prepared.operation_id, record)
+        return {'observed': True, 'settled': False, 'state': observed.get('state')}
+
+    assignment, preclaim, workflow, digest = _read_assignment(prepared.plan, allow_runtime=True)
+    if digest != prepared.assignment_digest:
+        raise CPUWorkerBridgeError('Saved assignment inputs changed after dispatch preparation')
+    intent, raw_intent = _result_intent(prepared, assignment, preclaim, workflow)
+    _verify_pushed_result(prepared, intent)
+    result_digest = _digest(raw_intent)
+    if current.get('state') in {'terminal', 'settled'}:
         if (not isinstance(latest, dict) or latest.get('phase') != 'completed'
                 or latest.get('result') != 'success' or latest.get('exit_status') != 0
-                or not latest.get('worker_result_digest')
+                or latest.get('worker_result_digest') != result_digest
                 or latest.get('host_id') != socket.gethostname()
                 or latest.get('unit_name') != prepared.unit_name
                 or latest.get('launch_nonce') != prepared.launch_nonce
-                or latest.get('invocation_id') != state.invocation_id
-                or state.unit != prepared.unit_name or state.launch_nonce != prepared.launch_nonce
-                or state.phase != 'completed' or state.result != 'success' or state.exit_status != 0):
-            return {'observed': False, 'settled': False,
-                    'reason': 'persisted terminal proof does not match the exact completed unit'}
-        verify_pins()
-        settled = client.settle_cpu_worker_dispatch(
-            prepared.plan.project_id, prepared.operation_id,
-            observation_id=latest['observation_id'])
-        return {'observed': True, 'settled': settled.get('state') == 'settled',
-                'state': settled.get('state')}
-    state = manager.observe(prepared.unit_name)
-    if (state.launch_nonce != prepared.launch_nonce or not state.invocation_id):
-        return {'observed': False, 'settled': False, 'reason': 'unit identity remains unknown'}
-    verify_pins()
-    client.record_cpu_worker_invocation(prepared.plan.project_id, prepared.operation_id,
-        {'host_id': socket.gethostname(), 'unit_name': state.unit, 'launch_nonce': state.launch_nonce,
-         'invocation_id': state.invocation_id})
-    phase = 'running' if state.phase == 'running' else 'unknown'
-    result = exit_status = worker_result_digest = None
-    if state.phase == 'completed':
-        path = prepared.plan.assignment_dir / 'submitted.json'
-        try:
-            raw = _file_bytes(path, limit=32768, private=True)
-            submitted = json.loads(raw)
-        except (CPUWorkerBridgeError, ValueError, UnicodeError):
-            submitted = None
-            raw = b''
-        if (isinstance(submitted, dict) and submitted.get('sent') is True
-                and submitted.get('assignment_id') == prepared.assignment_id
-                and isinstance(submitted.get('head_sha'), str)
-                and re.fullmatch(r'[0-9a-f]{40,64}', submitted['head_sha'])
-                and isinstance(submitted.get('message_id'), str) and submitted['message_id']):
-            phase, result, exit_status = 'completed', 'success', 0
-            worker_result_digest = _digest(raw)
-        else:
-            phase, result, exit_status = 'failed', 'terminal-without-verified-worker-result', state.exit_status
-        if state.result != 'success' or state.exit_status != 0:
-            phase, result, exit_status, worker_result_digest = (
-                'failed', state.result or 'unknown-terminal-result', state.exit_status, None)
-    observation_id = str(uuid4())
-    record = {'observation_id': observation_id, 'host_id': socket.gethostname(),
-              'unit_name': state.unit, 'launch_nonce': prepared.launch_nonce,
-              'invocation_id': state.invocation_id, 'phase': phase,
-              'result': result, 'exit_status': exit_status,
-              'worker_result_digest': worker_result_digest}
-    intent_path = prepared.plan.assignment_dir / 'observation-intent.json'
-    if intent_path.exists() or intent_path.is_symlink():
-        try:
-            saved = json.loads(_file_bytes(intent_path, limit=4096, private=True))
-        except (CPUWorkerBridgeError, ValueError, UnicodeError):
-            raise CPUWorkerBridgeError('Saved observation intent is invalid; preserve dispatch') from None
-        record = saved.get('request') if isinstance(saved, dict) else None
-        if (saved.get('operation_id') != prepared.operation_id or not isinstance(record, dict)
-                or record.get('host_id') != socket.gethostname()
-                or record.get('unit_name') != prepared.unit_name
-                or record.get('launch_nonce') != prepared.launch_nonce
-                or record.get('invocation_id') != state.invocation_id):
-            raise CPUWorkerBridgeError('Saved observation intent binds another invocation')
-        phase = record.get('phase')
+                or latest.get('invocation_id') != state.invocation_id):
+            return {'observed': False, 'settled': current.get('state') == 'settled',
+                    'reason': 'persisted terminal proof or result digest differs; preserve exposure'}
+        observation_id = latest.get('observation_id')
     else:
-        _write_exclusive(intent_path, (json.dumps({'operation_id': prepared.operation_id,
-                                                   'request': record}, sort_keys=True) + '\n').encode())
-    verify_pins()
-    observed = client.observe_cpu_worker_dispatch(prepared.plan.project_id, prepared.operation_id, record)
-    archived = prepared.plan.assignment_dir / ('observation-' + record['observation_id'] + '.json')
-    os.replace(intent_path, archived)
-    directory = os.open(prepared.plan.assignment_dir, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
-    if phase != 'completed':
-        return {'observed': True, 'settled': False, 'state': observed.get('state')}
-    verify_pins()
-    settled = client.settle_cpu_worker_dispatch(prepared.plan.project_id, prepared.operation_id,
-                                                observation_id=record['observation_id'])
-    return {'observed': True, 'settled': settled.get('state') == 'settled', 'state': settled.get('state')}
+        observation_id = str(uuid4())
+        record = {'observation_id': observation_id, 'host_id': socket.gethostname(),
+                  'unit_name': state.unit, 'launch_nonce': prepared.launch_nonce,
+                  'invocation_id': state.invocation_id, 'phase': 'completed',
+                  'result': 'success', 'exit_status': 0,
+                  'worker_result_digest': result_digest}
+        intent_path = prepared.plan.assignment_dir / 'observation-intent.json'
+        if intent_path.exists() or intent_path.is_symlink():
+            try:
+                saved = json.loads(_file_bytes(intent_path, limit=4096, private=True))
+            except (CPUWorkerBridgeError, ValueError, UnicodeError):
+                raise CPUWorkerBridgeError('Saved observation intent is invalid; preserve dispatch') from None
+            record = saved.get('request') if isinstance(saved, dict) else None
+            if (saved.get('operation_id') != prepared.operation_id or not isinstance(record, dict)
+                    or record.get('host_id') != socket.gethostname()
+                    or record.get('unit_name') != prepared.unit_name
+                    or record.get('launch_nonce') != prepared.launch_nonce
+                    or record.get('invocation_id') != state.invocation_id
+                    or record.get('worker_result_digest') != result_digest):
+                raise CPUWorkerBridgeError('Saved observation intent binds another result')
+            observation_id = record['observation_id']
+        else:
+            _write_exclusive(intent_path, (json.dumps({'operation_id': prepared.operation_id,
+                                                       'request': record}, sort_keys=True) + '\n').encode())
+        verify_pins()
+        observed = client.observe_cpu_worker_dispatch(prepared.plan.project_id,
+                                                       prepared.operation_id, record)
+        archived = prepared.plan.assignment_dir / ('observation-' + record['observation_id'] + '.json')
+        os.replace(intent_path, archived)
+        directory = os.open(prepared.plan.assignment_dir, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        if observed.get('state') != 'terminal':
+            return {'observed': True, 'settled': False, 'state': observed.get('state')}
+    if current.get('state') != 'settled':
+        try:
+            with _trusted_worker_client(prepared) as worker_client:
+                _renew_worker_claim(worker_client, prepared, 'pre-settle')
+        except Exception as error:
+            return {'observed': True, 'settled': False, 'state': current.get('state'),
+                    'reason': f'original worker lease needs owner reconciliation ({type(error).__name__})'}
+        verify_pins()
+        settled = client.settle_cpu_worker_dispatch(prepared.plan.project_id,
+                                                    prepared.operation_id,
+                                                    observation_id=observation_id)
+        if settled.get('state') != 'settled':
+            return {'observed': True, 'settled': False, 'state': settled.get('state')}
+    with _trusted_worker_client(prepared) as worker_client:
+        submission = _submit_after_settlement(client, worker_client, prepared, intent)
+    return {'observed': True, **submission}

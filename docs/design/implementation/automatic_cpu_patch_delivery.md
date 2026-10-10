@@ -46,7 +46,10 @@ Supply a private JSON manifest outside the repository:
 ```
 
 Run from a checkout containing the reviewed controller source and committed
-briefs, with `origin/dev-006` at the current published development base. An
+briefs, with `origin/dev-006` at the current published development base. The
+owner also supplies a private controller profile pinned to the exact reviewed
+controller commit, loaded authority module digests, project, API endpoint, and
+Python interpreter digest; the bridge rejects any source or profile mismatch. An
 owner approves an exact private permit file by SHA-256. Its fields are
 `schema=skybuild.auto-cpu-patch-permit.v1`,
 `profile=bounded-trusted-cpu-patch-v1`, `project_id`, `host_id` (the execution
@@ -79,22 +82,32 @@ scripts/project_python -m skybuild.auto_patch_controller \
   --permit-sha256 '<owner-approved 64 hex digest>' \
   --weekly-usage /absolute/private/weekly-observation.json \
   --hostwatch /absolute/private/fresh-hostwatch.json \
+  --controller-profile /absolute/private/controller-profile.json \
   --state-dir /absolute/private/new-run-directory
 ```
 
 The controller selects the two highest-priority eligible tasks from committed
 brief candidates. It records selection, dispatches through the existing
-durable Cord sender, then claims each task with its own worker principal and
-starts two separate bounded systemd user units through `JobUnitManager`. Each
-worker rereads the exact approved permit and checks its own clean loaded source,
-approved task envelope and patch before its first write. It checks its task
-approval and preclaimed fence, renews its
-lease, applies its patch in an independent clone, checks source bytes and Git
-lineage, pushes its own branch, submits the fenced REST result, and sends its
-Cord result. The controller checks owner CPU controls before work, but this
-one-shot permit is a bounded demonstration and does not redeem the current
-CPU reservation API. A failed or uncertain write leaves private evidence. Do not
-restart a used run directory or silently replay a write.
+durable Cord sender, then claims each task with its own worker principal. It
+reserves one CPU unit against that exact live claim and prepares a durable
+dispatch effect before starting two separate bounded systemd user units through
+`JobUnitManager`. Each worker rereads the exact approved permit and checks its
+own clean loaded source, approved task envelope and patch before its first
+write. It checks its task approval and preclaimed fence, renews its lease,
+applies its patch in an independent clone, checks source bytes and Git lineage,
+pushes its own branch, then writes a durable exact result intent and exits
+without submitting. The trusted owner controller verifies the remote branch
+head and exact natural terminal invocation, settles that invocation's existing
+effect and reservation, and relays the same fenced result through the existing
+workflow and Cord idempotency keys. A failed or uncertain write leaves private
+evidence and held exposure. This one-shot run currently requires explicit owner
+reconciliation after process restart; do not start a replacement unit or reuse
+a consumed run directory.
+
+The begin endpoint also rechecks unresolved task-lineage usage while holding the
+project graph lock. Until the shared usage-history source from schema migration
+016 is installed, begin fails closed with `usage_guard_unavailable`. Production
+qualification requires the combined 014/015/016 schema and source bundle.
 
 Workers receive their scoped REST worker token and a separate Git token file
 for the task-branch push. The controller does not pass a publisher credential

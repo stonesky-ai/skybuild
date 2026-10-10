@@ -61,10 +61,16 @@ def _setup(tmp_path, monkeypatch, *, fail_at=None):
             return {"is_admin": self.token == "owner"}
         def cpu_control_status(self, _project):
             events.append("owner_controls")
-            return {"pool": {"enabled": True, "local_enabled": True, "capacity": 2},
+            return {"pool": {"enabled": True, "local_enabled": True, "capacity": 2,
+                             "generation": 3, "local_generation": 4},
                     "held_units": 0}
         def get_task(self, _project, task_id):
-            return {"task_id": task_id, "status": "ready", "revision": 2}
+            return {"task_id": task_id, "status": "in-progress", "revision": 3,
+                    "metadata": {"_skybuild_workflow": {"readiness": {"input_generation": 5}}}}
+        def reserve_cpu(self, _project, request):
+            events.append("reserve:" + request["task_id"])
+            return {"action_id": request["action_id"], "attempt_id": request["attempt_id"],
+                    "state": "reserved"}
 
     monkeypatch.setattr(controller, "Client", FakeClient)
 
@@ -87,25 +93,38 @@ def _setup(tmp_path, monkeypatch, *, fail_at=None):
 
     monkeypatch.setattr(controller, "receive_assignment", receive)
 
+    prepared_by_id = {}
+    monkeypatch.setattr(controller, "prepare_worker", lambda plan, *, action_id, operation_id:
+        prepared_by_id.setdefault(operation_id, SimpleNamespace(plan=plan, action_id=action_id,
+            operation_id=operation_id, unit_name="skybuild-job-" + plan.worker_id[-1] * 24 + ".service",
+            task_id=plan.worker_id)))
+    launched = set()
+    def launch(prepared):
+        events.append("launch:" + prepared.task_id)
+        if fail_at == "launch-2" and prepared.plan.worker_id == "worker_2":
+            raise controller.JobUnitError("unknown second launch")
+        launched.add(prepared.unit_name)
+        return {"started": True, "unit_name": prepared.unit_name}
+    monkeypatch.setattr(controller, "launch_worker", launch)
+
+    def reconcile(prepared):
+        events.append("reconcile:" + prepared.task_id)
+        if prepared.unit_name not in launched:
+            return {"submitted": False, "settled": False, "reason": "unit unknown"}
+        receipt = {"assignment_id": "ASSIGN-" + prepared.plan.worker_id[-1],
+                   "sent": True, "message_id": "relay-" + prepared.plan.worker_id,
+                   "head_sha": "e" * 40}
+        path = prepared.plan.assignment_dir / "submitted.json"
+        path.write_text(json.dumps(receipt))
+        path.chmod(0o600)
+        return {"submitted": True, "settled": True}
+    monkeypatch.setattr(controller, "reconcile_worker", reconcile)
+
     class FakeManager:
         def __init__(self, _state_dir):
-            self.started = set()
-        def start(self, spec):
-            events.append("launch:" + spec.task_id)
-            assert spec.memory_max_bytes == 2 * 1024**3 and spec.runtime_seconds <= 600
-            assert spec.argv[spec.argv.index("--permit-sha256") + 1] == "f" * 64
-            assert spec.argv[spec.argv.index("--permit") + 1] == str(tmp_path / "permit")
-            if fail_at == "launch-2" and spec.task_id.endswith("-2"):
-                raise controller.JobUnitError("unknown second launch")
-            self.started.add(spec.unit())
-            argv = list(spec.argv)
-            directory = Path(argv[argv.index("--state-dir") + 1])
-            assignment = selected[int(directory.name[-1]) - 1]["assignment_id"]
-            (directory / "submitted.json").write_text(json.dumps({"assignment_id": assignment,
-                "sent": True, "message_id": "result-1", "head_sha": "e" * 40}))
-            return spec.unit()
+            pass
         def observe(self, unit):
-            if unit not in self.started:
+            if unit not in launched:
                 raise controller.JobUnitError("unconfirmed unit")
             return SimpleNamespace(phase="completed", result="success", exit_status=0,
                                    memory_peak_bytes=1024**2)
@@ -135,7 +154,8 @@ def test_controller_dispatches_claims_and_bounds_two_distinct_attempts(
         dispatcher="pilot_dispatcher", url="https://private.ts.net", dispatcher_token=tmp_path / "dispatcher",
         owner_token=tmp_path / "owner", ca_file=tmp_path / "ca", base_ref="refs/heads/dev-006",
         state_dir=tmp_path / "run", permit_path=tmp_path / "permit", permit_sha256="f" * 64,
-        weekly_usage=tmp_path / "weekly", hostwatch=tmp_path / "host")
+        weekly_usage=tmp_path / "weekly", hostwatch=tmp_path / "host",
+        controller_profile=tmp_path / "controller-profile")
     assert events.count("dispatch:worker_1") == events.count("dispatch:worker_2") == 1
     assert sum(value.startswith("claim:") for value in events) == expected_claims
     assert sum(value.startswith("launch:") for value in events) == expected_launches
@@ -145,8 +165,8 @@ def test_controller_dispatches_claims_and_bounds_two_distinct_attempts(
     assert (tmp_path / "run" / "selection.json").is_file()
     assert all(item["envelope"]["base_sha"] == "a" * 40 for item in selected)
     if failure == "launch-2":
-        assert output["workers"][1]["phase"] == "unknown"
-        assert (tmp_path / "run" / "worker-worker_2.launch-intent.json").is_file()
+        assert output["workers"][1].get("reconciliation_error") == "JobUnitError"
+        assert (tmp_path / "run" / "worker-worker_2" / "launch-intent.json").is_file()
 
 
 def test_dispatch_rejects_rebuilt_development_base_before_cord_send(tmp_path, monkeypatch):

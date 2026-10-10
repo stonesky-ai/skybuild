@@ -21,7 +21,7 @@ from .client import Client, ClientError, ca_file_sha256
 from .auto_patch_permit import PermitError, check_worker_permit
 from .fleet_preflight import _resolved_addresses, _token_from_file, probe_private_api
 from .manual_assignment import _path, verify_assignment
-from .manual_cord import _current_assignment, renew_assignment, send_result, _workflow_path
+from .manual_cord import _current_assignment, renew_assignment, result_message, _workflow_path
 from .manual_dispatch import _private_endpoint, _read_state, _state_directory
 
 
@@ -306,16 +306,39 @@ def run(client: Client, *, project: str, worker: str, dispatcher: str, checkout:
                          "git diff --cached --check passed", "Committed bytes, paths and parent matched"],
               "changed_paths": paths, "risks": [],
               "next_action": "Independent exact-head review, validation and trusted bundle gate"}
-    _record(state_dir, "result-intent.json", result)
-    require_time()
-    submitted = send_result(client, project, checkout, destination, worker=worker,
-                            assignment=assignment, result=result,
-                            workflow_state=_workflow_path(assignment_path))
-    _record(state_dir, "submitted.json", submitted)
+    binding = _read_state(_workflow_path(assignment_path))
+    token = binding.get("token") if isinstance(binding, dict) else None
+    if (not isinstance(token, dict) or token.get("attempt_id") != received.get("attempt_id")
+            or token.get("claim_fence") != received.get("claim_fence")):
+        raise PatchWorkerError("Saved fenced claim differs from result intent")
+    message, message_key = result_message(assignment, result)
+    intent = {
+        "schema": "skybuild.cpu-result-intent.v1",
+        "project_id": project,
+        "task_id": assignment["task_id"],
+        "assignment_id": assignment["assignment_id"],
+        "worker": worker,
+        "attempt_id": token["attempt_id"],
+        "claim_fence": token["claim_fence"],
+        "input_generation": token["input_generation"],
+        "definition_revision": token["definition_revision"],
+        "policy_version": token["policy_version"],
+        "assignment_sha256": hashlib.sha256(
+            json.dumps(assignment, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+        "brief_sha256": assignment["brief_sha256"],
+        "patch_sha256": patch_sha256,
+        "source_head": head,
+        "source_branch": remote_ref,
+        "target_base": assignment["base_sha"],
+        "result": result,
+        "message": message,
+        "message_idempotency_key": message_key,
+    }
+    _record(state_dir, "result-intent.json", intent)
     return {"task_id": assignment["task_id"], "worker": worker, "head_sha": head,
-            "branch": assignment["branch"], "message_id": submitted["message_id"],
+            "branch": assignment["branch"], "result_prepared": True,
             "attempt_id": received["attempt_id"], "claim_fence": received["claim_fence"],
-            "state_dir": str(state_dir), "submitted": True}
+            "state_dir": str(state_dir)}
 
 
 def main(argv: list[str] | None = None) -> int:

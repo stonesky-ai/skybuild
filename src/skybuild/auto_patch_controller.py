@@ -14,8 +14,9 @@ import re
 import subprocess
 import sys
 import time
+from uuid import uuid4
 
-from scripts.skybuild_job_unit import JobSpec, JobUnitError, JobUnitManager
+from scripts.skybuild_job_unit import JobUnitError, JobUnitManager
 
 from .auto_patch_permit import (PermitError, check_source, check_weekly_usage,
                                 load as load_permit, resource_admission)
@@ -23,6 +24,8 @@ from .auto_patch_worker import _approved_task, _patch_bytes
 from .client import Client, ClientError, ca_file_sha256
 from .fleet_preflight import PreflightError, _token_from_file, _resolved_addresses, probe_private_api
 from .manual_cord import ManualCordError, receive_assignment
+from .cpu_worker_bridge import (CPUWorkerBridgeError, CPUWorkerPlan, launch_worker,
+                                prepare_worker, reconcile_worker)
 from .manual_dispatch import (DispatchError, _private_endpoint, _state_directory,
                               build_envelope, dispatch)
 
@@ -114,17 +117,18 @@ def _save_new(path: Path, value: dict) -> None:
         os.close(directory)
 
 
-def _cpu_controls(client: Client, project: str) -> None:
+def _cpu_controls(client: Client, project: str, *, required_free: int = 2) -> None:
     identity = client.whoami()
     if not isinstance(identity, dict) or identity.get("is_admin") is not True:
         raise AutoControllerError("CPU control inspection requires owner authority")
     controls = client.cpu_control_status(project)
     pool = controls.get("pool") if isinstance(controls, dict) else None
     held = controls.get("held_units") if isinstance(controls, dict) else None
-    if (not isinstance(pool, dict) or pool.get("enabled") is not True
+    if (type(required_free) is not int or required_free < 1
+            or not isinstance(pool, dict) or pool.get("enabled") is not True
             or pool.get("local_enabled") is not True or type(pool.get("capacity")) is not int
-            or type(held) is not int or pool["capacity"] - held < 2):
-        raise AutoControllerError("Owner CPU controls do not admit two bounded workers")
+            or type(held) is not int or pool["capacity"] - held < required_free):
+        raise AutoControllerError("Owner CPU controls do not admit the remaining bounded workers")
 
 
 def _observe_owned(manager: JobUnitManager, owned: list[dict], deadline: datetime) -> list[dict]:
@@ -148,7 +152,7 @@ def _observe_owned(manager: JobUnitManager, owned: list[dict], deadline: datetim
 def run(*, repo: Path, manifest: Path, project: str, dispatcher: str, url: str,
         dispatcher_token: Path, owner_token: Path, ca_file: Path, base_ref: str,
         state_dir: Path, permit_path: Path, permit_sha256: str, weekly_usage: Path,
-        hostwatch: Path) -> dict:
+        hostwatch: Path, controller_profile: Path) -> dict:
     _private_endpoint(url, _resolved_addresses)
     repo = repo.resolve()
     state_dir = _state_directory(state_dir, repo)
@@ -189,11 +193,9 @@ def run(*, repo: Path, manifest: Path, project: str, dispatcher: str, url: str,
     _save_new(state_dir / "delivered.json", {"messages": [
         {"task_id": item["task_id"], "worker": item["worker"], "message_id": item["message_id"]}
         for item in delivered]})
-    manager = JobUnitManager(state_dir / "units")
     owned = []
+    prepared_runs = {}
     failure = None
-    empty_stdin = state_dir / "stdin.empty"
-    empty_stdin.touch(mode=0o600, exist_ok=False)
     for item in delivered:
         try:
             if datetime.now(timezone.utc) >= expiry:
@@ -203,79 +205,122 @@ def run(*, repo: Path, manifest: Path, project: str, dispatcher: str, url: str,
             resource_admission(hostwatch, permit, selected_count=2)
             with Client(url, _token_from_file(owner_token), retries=0, timeout=10,
                         trust_env=False, ca_file=ca_file, expected_ca_sha256=ca_digest) as owner:
-                _cpu_controls(owner, project)
+                _cpu_controls(owner, project, required_free=1)
             probe_private_api(url, project, Path(item["token_file"]), item["worker"],
                               ca_file=ca_file, workflow=True)
-            worker_dir = state_dir / ("worker-" + item["worker"])
-            worker_dir.mkdir(mode=0o700, exist_ok=False)
+            worker_root = state_dir / ("worker-" + item["worker"])
+            worker_root.mkdir(mode=0o700, exist_ok=False)
+            runtime_state = worker_root / "runtime"
+            runtime_state.mkdir(mode=0o700, exist_ok=False)
+            assignment_dir = runtime_state / "assignment"
+            assignment_dir.mkdir(mode=0o700, exist_ok=False)
             with Client(url, _token_from_file(Path(item["token_file"])), retries=0, timeout=10,
                         trust_env=False, ca_file=ca_file, expected_ca_sha256=ca_digest) as worker_client:
                 current = worker_client.get_task(project, item["task_id"])
                 _approved_task(current, item["envelope"], item["patch_sha256"])
                 received = receive_assignment(worker_client, project, repo, worker=item["worker"],
                                               dispatcher=dispatcher, message_id=item["message_id"],
-                                              destination=worker_dir / "assignment.json",
+                                              destination=assignment_dir / "assignment.json",
                                               expected_envelope=item["envelope"])
             if received.get("place") != "working" or not received.get("attempt_id"):
                 raise AutoControllerError("Worker claim has no fenced attempt")
-            _save_new(worker_dir / "preclaim.json", received)
-            arguments = (sys.executable, "-m", "skybuild.auto_patch_worker", "--url", url,
-                         "--project", project, "--worker", item["worker"], "--dispatcher", dispatcher,
-                         "--message-id", item["message_id"], "--checkout", str(repo),
-                         "--token-file", item["token_file"], "--git-token-file", item["git_token_file"],
-                         "--ca-file", str(ca_file), "--patch", item["patch"],
-                         "--patch-sha256", item["patch_sha256"], "--state-dir", str(worker_dir),
-                         "--approved-until", permit["approved_until"],
-                         "--permit", str(permit_path), "--permit-sha256", permit_sha256)
+            _save_new(assignment_dir / "preclaim.json", received)
+            current = None
+            with Client(url, _token_from_file(Path(item["token_file"])), retries=0, timeout=10,
+                        trust_env=False, ca_file=ca_file, expected_ca_sha256=ca_digest) as worker_client:
+                current = worker_client.get_task(project, item["task_id"])
+                status = worker_client.cpu_control_status(project)
+                readiness = current.get("metadata", {}).get("_skybuild_workflow", {}).get("readiness", {})
+                pool = status.get("pool") if isinstance(status, dict) else None
+                if (not isinstance(readiness, dict) or type(readiness.get("input_generation")) is not int
+                        or not isinstance(pool, dict) or pool.get("enabled") is not True
+                        or pool.get("local_enabled") is not True):
+                    raise AutoControllerError("Current CPU readiness or controls are unavailable")
+                action_id, operation_id = uuid4().hex, uuid4().hex
+                reservation_request = {
+                    "task_id": item["task_id"], "action_id": action_id,
+                    "attempt_id": received["attempt_id"], "units": 1,
+                    "expected_revision": current["revision"],
+                    "readiness_generation": readiness["input_generation"],
+                    "claim_fence": received["claim_fence"],
+                    "generation": pool["generation"],
+                    "local_generation": pool["local_generation"],
+                }
+                _save_new(worker_root / "dispatch-intent.json", {
+                    "schema": "skybuild.auto-patch-cpu-dispatch-intent.v1",
+                    "task_id": item["task_id"], "worker": item["worker"],
+                    "assignment_id": item["assignment_id"], "attempt_id": received["attempt_id"],
+                    "claim_fence": received["claim_fence"], "action_id": action_id,
+                    "operation_id": operation_id, "reservation": reservation_request,
+                    "permit_sha256": permit_sha256,
+                })
+                reservation = worker_client.reserve_cpu(project, reservation_request)
+                if (reservation.get("action_id") != action_id or reservation.get("state") != "reserved"
+                        or reservation.get("attempt_id") != received["attempt_id"]):
+                    raise AutoControllerError("CPU reservation does not bind exact worker attempt")
+            plan = CPUWorkerPlan(
+                project_id=project, worker_id=item["worker"], dispatcher_id=dispatcher,
+                url=url, checkout=repo, assignment_dir=assignment_dir,
+                patch_file=Path(item["patch"]), patch_digest=item["patch_sha256"],
+                worker_token_file=Path(item["token_file"]), git_token_file=Path(item["git_token_file"]),
+                ca_file=ca_file, permit_file=permit_path, permit_digest=permit_sha256,
+                owner_token_file=owner_token, weekly_usage_file=weekly_usage,
+                hostwatch_file=hostwatch, external_state_dir=runtime_state,
+                controller_profile_file=controller_profile,
+            )
+            prepared = prepare_worker(plan, action_id=action_id, operation_id=operation_id)
+            prepared_runs[operation_id] = prepared
             if datetime.now(timezone.utc) >= expiry:
                 raise AutoControllerError("Approval expired before bounded unit launch")
             check_source(repo, permit)
             check_weekly_usage(weekly_usage, permit)
             resource_admission(hostwatch, permit, selected_count=2)
-            log = state_dir / ("worker-" + item["worker"] + ".log")
-            with log.open("xb") as stream:
-                os.fchmod(stream.fileno(), 0o600)
-            remaining = int((expiry - datetime.now(timezone.utc)).total_seconds())
-            if remaining < 2:
-                raise AutoControllerError("Approval interval is too short for bounded launch")
-            spec = JobSpec(task_id=item["task_id"], attempt_id=received["attempt_id"],
-                           worktree=repo, argv=arguments, stdin_path=empty_stdin, log_path=log,
-                           memory_high_bytes=permit["memory_high_bytes"],
-                           memory_max_bytes=permit["memory_max_bytes"],
-                           runtime_seconds=min(permit["runtime_seconds"], remaining - 1),
-                           environment={key: os.environ[key] for key in ("HOME", "PATH", "LANG", "LC_ALL",
-                                                                         "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")
-                                        if key in os.environ})
-            unit = spec.unit()
             record = {"task_id": item["task_id"], "worker": item["worker"],
                       "assignment_id": item["assignment_id"], "attempt_id": received["attempt_id"],
-                      "unit": unit, "phase": "launch_intent",
-                      "log": str(log)}
-            _save_new(state_dir / ("worker-" + item["worker"] + ".launch-intent.json"), record)
+                      "claim_fence": received["claim_fence"], "action_id": action_id,
+                      "operation_id": operation_id, "unit": prepared.unit_name,
+                      "phase": "launch_intent", "assignment_dir": str(assignment_dir)}
+            _save_new(worker_root / "launch-intent.json", record)
             owned.append(record)
-            manager.start(spec)
+            launched = launch_worker(prepared)
+            if launched.get("started") is not True or launched.get("unit_name") != prepared.unit_name:
+                raise AutoControllerError("Trusted bridge did not confirm the one-shot unit start")
         except (AutoControllerError, DispatchError, ManualCordError, ClientError, PreflightError,
-                PermitError, JobUnitError, OSError, ValueError, TypeError) as error:
+                PermitError, JobUnitError, CPUWorkerBridgeError, OSError, ValueError, TypeError) as error:
             failure = type(error).__name__
             break
     deadline = min(expiry, datetime.now(timezone.utc) + timedelta(seconds=permit["runtime_seconds"] + 30))
-    _observe_owned(manager, owned, deadline)
     results = []
     for record in owned:
-        submitted_path = state_dir / ("worker-" + record["worker"]) / "submitted.json"
+        submitted_path = Path(record["assignment_dir"]) / "submitted.json"
+        if record.get("phase") != "launch_intent":
+            record["submitted"] = False
+            results.append(record)
+            continue
         try:
-            submitted_record = json.loads(submitted_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            submitted_record = None
-        submitted = (record.get("phase") == "completed" and record.get("result") == "success"
-                     and record.get("exit_status") == 0
-                     and isinstance(submitted_record, dict)
-                     and submitted_record.get("assignment_id") == record["assignment_id"]
-                     and submitted_record.get("sent") is True
-                     and isinstance(submitted_record.get("message_id"), str)
-                     and isinstance(submitted_record.get("head_sha"), str)
-                     and re.fullmatch(r"[0-9a-f]{40}", submitted_record.get("head_sha", "")) is not None)
-        results.append({**record, "submitted": submitted})
+            from scripts.skybuild_job_unit import JobUnitManager
+            manager = JobUnitManager(Path(record["assignment_dir"]).parent)
+            while datetime.now(timezone.utc) < deadline:
+                unit_state = manager.observe(record["unit"])
+                record.update(phase=unit_state.phase, result=unit_state.result,
+                              exit_status=unit_state.exit_status,
+                              memory_peak_bytes=unit_state.memory_peak_bytes)
+                if unit_state.phase == "completed":
+                    break
+                time.sleep(5)
+            if record.get("phase") != "completed":
+                record.update(phase="unknown", result=None, exit_status=None)
+            prepared = prepared_runs.get(record["operation_id"])
+            if prepared is None:
+                raise AutoControllerError("Process restart requires explicit durable bridge reconstruction")
+            outcome = reconcile_worker(prepared)
+            record.update(settled=outcome.get("settled") is True,
+                          submitted=outcome.get("submitted") is True,
+                          reconciliation_reason=outcome.get("reason"))
+        except (AutoControllerError, ClientError, CPUWorkerBridgeError, JobUnitError,
+                OSError, ValueError, TypeError) as error:
+            record.update(submitted=False, reconciliation_error=type(error).__name__)
+        results.append(record)
     output = {"schema": "skybuild.auto-patch-run.v1", "selected": len(selected),
               "workers": results, "state_dir": str(state_dir),
               "submitted": failure is None and len(results) == 2 and all(r["submitted"] for r in results),
@@ -289,7 +334,7 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("url", "project", "dispatcher", "base-ref", "permit-sha256"):
         parser.add_argument("--" + name, required=True)
     for name in ("checkout", "manifest", "dispatcher-token", "owner-token", "ca-file", "state-dir",
-                 "permit", "weekly-usage", "hostwatch"):
+                 "permit", "weekly-usage", "hostwatch", "controller-profile"):
         parser.add_argument("--" + name, type=Path, required=True)
     args = parser.parse_args(argv)
     try:
@@ -297,15 +342,19 @@ def main(argv: list[str] | None = None) -> int:
                      dispatcher=args.dispatcher, url=args.url, dispatcher_token=args.dispatcher_token,
                      owner_token=args.owner_token, ca_file=args.ca_file, base_ref=args.base_ref,
                      state_dir=args.state_dir, permit_path=args.permit, permit_sha256=args.permit_sha256,
-                     weekly_usage=args.weekly_usage, hostwatch=args.hostwatch)
+                     weekly_usage=args.weekly_usage, hostwatch=args.hostwatch,
+                     controller_profile=args.controller_profile)
         print(json.dumps(result, sort_keys=True))
         return 0 if result["submitted"] else 2
     except (AutoControllerError, DispatchError, ManualCordError, ClientError, PreflightError,
-            PermitError, JobUnitError, OSError, ValueError, TypeError, subprocess.SubprocessError):
+            PermitError, JobUnitError, CPUWorkerBridgeError, OSError, ValueError, TypeError, subprocess.SubprocessError):
         print(json.dumps({"submitted": False, "reason": "Controller stopped; preserve private run evidence"}),
               file=sys.stderr)
         return 2
 
 
 if __name__ == "__main__":
+    # The trusted bridge checks the controller module origin. When invoked as
+    # ``python -m``, expose this exact file under its package name as well.
+    sys.modules.setdefault("skybuild.auto_patch_controller", sys.modules[__name__])
     raise SystemExit(main())

@@ -64,6 +64,18 @@ class CPUWorkerDispatch:
         return self._load(connection, project_id, operation_id)
 
     @staticmethod
+    def _require_usage_clear(connection, project_id, task_id):
+        """Fail closed until the shared lineage usage guard is installed."""
+        try:
+            from .task_usage import unresolved_usage_exists
+        except ImportError:
+            raise DomainError('usage_guard_unavailable',
+                              'CPU launch is disabled until the shared usage guard is installed', 503) from None
+        if unresolved_usage_exists(connection, project_id, task_id):
+            raise DomainError('usage_conflict',
+                              'Task or its source lineage has unresolved usage exposure', 409)
+
+    @staticmethod
     def _latest(connection, operation_id):
         return connection.execute(
             'SELECT * FROM cpu_worker_observations WHERE operation_id = %s '
@@ -230,6 +242,11 @@ class CPUWorkerDispatch:
             reservation = connection.execute('SELECT * FROM cpu_reservations WHERE action_id = %s FOR UPDATE',
                                              (dispatch['action_id'],)).fetchone()
             self._current_reservation(connection, reservation)
+            # This usage-only query runs under the graph lock, after reservation
+            # identity is pinned and before the one-shot authorization mutation.
+            # It intentionally does not count this dispatch's CPU reservation or
+            # effect as inherited usage exposure.
+            self._require_usage_clear(connection, project_id, dispatch['task_id'])
             if not self._still_live(connection, reservation):
                 raise DomainError('claim_conflict', 'Claim expired before worker launch authorization', 409)
             if connection.execute('SELECT %s > clock_timestamp()', (dispatch['approved_until'],)).fetchone()[0] is not True:

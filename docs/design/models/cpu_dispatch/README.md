@@ -1,8 +1,14 @@
-# CPU dispatch intent and reconciliation simulator
+# Launch-free CPU dispatch simulator (historical model)
+
+This document records the earlier fake-adapter tranche. The same directory now
+also contains `CPUWorkerRelay.tla`, which models the production CPU worker
+settlement and owner-relay ordering. The simulator below remains useful for its
+older transaction and negative-control evidence; it is not the current real
+dispatch contract.
 
 Task: `SKYBUILD-EXECUTION-CONTROLS`. Source base: `257216c5498b95d5a6e56bca60c31abcd6736226`.
 
-This bounded implementation exercises the existing reservation/effect contract without launching a process. It adds no endpoint, worker loop, callback, command argument, systemd call, network transport, or task-authority cutover. `reserve_cpu` remains an unredeemable capacity reservation. Only explicit owner/admin calls to `CPUDispatch` can manipulate the database simulator. Every response says `physical_dispatch_authorized: false`.
+The historical `CPUDispatch` implementation exercises the existing reservation/effect contract without launching a process. It adds no worker loop, callback, systemd call, or network transport. `reserve_cpu` remains unredeemable by this simulator. Every simulator response says `physical_dispatch_authorized: false`.
 
 ## Safety contract
 
@@ -53,7 +59,7 @@ Scoped validation on 2026-10-09 passed 89 tests across `test_cpu_dispatch.py`, `
 
 ## Required physical acknowledgment contract before any real adapter
 
-Real execution remains disabled. A future separately reviewed adapter must satisfy all of the following before a CPU canary:
+The simulated adapter does not authorize real execution. Before any real CPU canary, a separately reviewed adapter must satisfy all of the following:
 
 - Bind a protected local journal to controller authority epoch, project/task/action/attempt/operation, claim fence, revision/readiness/control generations, input/policy digests, allocation, host identity, boot identity, and an execution identity that cannot alias a recycled PID or unit name.
 - Durably record acceptance before issuing an OS start. Replays inspect that same journal and process identity; they cannot create another attempt, reset resource accounting, or reuse a terminal operation.
@@ -64,3 +70,22 @@ Real execution remains disabled. A future separately reviewed adapter must satis
 - Keep command execution and trusted proof credentials outside candidate code. Qualify bounded timeouts, child-process containment, restart policies, local restrictions, shutdown/reboot, and every existing launch bypass. Prove the physical behavior independently of the database model.
 
 Reuse evidence: SkyKeep commit `383d3d375979c66b39df0f61c19a165957fecdcf`, `scripts/agents/session_keeper.py`, `SystemdSpawner` at lines 2112–2167 provides bounded subprocess calls, unit-state inspection, and stop/start separation. Its `UnitState` at lines 2098–2105 and `state()` at lines 2130–2146 distinguish absent, active, and ended units. Those are useful adapter mechanics, not a durable operation ledger or proof that every child terminated. The drain policy remains the existing SkyBuild architecture section 8 / ADR 0018: fence new work while preserving the lifecycle of already-authorized CPU work. No legacy implicit restart or escalation behavior is imported.
+
+## Current bridge source tranche
+
+`CPUWorkerDispatch` and `cpu_worker_bridge.py` add the real selected-profile
+path. The controller reserves against the exact live worker claim, commits a
+held dispatch/effect before systemd I/O, pins host/unit/nonce/InvocationID, and
+settles only from an exact successful terminal observation plus immutable
+worker result intent and authenticated remote head. The worker exits before
+task submission. After settlement, the owner controller relays the original
+fenced result through existing Cord and workflow idempotency keys. Unknown
+launches or terminal states retain exposure. No stop request is treated as
+physical termination.
+
+The controller rechecks the shared unresolved-usage helper under the graph lock
+at begin; if that source is absent, begin fails closed. Production qualification
+requires the combined migrations 014/015/016 and source bundle. The new
+`CPUWorkerRelay.tla` model is prepared but remains unchecked pending the
+serialized remote TLC plan. PostgreSQL execution, full combined bundle gates,
+published integration, and actual systemd qualification remain pending.
