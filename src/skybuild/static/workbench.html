@@ -65,6 +65,28 @@
         <div class="section-heading"><h2 id="detail-title">Selected task</h2><button id="refresh-selected" type="button" disabled>Refresh selected task</button></div>
         <p id="selection">Select a task to view its definition and history.</p>
         <details id="full-task"><summary>Full task record and provenance</summary><pre id="full-task-record">No task selected.</pre></details>
+        <section aria-labelledby="workflow-details-title">
+          <h3 id="workflow-details-title">Workflow details</h3>
+          <p id="workflow-state">No task selected.</p>
+          <ol id="workflow-path" class="workflow-path" aria-label="Normal task progress"></ol>
+          <details><summary>All workflow transitions</summary><ul id="workflow-transitions"></ul></details>
+          <p class="hint">Confirmed validation or integration failures return to Ready. Hold and Deferred pause work. Release or resume returns to Ready.</p>
+          <h4>Requirements</h4><ul id="workflow-requirements"></ul>
+          <h4>Dependencies</h4><ul id="workflow-dependencies" class="task-list"></ul>
+          <h4>Evidence and links</h4><ul id="workflow-evidence"></ul>
+          <h4>Findings and faults</h4><ul id="workflow-findings"></ul>
+          <h4>Action availability</h4><ul id="workflow-disabled"></ul>
+          <form id="workflow-form">
+            <label for="workflow-event">Permitted action</label><select id="workflow-event" disabled></select>
+            <label for="workflow-reason">Reason</label><textarea id="workflow-reason" maxlength="4096" rows="2" disabled></textarea>
+            <label for="workflow-next">Next action</label><textarea id="workflow-next" maxlength="4096" rows="2" disabled></textarea>
+            <label for="workflow-until">Defer until (date and time with timezone)</label><input id="workflow-until" placeholder="2030-01-01T09:00:00-05:00" disabled>
+            <label for="workflow-milestone">Or milestone task ID</label><input id="workflow-milestone" maxlength="200" disabled>
+            <p class="hint">Use exactly one trigger for Defer. Every control uses the displayed revision. A conflict requires a refresh and a new decision.</p>
+            <p id="workflow-operation" role="status">No pending operation.</p>
+            <button id="workflow-submit" type="submit" disabled>Record workflow action</button>
+          </form>
+        </section>
         <form id="edit-form">
           <label for="edit-title">Title</label><input id="edit-title" required maxlength="500" disabled>
           <label for="edit-description">Description</label><textarea id="edit-description" required maxlength="32768" rows="8" disabled></textarea>

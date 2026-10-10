@@ -45,3 +45,7 @@ button:disabled { opacity: .5; cursor: default; }
 .workflow-column h3 { margin: 0; font-size: 1rem; }
 .workflow-column .task-list { max-height: 34rem; }
 .workflow-board.list-view .workflow-column { margin-bottom: .75rem; }
+
+.workflow-path { display: flex; flex-wrap: wrap; gap: 2rem; padding-left: 1.5rem; }
+#workflow-state, #workflow-operation, #workflow-evidence, #workflow-findings, #workflow-disabled { overflow-wrap: anywhere; }
+#workflow-evidence a { color: #265c70; }

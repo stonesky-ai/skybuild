@@ -95,13 +95,14 @@ const get = id => {
 global.document = { getElementById: get, createElement: tag => new Element(tag) };
 const task = {task_id: " task ", title: "Title", description: "Brief", status: "proposed",
   phase: "triage", next_action: "Review", blocker: null, responsible: "owner",
-  dependencies: [" dep ", "dep"], acceptance_criteria: ["one\ntwo"], architecture_refs: ["ref\nsection"], revision: 7};
+  place: "working", evidence_freshness: "stale", dependencies: [" dep ", "dep"], acceptance_criteria: ["one\ntwo"], architecture_refs: ["ref\nsection"], revision: 7};
 const other = {...task, task_id: "other", revision: 3, acceptance_criteria: ["three"], dependencies: ["dep"]};
 const requests = [];
-let endPage = false;
+let endPage = false, conflictWorkflow = false;
 global.fetch = async (url, options) => {
   requests.push({url, options});
-  const data = url.includes("/workflow-board?") ? {
+  if (conflictWorkflow && url.endsWith("/workflow") && options.method === "POST") return {ok: false, status: 409};
+  const data = url.endsWith("/workflow") ? {task, token: {place: "working", requirements: ["<requirement>"], links: ["javascript:alert(1)", "https://example.test/evidence"], findings: ["<finding>"], faults: ["Fix fault"], evidence: [{stage: "unit_tests", state: "passed", artifacts: [], findings: []}]}, available_actions: ["hold", "claim"], transitions: [{event: "claim", sources: ["ready"], destination: "working"}, {event: "submit", sources: ["working"], destination: "validating"}, {event: "freeze", sources: ["validating"], destination: "integrating"}, {event: "accept", sources: ["integrating"], destination: "done"}, {event: "hold", sources: ["ready", "working"], destination: "hold"}], disabled_actions: {release_hold: "Task is not held"}} : url.includes("/workflow-board?") ? {
     project_id: " project ", columns: ["ready", "working", "validating", "integrating", "done", "deferred", "hold"].map(place => ({place, count: place === "ready" ? 205 : 0, oldest_age_seconds: 60, unknown_age_count: 0})),
     tasks: [{...task, place: "ready", evidence_freshness: "stale", validation: [{stage: "unit_tests", state: "passed"}], blocked_dependencies: [" dep "]}],
     total: 205, unenrolled_count: 2, ready_dependencies_complete: 200, ready_dependencies_blocked: 5, next_offset: null
@@ -135,6 +136,37 @@ async function run() {
   assert.match(get("task-list").querySelectorAll()[0].textContent, /proposed · triage/);
   assert.match(get("task-list").querySelectorAll()[0].textContent, /Review · owner/);
   get("task-list").querySelectorAll()[0].listeners.click(); await tick();
+  assert.match(get("workflow-state").textContent, /Working · Revision 7 · Evidence: stale/);
+  assert.deepEqual(get("workflow-path").children.map(item => item.textContent), ["Ready", "Working", "Validating", "Integrating", "Done"]);
+  assert.equal(get("workflow-transitions").children[4].textContent, "hold: Ready, Working to Hold");
+  assert.equal(get("workflow-requirements").children[1].textContent, "<requirement>");
+  assert.equal(get("workflow-dependencies").querySelectorAll()[0].textContent, " dep ");
+  assert.match(get("workflow-disabled").children[0].textContent, /Release hold: Task is not held/);
+  assert.equal(get("workflow-evidence").children[1].textContent, "javascript:alert(1)");
+  assert.equal(get("workflow-evidence").children[1].children.length, 0);
+  assert.equal(get("workflow-evidence").children[2].children[0].rel, "noreferrer noopener");
+  get("workflow-event").value = "hold"; get("workflow-reason").value = "Pause for owner";
+  get("workflow-form").listeners.submit({preventDefault() {}}); await tick();
+  const workflowPosts = requests.filter(request => request.url.endsWith("/workflow") && request.options.method === "POST");
+  assert.equal(workflowPosts.length, 1);
+  assert.equal(workflowPosts[0].options.headers["If-Match"], "7");
+  assert.ok(workflowPosts[0].options.headers["Idempotency-Key"]);
+  assert.deepEqual(JSON.parse(workflowPosts[0].options.body), {event: "hold", reason: "Pause for owner"});
+  get("workflow-event").value = "claim";
+  get("workflow-form").listeners.submit({preventDefault() {}}); await tick();
+  assert.deepEqual(JSON.parse(requests.find(request => request.url.endsWith("/claim")).options.body), {lease_seconds: 300});
+  conflictWorkflow = true;
+  get("workflow-event").value = "hold"; get("workflow-reason").value = "Pause again";
+  get("workflow-form").listeners.submit({preventDefault() {}}); await tick();
+  assert.equal(get("workflow-submit").disabled, true);
+  assert.match(get("notice").textContent, /Conflict.*Refresh/);
+  const conflictCount = requests.filter(request => request.url.endsWith("/workflow") && request.options.method === "POST").length;
+  get("workflow-form").listeners.submit({preventDefault() {}}); await tick();
+  assert.equal(requests.filter(request => request.url.endsWith("/workflow") && request.options.method === "POST").length, conflictCount);
+  conflictWorkflow = false;
+  get("refresh-selected").listeners.click(); await tick();
+  assert.equal(get("workflow-submit").disabled, false);
+  assert.equal(requests.filter(request => request.url.endsWith("/workflow") && request.options.method === "POST").length, conflictCount);
   assert.equal(get("history").children.length, 100);
   assert.equal(get("load-more-history").disabled, false);
   get("load-more-history").listeners.click(); await tick();
@@ -213,6 +245,8 @@ async function run() {
   assert.equal(get("lineage").children.length, 0);
   assert.equal(get("workflow-board").children.length, 0);
   assert.equal(get("board-summary").textContent, "Not connected");
+  assert.equal(get("workflow-evidence").children.length, 0);
+  assert.equal(get("workflow-state").textContent, "No task selected.");
 }
 run().catch(error => { console.error(error); process.exitCode = 1; });
 '''
