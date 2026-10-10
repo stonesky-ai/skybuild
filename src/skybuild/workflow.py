@@ -46,7 +46,7 @@ def _record_error(message: str) -> None:
 def _text_field(value, name, maximum=4096, optional=False, identifier=False):
     if optional and value is None:
         return
-    if not isinstance(value, str) or len(value) > maximum:
+    if not isinstance(value, str) or len(value) > maximum or "\x00" in value:
         _record_error(f"Invalid workflow {name}")
     if identifier and not valid_identifier(value):
         _record_error(f"Invalid workflow {name}")

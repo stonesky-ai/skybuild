@@ -126,3 +126,33 @@ def test_manual_ready_behavior_remains_unchanged_and_does_not_grant_claim():
     assert change["next_action"] == "Await explicit admission and ownership"
     assert before["metadata"] == {}
     assert change["metadata"]["_skybuild_workflow"]["generation"] == 1
+
+
+@pytest.mark.parametrize("field,value", [
+    ("title", "contains\x00null"),
+    ("links", ("artifact\x00id",)),
+])
+def test_token_rejects_null_text_before_storage(field, value):
+    with pytest.raises(DomainError) as error:
+        TaskToken("project", "TASK-1", **{field: value})
+    assert error.value.status_code == 422
+    body = TaskToken("project", "TASK-1").to_dict()
+    body[field] = list(value) if isinstance(value, tuple) else value
+    with pytest.raises(DomainError) as error:
+        TaskToken.from_dict(body)
+    assert error.value.status_code == 422
+
+
+@pytest.mark.parametrize("parameters", [
+    (("contains\x00null", "value"),),
+    (("name", "contains\x00null"),),
+])
+def test_nested_result_rejects_null_parameter_text_before_storage(parameters):
+    with pytest.raises(DomainError) as error:
+        result(parameters=parameters)
+    assert error.value.status_code == 422
+    body = TaskToken("project", "TASK-1", evidence=(result(),)).to_dict()
+    body["evidence"][0]["parameters"] = [list(pair) for pair in parameters]
+    with pytest.raises(DomainError) as error:
+        TaskToken.from_dict(body)
+    assert error.value.status_code == 422
