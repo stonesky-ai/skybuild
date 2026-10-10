@@ -43,6 +43,56 @@ def test_scan_ignores_running_and_successful_quoted_failures(tmp_path):
 
 def test_empty_recent_window_has_no_failures(tmp_path):
     assert scanner.scan(tmp_path, 30)["categories"] == {}
+    assert scanner.scan(tmp_path, 30, details=True)["details"]["failed_results"] == 0
+
+
+def test_details_pairs_old_invocation_without_disclosing_private_text(tmp_path):
+    old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    call = {"timestamp": old, "type": "response_item", "payload": {
+        "type": "custom_tool_call", "call_id": "private-call-id",
+        "input": 'await tools.exec_command({cmd: "rtk rg PRIVATE_SECRET missing.py"})'}}
+    failure = event(2, "rg: PRIVATE_SECRET: No such file or directory")
+    failure["payload"]["call_id"] = "private-call-id"
+    path = tmp_path / "rollout-test.jsonl"
+    path.write_text("\n".join(map(json.dumps, [call, failure])))
+    summary = scanner.scan(tmp_path, 30, details=True)
+    result = summary["details"]
+    assert result["failed_results"] == result["paired_results"] == 1
+    assert result["exit_counts"] == {"2": 1}
+    assert result["operations"] == {"navigation": 1}
+    assert result["signatures"] == {"missing_path": 1}
+    assert result["examples"]["missing_path"] == [{"session": path.name, "line": 2,
+                                                  "exit": "2", "operation": "navigation"}]
+    assert "PRIVATE_SECRET" not in json.dumps(summary)
+    assert "private-call-id" not in json.dumps(summary)
+
+
+def test_details_counts_results_once_and_bounds_examples(tmp_path):
+    rows = [event(2, "SyntaxError: No such file or directory") for _ in range(8)]
+    rows += [event(0, "SyntaxError"), event(None, "still running")]
+    (tmp_path / "rollout-test.jsonl").write_text("\n".join(map(json.dumps, rows)))
+    result = scanner.scan(tmp_path, 30, details=True)["details"]
+    assert result["failed_results"] == 8
+    assert result["paired_results"] == 0
+    assert result["signatures"] == {"missing_path": 8, "python_syntax": 8}
+    assert all(len(value) == 3 for value in result["examples"].values())
+
+
+def test_details_script_error_does_not_invent_numeric_exit(tmp_path):
+    row = event(None, "")
+    row["payload"]["output"] = "Script error: Unexpected token PRIVATE_SECRET exit(2)"
+    (tmp_path / "rollout-test.jsonl").write_text(json.dumps(row))
+    result = scanner.scan(tmp_path, 30, details=True)["details"]
+    assert result["exit_counts"] == {"script_error": 1}
+    assert result["signatures"] == {"javascript_syntax": 1}
+    assert "PRIVATE_SECRET" not in json.dumps(result)
+
+
+def test_details_refuses_watch_mode(monkeypatch):
+    monkeypatch.setattr(scanner, "watch", lambda *_args, **_kwargs: pytest.fail("must not watch"))
+    with pytest.raises(SystemExit) as caught:
+        scanner.main(["--watch", "--duration-minutes", "1", "--details"])
+    assert caught.value.code == 2
 
 
 def test_long_session_in_old_date_folder_is_selected_by_modification_time(tmp_path):
