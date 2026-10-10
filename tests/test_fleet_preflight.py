@@ -8,7 +8,9 @@ import sys
 import httpx
 import pytest
 
+from skybuild import fleet_preflight
 from skybuild.fleet_preflight import PreflightError, probe_private_api
+from skybuild.workflow import Place, TaskToken
 
 
 URL = "https://jeltz.tail991ac1.ts.net"
@@ -27,8 +29,22 @@ def token_file(tmp_path):
     return path
 
 
-def transport_for(identity, *, ready=True, tasks=None, task_status=200):
+def workflow_view(*, project_id="skybuild", task_id="TASK-1", revision=7,
+                  place=Place.WORKING, description="private task description"):
+    token = TaskToken(project_id=project_id, task_id=task_id, revision=revision,
+                      input_generation=9, definition_revision=5,
+                      policy_version="petri-checks-v1", place=place).to_dict()
+    return {"task": {"project_id": project_id, "task_id": task_id,
+                     "revision": revision, "description": description},
+            "token": token, "available_actions": [], "transitions": [],
+            "disabled_actions": {}}
+
+
+def transport_for(identity, *, ready=True, tasks=None, task_status=200,
+                  selected_workflow=None, requests=None):
     def handle(request):
+        if requests is not None:
+            requests.append(request)
         assert request.headers["Authorization"] == f"Bearer {TOKEN}"
         assert request.method == "GET"
         if request.url.path == "/health/ready":
@@ -41,6 +57,11 @@ def transport_for(identity, *, ready=True, tasks=None, task_status=200):
             assert request.url.params["limit"] == "1"
             assert request.url.params["by_id"] == "true"
             return httpx.Response(task_status, json=[] if tasks is None else tasks)
+        if request.url.path == "/api/v1/projects/skybuild/tasks/TASK-1/workflow":
+            assert request.url.query == b""
+            if selected_workflow is None:
+                return httpx.Response(200, json=workflow_view())
+            return httpx.Response(200, json=selected_workflow)
         raise AssertionError("Unexpected request")
     return httpx.MockTransport(handle)
 
@@ -127,3 +148,96 @@ def test_task_list_must_be_accessible_and_bounded(token_file, tasks, status):
     with pytest.raises(PreflightError):
         checked_probe(URL, "skybuild", token_file, "wonko-worker",
                       transport=transport_for(identity(), tasks=tasks, task_status=status))
+
+
+def test_selected_workflow_is_read_only_and_checks_pinned_inputs(token_file):
+    requests = []
+    result = checked_probe(
+        URL, "skybuild", token_file, "wonko-worker", task_id="TASK-1",
+        expected_task_revision=7, expected_input_generation=9,
+        expected_definition_revision=5, expected_policy_version="petri-checks-v1",
+        transport=transport_for(identity(), selected_workflow=workflow_view(), requests=requests))
+    assert result["workflow_probe"] == {
+        "task_id": "TASK-1", "revision": 7, "input_generation": 9,
+        "definition_revision": 5, "policy_version": "petri-checks-v1",
+        "place": "working", "compatible": True, "execution_authorized": False}
+    assert [request.method for request in requests] == ["GET"] * 5
+    assert requests[-1].url.path.endswith("/tasks/TASK-1/workflow")
+    encoded = json.dumps(result)
+    assert TOKEN not in encoded
+    assert "private task description" not in encoded
+
+
+@pytest.mark.parametrize(("field", "expected"), [
+    ("expected_task_revision", 8),
+    ("expected_input_generation", 10),
+    ("expected_definition_revision", 6),
+    ("expected_policy_version", "other-policy"),
+])
+def test_selected_workflow_rejects_stale_expected_input(token_file, field, expected):
+    with pytest.raises(PreflightError, match="differs from expected inputs"):
+        checked_probe(URL, "skybuild", token_file, "wonko-worker", task_id="TASK-1",
+                      transport=transport_for(identity(), selected_workflow=workflow_view()),
+                      **{field: expected})
+
+
+@pytest.mark.parametrize("view", [
+    {},
+    {"task": {}, "token": {"project_id": "skybuild", "task_id": "TASK-1"},
+     "available_actions": [], "transitions": [], "disabled_actions": {}},
+    workflow_view(project_id="another-project"),
+    workflow_view(task_id="ANOTHER-TASK"),
+    workflow_view(revision=8) | {"task": {"project_id": "skybuild", "task_id": "TASK-1", "revision": 7}},
+    workflow_view() | {"token": workflow_view()["token"] | {"place": "future-place"}},
+])
+def test_selected_workflow_rejects_absent_malformed_or_wrong_identity(token_file, view):
+    with pytest.raises(PreflightError):
+        checked_probe(URL, "skybuild", token_file, "wonko-worker", task_id="TASK-1",
+                      transport=transport_for(identity(), selected_workflow=view))
+
+
+def test_workflow_expectations_require_selected_task_before_network(token_file):
+    with pytest.raises(PreflightError, match="require a selected task"):
+        probe_private_api(URL, "skybuild", token_file, "wonko-worker",
+                          expected_input_generation=1,
+                          resolve=lambda host: pytest.fail("DNS should not run"),
+                          transport=httpx.MockTransport(lambda request: pytest.fail("Unexpected request")))
+
+
+def test_cli_failure_does_not_print_secret_or_task_description(token_file, monkeypatch, capsys):
+    monkeypatch.setattr(fleet_preflight, "_resolved_addresses", lambda host: ["100.95.249.118"])
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def request(self, method, path):
+            return {"status": "ready"}
+
+        def whoami(self):
+            return identity()
+
+        def inbox(self, project, limit):
+            return []
+
+        def list_tasks(self, project, **kwargs):
+            return []
+
+        def task_workflow(self, project, task):
+            return workflow_view(description=TOKEN)
+
+    monkeypatch.setattr(fleet_preflight, "Client", FakeClient)
+    monkeypatch.setattr(sys, "argv", ["fleet-preflight", "--url", URL, "--project", "skybuild",
+                                      "--token-file", str(token_file), "--principal", "wonko-worker",
+                                      "--task-id", "TASK-1", "--expected-task-revision", "8"])
+    assert fleet_preflight.main() == 2
+    output = capsys.readouterr().out
+    assert output == '{"ready": false, "reason": "Private API or worker scope check failed"}\n'
+    assert TOKEN not in output
+    assert "private task description" not in output
