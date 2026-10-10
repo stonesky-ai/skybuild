@@ -192,7 +192,7 @@ def test_gate_environment_selects_candidate_not_author(monkeypatch, tmp_path):
     assert 'env' in calls[0], 'Nested gate inherited the author environment'
     env = calls[0]['env']
     assert env['UV_PROJECT_ENVIRONMENT'] == str(tmp_path / '.venv')
-    assert env['PYTHONPATH'] == str(tmp_path / 'src') + ':' + str(tmp_path / 'scripts')
+    assert env['PYTHONPATH'] == ':'.join((str(tmp_path / 'src'), str(tmp_path / 'scripts'), str(tmp_path)))
     assert env['PYTHONSAFEPATH'] == '1' and 'UV_NO_SYNC' not in env
 
 

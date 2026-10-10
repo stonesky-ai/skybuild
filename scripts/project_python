@@ -11,7 +11,7 @@ fi
 
 # Do not let another checkout's editable environment or source override ours.
 UV_PROJECT_ENVIRONMENT="$project_root/.venv"
-PYTHONPATH="$project_root/src:$project_root/scripts"
+PYTHONPATH="$project_root/src:$project_root/scripts:$project_root"
 UV_CACHE_DIR="${UV_CACHE_DIR:-$project_root/.uv-cache}"
 export UV_PROJECT_ENVIRONMENT PYTHONPATH UV_CACHE_DIR
 unset UV_NO_SYNC UV_NO_PROJECT

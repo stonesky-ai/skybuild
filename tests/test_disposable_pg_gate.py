@@ -47,7 +47,7 @@ def fake_gate(tmp_path, monkeypatch):
             return subprocess.CompletedProcess(argv, config["cleanup_code"])
         if argv == ["fake-test", "private-command-value"]:
             assert kwargs["env"]["UV_PROJECT_ENVIRONMENT"] == str(checkout / '.venv')
-            assert kwargs["env"]["PYTHONPATH"] == str(checkout / 'src') + ':' + str(checkout / 'scripts')
+            assert kwargs["env"]["PYTHONPATH"] == ':'.join((str(checkout / 'src'), str(checkout / 'scripts'), str(checkout)))
             assert kwargs["env"]["PYTHONSAFEPATH"] == '1'
             assert 'UV_NO_SYNC' not in kwargs['env'] and 'UV_NO_PROJECT' not in kwargs['env']
             assert "SKYBUILD_DSN" not in kwargs["env"]

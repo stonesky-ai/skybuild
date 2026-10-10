@@ -38,8 +38,8 @@ scripts/project_python -m pytest
 ```
 
 `scripts/project_python` runs Python through `uv` with this checkout's locked
-runtime and test dependencies, its own `.venv`, and its absolute `src` and
-`scripts` paths. Use
+runtime and test dependencies, its own `.venv`, and its absolute `src`, `scripts`,
+and checkout root paths. Use
 it for repository scripts too, including help:
 
 ```sh
@@ -57,7 +57,8 @@ Its cache defaults to ignored `.uv-cache/` inside the checkout, which also works
 when the home directory is read-only. An explicit `UV_CACHE_DIR` remains supported
 for a writable shared cache.
 Python's `-P` mode suppresses implicit caller/script-directory imports; repository
-helpers resolve through the explicit `scripts` path. External scripts that depend
+helpers resolve through the explicit `scripts` path; namespace imports such as
+`from scripts import helper` use the explicit checkout root. External scripts that depend
 on sibling imports need their own invocation instead. Python options such as
 `-E` or `-I` deliberately bypass `PYTHONPATH`; do not use them for source checks.
 Reviewed integration and disposable PostgreSQL gates rebind the environment and

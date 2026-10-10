@@ -63,7 +63,7 @@ def test_exact_checkout_arguments_and_caller_directory(runner, tmp_path, argumen
     observed = json.loads(record.read_text())
     assert observed == {
         'argv': ['run', '--locked', '--extra', 'test', '--project', str(checkout), 'python', '-P', *arguments],
-        'cwd': str(tmp_path), 'pythonpath': str(checkout / 'src') + os.pathsep + str(checkout / 'scripts'),
+        'cwd': str(tmp_path), 'pythonpath': os.pathsep.join((str(checkout / 'src'), str(checkout / 'scripts'), str(checkout))),
         'environment': str(checkout / '.venv'), 'no_sync': None, 'no_project': None,
         'cache': str(checkout / '.uv-cache'),
     }
@@ -78,11 +78,12 @@ def test_caller_source_cannot_shadow_checkout_and_script_helpers_work(runner, tm
     (checkout / 'scripts/owned_helper.py').write_text('marker = "owned helper"\n')
     (tmp_path / 'skybuild.py').write_text('raise AssertionError("wrong checkout imported")\n')
     result = subprocess.run([str(launcher), '-c',
-                             'import skybuild, owned_helper; print(skybuild.marker, owned_helper.marker)'],
+                             'import skybuild, owned_helper; from scripts import owned_helper as namespaced; '
+                             'print(skybuild.marker, owned_helper.marker, namespaced.marker)'],
                             cwd=tmp_path, env=dict(env, RUNNER_EXEC='1'),
                             text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
-    assert result.stdout == 'owned checkout owned helper\n'
+    assert result.stdout == 'owned checkout owned helper owned helper\n'
 
 
 def test_explicit_writable_cache_is_preserved(runner, tmp_path):

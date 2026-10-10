@@ -7,7 +7,7 @@ def project_environment(checkout: Path) -> dict[str, str]:
     root = Path(checkout).resolve()
     env = os.environ.copy()
     env.update(UV_PROJECT_ENVIRONMENT=str(root / '.venv'),
-               PYTHONPATH=os.pathsep.join((str(root / 'src'), str(root / 'scripts'))),
+               PYTHONPATH=os.pathsep.join((str(root / 'src'), str(root / 'scripts'), str(root))),
                PYTHONSAFEPATH='1')
     env.setdefault('UV_CACHE_DIR', str(root / '.uv-cache'))
     env.pop('UV_NO_SYNC', None)
