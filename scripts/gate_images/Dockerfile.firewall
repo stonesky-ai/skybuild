@@ -1,0 +1,10 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE} AS python_base
+
+# The local package payload is staged and hashed by build_isolated_gate_images.py.
+FROM scratch
+COPY --from=python_base / /
+COPY firewall-rootfs/ /
+ARG FIREWALL_POLICY_SHA256
+LABEL org.skybuild.full-test.firewall-policy-sha256=${FIREWALL_POLICY_SHA256}
+ENV PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin

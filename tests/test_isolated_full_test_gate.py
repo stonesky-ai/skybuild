@@ -109,6 +109,37 @@ def test_firewall_policy_render_and_inspect_match_both_namespaces(monkeypatch):
     assert len(calls) == 4
 
 
+def test_firewall_sidecar_requires_a_bounded_writable_lock_tmpfs():
+    row = {
+        "Id": "a" * 64, "Name": "/candidate-firewall", "Image": "sha256:" + "b" * 64,
+        "Config": {"Labels": {gate.RUN_ID_LABEL: "run", gate.KIND_LABEL: "candidate_firewall"},
+                   "Cmd": ["-ec", gate._firewall_script("172.18.0.2", "172.18.0.3",
+                                                         postgres_namespace=False)],
+                   "Entrypoint": ["/bin/sh"]},
+        "HostConfig": {
+            "NetworkMode": "container:" + "c" * 64, "CapAdd": ["NET_ADMIN"], "CapDrop": ["ALL"],
+            "Privileged": False, "ReadonlyRootfs": True,
+            "Tmpfs": {"/run": "rw,nosuid,nodev,size=1048576,mode=493"},
+            "Memory": 128 * 1024**2, "MemorySwap": 128 * 1024**2,
+            "NanoCpus": 250_000_000, "PidsLimit": 32, "PortBindings": {},
+            "LogConfig": {"Type": "local", "Config": {"max-size": "4m", "max-file": "1"}},
+        },
+        "Mounts": [{"Type": "tmpfs", "Destination": "/run", "RW": True}],
+    }
+    gate._check_firewall_inspect(row, name="candidate-firewall", run_id="run",
+                                 container_id="a" * 64, kind="candidate_firewall",
+                                 image_id="sha256:" + "b" * 64, namespace_id="c" * 64,
+                                 postgres_ip="172.18.0.2", candidate_ip="172.18.0.3",
+                                 postgres_namespace=False)
+    row["HostConfig"]["Tmpfs"] = {}
+    with pytest.raises(gate.GateError, match="identity, capabilities, command, or caps"):
+        gate._check_firewall_inspect(row, name="candidate-firewall", run_id="run",
+                                     container_id="a" * 64, kind="candidate_firewall",
+                                     image_id="sha256:" + "b" * 64, namespace_id="c" * 64,
+                                     postgres_ip="172.18.0.2", candidate_ip="172.18.0.3",
+                                     postgres_namespace=False)
+
+
 def test_postgres_inspection_requires_exact_tmpfs_and_no_extra_mounts():
     container_id = "a" * 64
     image_id = "sha256:" + "b" * 64

@@ -28,6 +28,30 @@ Image preparation installs approved dependency wheels and constructs root
 project metadata as data; it must never execute candidate build backends or
 hooks in a credentialed host or signing context.
 
+`scripts/build_isolated_gate_images.py` builds the local runner and firewall
+images used by this supervisor. It accepts only the pinned local Python base
+image ID `sha256:cae66f2ef0ec51a9891263eeee7f987dacf0a9879e8aa9353d5606e0530619a5`
+and PostgreSQL base image ID
+`sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54`.
+The runner uses the pinned uv 0.11.22 binary and exact project lock with
+`--offline --no-build --no-install-project`; the builder context contains only
+the project metadata, lock, uv binary, and trusted metadata writer. Dependency
+preparation runs in a disposable, resource-limited container with no network,
+mounting only that context read-only, the local uv cache, and a temporary output
+directory. It never pulls an image or builds a candidate package. The final runner image starts from the exact Python
+base filesystem in a clean `scratch` stage so inherited environment values do
+not bypass the candidate allowlist.
+
+The firewall image stages only the host's pinned nftables `iptables` multicall
+binary, conntrack matcher, and their non-glibc shared libraries. Its payload
+manifest records every staged file hash; the expected predicate pins the final
+immutable image ID. The helper installs rules only inside the disposable
+container network namespace. Its 1 MiB `/run` tmpfs provides the xtables lock
+file while the helper root filesystem remains read-only. Image construction is
+an explicit `--build` operation and must follow independent source review and
+owner approval. Missing offline wheels or mismatched local image/tool digests
+stop preparation before the full gate starts.
+
 ## Candidate boundary
 
 The supervisor verifies a clean trusted checkout and candidate checkout, the

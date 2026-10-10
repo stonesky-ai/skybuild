@@ -1,0 +1,311 @@
+#!/usr/bin/env python3
+"""Build the exact local runner/firewall images consumed by isolated_full_test_gate."""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import shutil
+import subprocess
+import tempfile
+from uuid import uuid4
+
+import isolated_full_test_gate as gate
+
+
+PYTHON_BASE_ID = "sha256:cae66f2ef0ec51a9891263eeee7f987dacf0a9879e8aa9353d5606e0530619a5"
+POSTGRES_BASE_ID = "sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54"
+UV_VERSION = "0.11.22"
+UV_SHA256_X86_64 = "2ed6f640f71df3520e60d91e8882dab50c38a232b1f13c954e89929021640422"
+FIREWALL_EXECUTABLES = (
+    "iptables-nft", "ip6tables-nft", "iptables-nft-save", "ip6tables-nft-save",
+)
+FIREWALL_ALIASES = {
+    "iptables": "iptables-nft", "ip6tables": "ip6tables-nft",
+    "iptables-save": "iptables-nft-save", "ip6tables-save": "ip6tables-nft-save",
+}
+FIREWALL_PLUGINS = ("libxt_conntrack.so",)
+class BuildError(RuntimeError):
+    """Local helper image inputs are incomplete or do not match the reviewed gate."""
+
+
+def _run(arguments: list[str], *, timeout: int = 120, check: bool = True) -> subprocess.CompletedProcess:
+    try:
+        result = subprocess.run(arguments, capture_output=True, text=True, timeout=timeout,
+                                check=False, env={**os.environ, "DOCKER_CLI_HINTS": "false"})
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise BuildError("local image preparation command failed") from error
+    if check and result.returncode:
+        raise BuildError("local image preparation command failed: " + Path(arguments[0]).name)
+    return result
+
+
+def _digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _inspect_local_image(image_id: str) -> dict:
+    result = _run(["docker", "image", "inspect", image_id], timeout=30)
+    try:
+        rows = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise BuildError("local base image inspection returned invalid data") from error
+    if len(rows) != 1 or rows[0].get("Id") != image_id:
+        raise BuildError("required exact local base image is absent")
+    return rows[0]
+
+
+def _copy_file(source: Path, root: Path) -> None:
+    source = source.resolve(strict=True)
+    if not source.is_file() or source.is_symlink():
+        raise BuildError("firewall payload contains an unexpected non-file")
+    destination = root / source.relative_to("/")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, destination)
+    shutil.copymode(source, destination)
+
+
+def _needed_libraries(binary: Path) -> set[Path]:
+    result = _run(["ldd", str(binary)], timeout=10)
+    libraries: set[Path] = set()
+    for line in result.stdout.splitlines():
+        match = re.search(r"(?:=>\s+)?(/[^\s]+)\s+\(", line)
+        if not match:
+            continue
+        path = Path(match[1]).resolve(strict=True)
+        if str(path).startswith("/usr/lib/"):
+            libraries.add(path)
+        elif str(path).startswith(("/lib/", "/lib64/")):
+            # The exact Debian Python base supplies its own compatible glibc.
+            continue
+        else:
+            raise BuildError("firewall binary needs an unapproved host library location")
+    if not libraries:
+        raise BuildError("firewall dependency inspection found no packaged libraries")
+    return libraries
+
+
+def stage_firewall_payload(root: Path) -> dict:
+    """Stage only nftables iptables, its conntrack matcher and non-glibc libraries."""
+    if platform.machine() != "x86_64":
+        raise BuildError("the pinned local firewall payload is reviewed only for x86_64")
+    root.mkdir(mode=0o700, parents=True, exist_ok=False)
+    executable_source = Path("/usr/sbin/xtables-nft-multi").resolve(strict=True)
+    if not executable_source.is_file():
+        raise BuildError("host nftables iptables executable is unavailable")
+    version = _run([str(executable_source), "iptables", "-V"], timeout=10).stdout.strip()
+    if version != "iptables v1.8.11 (nf_tables)":
+        raise BuildError("host firewall executable version differs from reviewed payload")
+    binary_targets = {executable_source}
+    plugin_dir = Path("/usr/lib/x86_64-linux-gnu/xtables")
+    plugins = [plugin_dir / name for name in FIREWALL_PLUGINS]
+    if any(not path.is_file() for path in plugins):
+        raise BuildError("required conntrack firewall plugin is unavailable")
+    libraries: set[Path] = set()
+    for binary in (*binary_targets, *plugins):
+        libraries.update(_needed_libraries(binary))
+        _copy_file(binary, root)
+    for library in libraries:
+        _copy_file(library, root)
+    for plugin in plugins:
+        _copy_file(plugin, root)
+    sbin = root / "usr/sbin"
+    sbin.mkdir(parents=True, exist_ok=True)
+    for name in FIREWALL_EXECUTABLES:
+        (sbin / name).symlink_to("xtables-nft-multi")
+    for name, target in FIREWALL_ALIASES.items():
+        (sbin / name).symlink_to(target)
+    manifest = {
+        "schema": "skybuild.isolated-gate-firewall-payload.v1",
+        "iptables_version": version,
+        "base_image_id": PYTHON_BASE_ID,
+        "executables": {str(path.relative_to(root)): _digest(path)
+                        for path in sorted(root.rglob("*")) if path.is_file() and not path.is_symlink()},
+        "aliases": FIREWALL_ALIASES,
+    }
+    (root / "firewall-payload.json").write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8"
+    )
+    return manifest
+
+
+def _image_digest(image_id: str) -> str:
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+        raise BuildError("Docker did not return an immutable image ID")
+    return image_id
+
+
+def _build_image(context: Path, dockerfile: str, tag: str, base_id: str,
+                 build_args: dict[str, str]) -> str:
+    command = ["docker", "build", "--pull=false", "--network=none", "--tag", tag,
+               "--file", str(context / dockerfile), "--build-arg", "BASE_IMAGE=" + base_id]
+    for name, value in sorted(build_args.items()):
+        command.extend(("--build-arg", name + "=" + value))
+    command.append(str(context))
+    _run(command, timeout=1800)
+    result = _run(["docker", "image", "inspect", tag], timeout=30)
+    rows = json.loads(result.stdout)
+    if len(rows) != 1:
+        raise BuildError("built helper image could not be inspected")
+    return _image_digest(rows[0].get("Id", ""))
+
+
+def _tree_manifest(root: Path) -> dict[str, str]:
+    result = {}
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            result[relative] = "symlink:" + os.readlink(path)
+        elif path.is_file():
+            result[relative] = _digest(path)
+        elif not path.is_dir():
+            raise BuildError("runner environment contains a special file")
+    return result
+
+
+def _prepare_runner_environment(context: Path, uv_cache: Path) -> dict:
+    environment = context / "runner-environment"
+    environment.mkdir(mode=0o700)
+    name = "skybuild-gate-env-build-" + uuid4().hex[:16]
+    command = [
+        "docker", "run", "--pull=never", "--rm", "--name", name,
+        "--label", "skybuild.isolated.image-builder=true",
+        "--network=none", "--memory=2g", "--memory-swap=2g", "--cpus=1",
+        "--pids-limit=64", "--read-only", "--cap-drop=ALL",
+        "--security-opt=no-new-privileges", "--user", "0:0",
+        "--tmpfs", "/tmp:rw,nosuid,nodev,size=536870912,mode=1777",
+        "--mount", f"type=bind,src={context},dst=/input,readonly",
+        "--mount", f"type=bind,src={uv_cache},dst=/cache",
+        "--mount", f"type=bind,src={environment},dst=/output",
+        PYTHON_BASE_ID, "/bin/sh", "-ec",
+        "mkdir -m 0700 /tmp/home; "
+        "export HOME=/tmp/home UV_CACHE_DIR=/cache "
+        "UV_PROJECT_ENVIRONMENT=/output/skybuild-venv PYTHONDONTWRITEBYTECODE=1; "
+        "/input/uv sync --locked --offline --no-build --extra test --no-install-project "
+        "--project /input --python /usr/local/bin/python3.14; "
+        "/usr/local/bin/python3.14 -I /input/write_runner_environment.py "
+        "--project /input --environment /output/skybuild-venv "
+        "--site-packages /output/skybuild-venv/lib/python3.14/site-packages "
+        "--uv-version " + UV_VERSION,
+    ]
+    try:
+        _run(command, timeout=1800)
+    finally:
+        inspected = _run(["docker", "container", "inspect", name], timeout=20, check=False)
+        if inspected.returncode == 0:
+            try:
+                rows = json.loads(inspected.stdout)
+            except json.JSONDecodeError as error:
+                raise BuildError("environment builder cleanup identity is unreadable") from error
+            if (len(rows) != 1 or rows[0].get("Name", "").lstrip("/") != name
+                    or (rows[0].get("Config", {}).get("Labels") or {}).get(
+                        "skybuild.isolated.image-builder") != "true"):
+                raise BuildError("environment builder cleanup refused an unowned container")
+            _run(["docker", "container", "rm", "--force", name], timeout=30)
+            remaining = _run(["docker", "container", "inspect", name], timeout=20, check=False)
+            if remaining.returncode == 0:
+                raise BuildError("environment builder container cleanup is unconfirmed")
+    if not (environment / "skybuild-venv/bin/python").is_file():
+        raise BuildError("offline runner environment preparation did not produce its Python")
+    return {"container_name": name, "container_removed": True,
+            "resource_limits": {"memory": "2g", "cpus": 1, "pids": 64,
+                                "tmpfs": "512m", "network": "none"},
+            "environment_files": _tree_manifest(environment)}
+
+
+def build(checkout: Path, output: Path, *, gate_policy_sha256: str, uv_binary: Path,
+          uv_cache: Path, runner_tag: str, firewall_tag: str) -> dict:
+    checkout = checkout.resolve(strict=True)
+    output.mkdir(mode=0o700, parents=True, exist_ok=False)
+    if not re.fullmatch(r"[0-9a-f]{64}", gate_policy_sha256):
+        raise BuildError("gate policy hash must be a full SHA-256 value from the frozen policy")
+    if _digest(uv_binary) != UV_SHA256_X86_64:
+        raise BuildError("uv executable differs from the locally reviewed 0.11.22 binary")
+    version = _run([str(uv_binary), "--version"], timeout=10).stdout.strip()
+    if version != "uv " + UV_VERSION + " (x86_64-unknown-linux-gnu)":
+        raise BuildError("uv executable does not match the reviewed version/platform")
+    if not uv_cache.is_dir():
+        raise BuildError("offline uv cache directory is unavailable")
+    _inspect_local_image(PYTHON_BASE_ID)
+    _inspect_local_image(POSTGRES_BASE_ID)
+    if not (checkout / "pyproject.toml").is_file() or not (checkout / "uv.lock").is_file():
+        raise BuildError("trusted project lock inputs are missing")
+    if (checkout / "setup.py").exists() or (checkout / "setup.cfg").exists():
+        raise BuildError("dynamic project build metadata has not been qualified")
+    with tempfile.TemporaryDirectory(prefix="skybuild-isolated-images-") as name:
+        context = Path(name)
+        shutil.copy2(checkout / "scripts/gate_images/Dockerfile.runner", context)
+        shutil.copy2(checkout / "scripts/gate_images/Dockerfile.firewall", context)
+        shutil.copy2(checkout / "scripts/gate_images/write_runner_environment.py", context)
+        shutil.copy2(checkout / "pyproject.toml", context)
+        shutil.copy2(checkout / "uv.lock", context)
+        shutil.copyfile(uv_binary, context / "uv")
+        os.chmod(context / "uv", 0o755)
+        runner_args = {
+            "GATE_POLICY_SHA256": gate_policy_sha256,
+            "UV_LOCK_SHA256": _digest(checkout / "uv.lock"),
+            "PYPROJECT_SHA256": _digest(checkout / "pyproject.toml"),
+            "COMMAND_SHA256": gate.DEFAULT_GATE_COMMAND_SHA256,
+            "ENTRYPOINT_SHA256": _digest(checkout / "scripts/gate_container_entrypoint.py"),
+            "NETWORK_PROBE_SHA256": _digest(checkout / "scripts/gate_network_probe.py"),
+            "UV_VERSION": UV_VERSION,
+        }
+        runner_environment = _prepare_runner_environment(context, uv_cache)
+        runner_id = _build_image(context, "Dockerfile.runner", runner_tag, PYTHON_BASE_ID,
+                                 runner_args)
+        rootfs = context / "firewall-rootfs"
+        manifest = stage_firewall_payload(rootfs)
+        firewall_id = _build_image(context, "Dockerfile.firewall", firewall_tag, PYTHON_BASE_ID,
+                                    {"FIREWALL_POLICY_SHA256": gate.FIREWALL_POLICY_SHA256})
+    return {
+        "schema": "skybuild.isolated-gate-local-images.v1",
+        "runner_image_id": runner_id,
+        "firewall_image_id": firewall_id,
+        "postgres_image_id": POSTGRES_BASE_ID,
+        "python_base_image_id": PYTHON_BASE_ID,
+        "firewall_payload": manifest,
+        "runner_environment": runner_environment,
+        "runner_build": runner_args,
+        "network": "none",
+        "candidate_installation": False,
+        "uv_offline": True,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--checkout", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--gate-policy-sha256", required=True)
+    parser.add_argument("--uv-binary", type=Path, default=Path.home() / ".local/bin/uv")
+    parser.add_argument("--uv-cache", type=Path, default=Path.home() / ".cache/uv")
+    parser.add_argument("--runner-tag", required=True)
+    parser.add_argument("--firewall-tag", required=True)
+    parser.add_argument("--build", action="store_true",
+                         help="perform bounded offline local Docker builds (explicit side effect)")
+    args = parser.parse_args()
+    if not args.build:
+        parser.error("pass --build only after independent source review and owner build approval")
+    result = build(args.checkout, args.output, gate_policy_sha256=args.gate_policy_sha256,
+                   uv_binary=args.uv_binary.resolve(strict=True), uv_cache=args.uv_cache.resolve(strict=True),
+                   runner_tag=args.runner_tag, firewall_tag=args.firewall_tag)
+    (args.output / "image-build-result.json").write_text(
+        json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except BuildError as error:
+        raise SystemExit("isolated gate image build stopped: " + str(error)) from None
