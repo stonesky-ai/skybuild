@@ -27,6 +27,8 @@ import time
 from datetime import datetime, timezone
 from uuid import uuid4
 
+import gate_policy
+
 
 TASK_ID = "SKYBUILD-ISOLATED-CANDIDATE-FULL-TEST-GATE"
 DEFAULT_GATE_COMMAND = ["uv", "run", "--extra", "test", "python", "-m", "pytest", "-q"]
@@ -96,6 +98,7 @@ FIREWALL_POLICY_SHA256 = hashlib.sha256(json.dumps(
 _SHA40 = re.compile(r"[0-9a-f]{40}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _IMAGE = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_ACTIVE_POLICY_AUTHORIZATION: gate_policy.Authorization | None = None
 
 
 class GateError(RuntimeError):
@@ -348,6 +351,7 @@ def _runner_provenance() -> dict:
         "entrypoint_sha256": _digest_bytes(entrypoint.read_bytes()),
         "network_probe_sha256": _digest_bytes(probe.read_bytes()),
         "attestation_signer_sha256": _digest_bytes(signer.read_bytes()),
+        "policy_module_sha256": _digest_bytes(script.with_name("gate_policy.py").read_bytes()),
     }
 
 
@@ -448,6 +452,8 @@ def _now() -> str:
 
 def _docker(*args: str, timeout: int = 30, input_text: str | None = None,
             check: bool = True) -> subprocess.CompletedProcess[str]:
+    if _ACTIVE_POLICY_AUTHORIZATION is not None:
+        _ACTIVE_POLICY_AUTHORIZATION.check()
     try:
         result = subprocess.run(["docker", *args], input=input_text, capture_output=True,
                                 text=True, check=False, timeout=timeout)
@@ -1181,16 +1187,27 @@ def _host_memory_check() -> float:
     return available
 
 
-def execute(checkout: Path, predicate_path: Path, go_path: Path, key_path: Path,
-            key_id: str, output_dir: Path, timeout: int = 3600) -> dict:
+def execute(checkout: Path, predicate_path: Path, go_path: Path | None, key_path: Path,
+            key_id: str, output_dir: Path, timeout: int = 3600, *,
+            _policy_authorization: gate_policy.Authorization | None = None) -> dict:
+    global _ACTIVE_POLICY_AUTHORIZATION
     predicate = _read_predicate(predicate_path)
     plan = prepare(checkout, predicate_path)
     if plan["policy"]["predicate_sha256"] != _digest_bytes(_canonical(predicate)):
         raise GateError("Expected predicate changed while the reviewed plan was prepared")
     plan_sha256 = plan_digest(plan)
-    go = _read_json(go_path, max_bytes=16 * 1024)
     runner_provenance = plan["runner_source"]
-    if (go.get("decision") != "GO" or go.get("task_id") != TASK_ID
+    if _policy_authorization is None:
+        if go_path is None:
+            raise GateError("Manual execution requires exact reviewed GO")
+        go = _read_json(go_path, max_bytes=16 * 1024)
+    else:
+        if (go_path is not None or not isinstance(_policy_authorization, gate_policy.Authorization)
+                or _policy_authorization.policy["runner_source"] != runner_provenance):
+            raise GateError("One-shot authorization differs from frozen runner source")
+        _policy_authorization.check(starting=True)
+        go = None
+    if go is not None and (go.get("decision") != "GO" or go.get("task_id") != TASK_ID
             or go.get("plan_sha256") != plan_sha256
             or go.get("predicate_sha256") != plan["policy"]["predicate_sha256"]
             or go.get("runner_image_id") != predicate["runner_image_id"]
@@ -1227,6 +1244,8 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path, key_path: Path,
         "candidate_commit": predicate["candidate_commit"], "candidate_tree": predicate["candidate_tree"],
         "candidate_archive_sha256": predicate["candidate_archive_sha256"],
         "plan_sha256": plan_sha256, "available_gib": round(available_gib, 2),
+        "one_shot_consumption_sha256": (_digest_bytes(_policy_authorization.record.read_bytes())
+                                         if _policy_authorization is not None else None),
     })
     archive_path = run_dir / "candidate.tar"
     archive_root = run_dir / "candidate-source"
@@ -1494,6 +1513,8 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path, key_path: Path,
                       probe_ids=[ids["postgres_probe"], ids["candidate_probe"]],
                       listener_port=host_listener.port)
         while time.monotonic() < deadline:
+            if _policy_authorization is not None:
+                _policy_authorization.check()
             current = _container_info(resource_names["candidate"], run_id, ids["candidate"],
                                       "candidate", predicate["runner_image_id"])
             if current is None:
@@ -1534,6 +1555,9 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path, key_path: Path,
         journal.event("candidate_gate_finished", container_id=ids["candidate"],
                       exit_code=exit_code, log_sha256=log_sha256)
     except Exception as error:
+        # Admission failure must not prevent trusted stop/log/cleanup commands.
+        if _policy_authorization is not None:
+            _ACTIVE_POLICY_AUTHORIZATION = None
         exit_code = 1
         failure = type(error).__name__
         journal.event("gate_execution_failed", error=failure)
@@ -1548,6 +1572,8 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path, key_path: Path,
             except Exception as cleanup_error:
                 cleanup_results["candidate_logs"] = {"confirmed": False, "error": type(cleanup_error).__name__}
     finally:
+        if _policy_authorization is not None:
+            _ACTIVE_POLICY_AUTHORIZATION = None
         cleanup_order = (
             ("candidate", "candidate"), ("candidate_probe", "candidate_probe"),
             ("candidate_firewall", "candidate_firewall"),
@@ -1583,6 +1609,13 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path, key_path: Path,
                 journal.event("cleanup_unconfirmed", resource="network", error=type(error).__name__)
         if not cleanup_ok:
             exit_code = 1
+    if _policy_authorization is not None:
+        try:
+            _policy_authorization.check()
+        except Exception as error:
+            exit_code = 1
+            failure = type(error).__name__
+            journal.event("policy_watch_failed_before_signing", error=failure)
     journal.event("run_finished", exit_code=exit_code, cleanup_confirmed=cleanup_ok,
                   failure=failure)
     journal.close()
@@ -1665,6 +1698,31 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path, key_path: Path,
             "log_sha256": log_sha256, "failure": failure}
 
 
+def execute_policy(checkout: Path, predicate_path: Path, policy_path: Path,
+                   policy_sha256: str, trust_path: Path, trust_sha256: str, input_path: Path,
+                   key_path: Path, key_id: str, output_dir: Path, timeout: int = 3600) -> dict:
+    global _ACTIVE_POLICY_AUTHORIZATION
+    if _ACTIVE_POLICY_AUTHORIZATION is not None:
+        raise GateError("Only one policy gate may execute in a supervisor process")
+    authorization = gate_policy.authorize(
+        checkout, _read_predicate(predicate_path), key_id, policy_path, policy_sha256,
+        trust_path, trust_sha256, input_path, _runner_provenance(), RESOURCE_LIMITS)
+    try:
+        authorization.start()
+        _ACTIVE_POLICY_AUTHORIZATION = authorization
+        result = execute(checkout, predicate_path, None, key_path, key_id, output_dir, timeout,
+                         _policy_authorization=authorization)
+        result["policy_consumption"] = {
+            "path": str(authorization.record),
+            "sha256": _digest_bytes(gate_policy.private(authorization.record)),
+            "input_sha256": authorization.input_sha256,
+        }
+        return result
+    finally:
+        _ACTIVE_POLICY_AUTHORIZATION = None
+        authorization.stop()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkout", type=Path, required=True)
@@ -1677,22 +1735,43 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--timeout", type=int, default=3600)
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--execute-policy", action="store_true")
+    parser.add_argument("--policy-permit", type=Path)
+    parser.add_argument("--policy-permit-sha256")
+    parser.add_argument("--policy-trust", type=Path)
+    parser.add_argument("--policy-trust-sha256")
+    parser.add_argument("--policy-input", type=Path)
     args = parser.parse_args(argv)
     try:
-        if not args.execute:
+        policy_options = (args.policy_permit, args.policy_permit_sha256, args.policy_trust,
+                          args.policy_trust_sha256, args.policy_input)
+        if args.execute_policy:
+            if (args.execute or args.reviewed_go_record or not all(policy_options)
+                    or not args.attestation_key or not args.attestation_key_id
+                    or args.runner_image_id or args.postgres_image_id):
+                raise GateError("Policy execution requires only signed one-shot authority and attestation key pins")
+            result = execute_policy(args.checkout, args.expected_predicate,
+                                    args.policy_permit, args.policy_permit_sha256,
+                                    args.policy_trust, args.policy_trust_sha256, args.policy_input,
+                                    args.attestation_key, args.attestation_key_id, args.output_dir, args.timeout)
+        elif any(policy_options):
+            raise GateError("Policy inputs require explicit --execute-policy")
+        elif not args.execute:
             plan = prepare(args.checkout, args.expected_predicate,
                            args.runner_image_id, args.postgres_image_id)
             print(json.dumps({"prepared": True, "plan": plan,
                               "plan_sha256": plan_digest(plan)}, sort_keys=True, indent=2))
             return 0
-        if (not args.reviewed_go_record or not args.attestation_key or not args.attestation_key_id):
-            raise GateError("Execution requires reviewed GO, private attestation key, and pinned key ID")
-        result = execute(args.checkout, args.expected_predicate, args.reviewed_go_record,
-                         args.attestation_key, args.attestation_key_id, args.output_dir, args.timeout)
+        else:
+            if (not args.reviewed_go_record or not args.attestation_key or not args.attestation_key_id):
+                raise GateError("Execution requires reviewed GO, private attestation key, and pinned key ID")
+            result = execute(args.checkout, args.expected_predicate, args.reviewed_go_record,
+                             args.attestation_key, args.attestation_key_id, args.output_dir, args.timeout)
         print(json.dumps({"executed": True, **result}, sort_keys=True))
         return 0 if (result["exit_code"] == 0 and result["cleanup_confirmed"]
                      and result["attestation"] and result["failure"] is None) else 1
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, GateError) as error:
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError,
+            GateError, gate_policy.PolicyError) as error:
         print(json.dumps({"executed": False, "error": type(error).__name__, "detail": str(error)},
                          sort_keys=True), file=os.sys.stderr)
         return 2

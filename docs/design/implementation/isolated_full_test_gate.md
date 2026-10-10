@@ -155,3 +155,63 @@ These checks do not prove Docker behavior. Do not claim a full-suite pass
 until an independent source review approves the exact runner commit and root
 issues GO for the reviewed plan and resource host. The actual isolated runtime
 rehearsal is still required for qualification.
+
+## One-use owner policy
+
+`--execute-policy` is separate from manual `--execute --reviewed-go-record`.
+It requires private `--policy-permit`, `--policy-trust`, and `--policy-input`
+files, plus exact raw-byte SHA-256 pins for the permit and trust configuration.
+All authorization files and keys must be owned regular files with mode 0600,
+outside the candidate checkout. The state directory must be owned mode 0700.
+The existing attestation key, output directory, candidate checkout, and expected
+predicate arguments remain required. Policy mode cannot accept a manual GO.
+
+The owner approval, trusted integration collector, and independent reviewers
+use separate configured principals and keys. Their envelopes contain exactly
+`schema`, `key_id`, `principal`, `payload`, and `signature`. The signature is
+lowercase HMAC-SHA256 over the schema UTF-8 bytes, one NUL byte, and canonical
+payload JSON. Canonical JSON sorts keys, uses compact separators, emits UTF-8,
+and rejects nonfinite values. Duplicate and unknown fields are rejected.
+Key paths come only from the hash-pinned owner trust configuration.
+
+The owner permit approves exactly two assignments, workers, branches, brief
+digests, immutable patch files, disjoint exact owned paths, definition revisions,
+policy versions, and one frozen base. It also pins trusted source provenance,
+the policy module hash, immutable images, the command/profile, host, resource
+limits, signer identity, weekly usage observation, expiry, and maximum one run.
+Its delivery section binds conductor, integration, and publisher source heads,
+publisher and gate trust digests, the exact PR source branch, and private state
+root. The signed integration input supplies the later frozen heads, workflow
+tuples, actual independent review artifact digests, candidate identity, prepared
+manifest digest, and real PR tuple. This input cannot choose keys or broaden the
+owner policy. `scripts/gate_policy.py` defines the exact versioned field sets.
+
+Each stage has a distinct immutable intent under the same permit ID. The
+conductor creates and fsyncs its intent before its first write. The gate verifies
+the conductor intent and creates its own intent with O_EXCL, fsyncs the file and
+directory, and then prepares candidate source. Re-signing the same permit ID
+cannot grant another gate run. Incomplete preparation, failed execution, unknown
+cleanup, and interrupted runs retain consumption. Reconciliation cannot delete
+an intent or replay an effect. Later publisher and acceptance stages must apply
+their own reviewed one-use records linked to prior immutable stage digests.
+
+The gate independently checks signed reviewer principals and exact workflow
+tuples, hashes actual review artifacts and approved patch bytes, and reconstructs
+each worker tree using a private Git index and object directory. Each worker is
+one commit on the approved base. The candidate must contain the exact ordered
+two-merge chain, with both merge trees equal to trusted application of those two
+patches. This proof does not run hooks, a build backend, or candidate Python.
+
+Actual start requires a host-watch sample no older than 120 seconds, capacity
+for one job, 14 GiB available memory for the 6 GiB container caps plus 8 GiB
+reserve, at least 4 GiB disk reserve, and fresh pinned owner usage below 50%.
+A CPU-only thread checks expiry, usage, host-watch freshness, actual memory,
+and disk every two seconds. Docker commands and the candidate wait loop check
+its status. A failure blocks new gate effects while preserving trusted cleanup,
+forces failure, and prevents signing. The normal full-gate receipt schema stays
+unchanged; the supervisor result also reports its consumption file and digest.
+
+The environment compatibility and one-use policy revisions are source WIP.
+Their new regression tests have not yet run under admitted resources. The
+previous c9c source review and 37 focused checks apply only to that exact source.
+No isolated Docker qualification or automatic delivery is claimed here.
