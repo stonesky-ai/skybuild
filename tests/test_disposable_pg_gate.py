@@ -50,6 +50,7 @@ def fake_gate(tmp_path, monkeypatch):
             assert kwargs["env"]["PYTHONPATH"] == str(checkout / 'src') + ':' + str(checkout / 'scripts')
             assert kwargs["env"]["PYTHONSAFEPATH"] == '1'
             assert 'UV_NO_SYNC' not in kwargs['env'] and 'UV_NO_PROJECT' not in kwargs['env']
+            assert 'UV_WORKING_DIR' not in kwargs['env']
             assert "SKYBUILD_DSN" not in kwargs["env"]
             assert "SKYBUILD_ROLE_ADMIN_DSN" not in kwargs["env"]
             if config["test_error"]:
@@ -65,6 +66,7 @@ def fake_gate(tmp_path, monkeypatch):
     monkeypatch.setenv('PYTHONPATH', '/wrong/checkout/src')
     monkeypatch.setenv('UV_NO_SYNC', '1')
     monkeypatch.setenv('UV_NO_PROJECT', '1')
+    monkeypatch.setenv('UV_WORKING_DIR', '/wrong/checkout')
 
     def run(**changes):
         options = dict(artifact_path=path, run_id="bounded-run", expected_head=HEAD, expected_tree=TREE)

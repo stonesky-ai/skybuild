@@ -14,5 +14,5 @@ UV_PROJECT_ENVIRONMENT="$project_root/.venv"
 PYTHONPATH="$project_root/src:$project_root/scripts"
 UV_CACHE_DIR="${UV_CACHE_DIR:-$project_root/.uv-cache}"
 export UV_PROJECT_ENVIRONMENT PYTHONPATH UV_CACHE_DIR
-unset UV_NO_SYNC UV_NO_PROJECT
+unset UV_NO_SYNC UV_NO_PROJECT UV_WORKING_DIR
 exec uv run --locked --extra test --project "$project_root" python -P "$@"

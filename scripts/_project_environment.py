@@ -12,4 +12,5 @@ def project_environment(checkout: Path) -> dict[str, str]:
     env.setdefault('UV_CACHE_DIR', str(root / '.uv-cache'))
     env.pop('UV_NO_SYNC', None)
     env.pop('UV_NO_PROJECT', None)
+    env.pop('UV_WORKING_DIR', None)
     return env

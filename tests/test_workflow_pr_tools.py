@@ -183,6 +183,7 @@ def test_gate_environment_selects_candidate_not_author(monkeypatch, tmp_path):
     monkeypatch.setenv('UV_PROJECT_ENVIRONMENT', '/author/.venv')
     monkeypatch.setenv('PYTHONPATH', '/author/src')
     monkeypatch.setenv('UV_NO_SYNC', '1')
+    monkeypatch.setenv('UV_WORKING_DIR', '/author')
     calls = []
     def run(argv, **kwargs):
         calls.append(kwargs)
@@ -194,6 +195,7 @@ def test_gate_environment_selects_candidate_not_author(monkeypatch, tmp_path):
     assert env['UV_PROJECT_ENVIRONMENT'] == str(tmp_path / '.venv')
     assert env['PYTHONPATH'] == str(tmp_path / 'src') + ':' + str(tmp_path / 'scripts')
     assert env['PYTHONSAFEPATH'] == '1' and 'UV_NO_SYNC' not in env
+    assert 'UV_WORKING_DIR' not in env
 
 
 def test_failed_gate_retains_log_without_test_output(monkeypatch, tmp_path):
