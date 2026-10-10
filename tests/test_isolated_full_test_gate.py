@@ -236,6 +236,7 @@ def test_candidate_inspection_accepts_only_exact_mount_and_environment_policy(tm
         image_id="sha256:" + "b" * 64, archive_root=archive, fixture_path=fixture,
         probe_path=probe, env=env, network="internal-net", archive_sha256="d" * 64,
         fixture_sha256="e" * 64, probe_sha256="f" * 64,
+        postgres_ip="172.18.0.3",
     )
 
     assert result["environment_allowlist"] == sorted(gate.ENV_ALLOWLIST)
@@ -267,6 +268,7 @@ def test_candidate_inspection_fails_closed_on_isolation_changes(tmp_path, mutati
             image_id="sha256:" + "b" * 64, archive_root=archive, fixture_path=fixture,
             probe_path=probe, env=env, network="internal-net", archive_sha256="d" * 64,
             fixture_sha256="e" * 64, probe_sha256="f" * 64,
+            postgres_ip="172.18.0.3",
         )
 
 

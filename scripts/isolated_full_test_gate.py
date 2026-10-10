@@ -62,6 +62,12 @@ RESOURCE_LIMITS = {
     "host_minimum_available_gib": 8,
     "host_required_available_gib": 14,
 }
+ATTESTED_CANDIDATE_LIMITS = {
+    "cpu_millis": 2000,
+    "memory_bytes": 4 * 1024**3,
+    "pids": 256,
+    "timeout_seconds": 3600,
+}
 FIREWALL_POLICY = {
     "schema": "skybuild.candidate-network-firewall.v1",
     "ipv4": {"input": "drop", "forward": "drop", "output": "drop",
@@ -316,8 +322,8 @@ def prepare(checkout: Path, predicate_path: Path, runner_image_id: str | None = 
                    "mounts": [
                        {"target": "/candidate", "mode": "ro", "kind": "bind",
                         "source_class": "candidate_archive", "source": "sha256:" + archive_sha256},
-                       {"target": "/scratch", "mode": "rw", "kind": "tmpfs",
-                        "source_class": "dedicated_scratch", "source": "tmpfs"},
+                   {"target": "/scratch", "mode": "rw", "kind": "tmpfs",
+                        "source_class": "scratch", "source": "tmpfs"},
                        {"target": "/runner/entrypoint.py", "mode": "ro", "kind": "bind",
                         "source_class": "trusted_runner_fixture",
                         "source": "sha256:" + predicate["trusted_entrypoint_sha256"]},
@@ -363,7 +369,7 @@ class Journal:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _docker(*args: str, timeout: int = 30, input_text: str | None = None,
@@ -601,7 +607,7 @@ class _OwnedHostListener:
             listener.bind((address, 0))
             listener.listen(4)
             self.port = listener.getsockname()[1]
-            if not 1 <= self.port <= 65535:
+            if not 1024 <= self.port <= 65535 or self.port == 5432:
                 raise GateError("Owned host listener did not receive a valid ephemeral port")
             self.socket = listener
         except OSError as error:
@@ -777,7 +783,7 @@ def _candidate_mounts(archive_root: Path, fixture_path: Path, probe_path: Path,
     return [
         {"target": "/candidate", "mode": "ro", "kind": "bind", "source_class": "candidate_archive",
          "source": str(archive_root)},
-        {"target": "/scratch", "mode": "rw", "kind": "tmpfs", "source_class": "dedicated_scratch",
+        {"target": "/scratch", "mode": "rw", "kind": "tmpfs", "source_class": "scratch",
          "source": "tmpfs"},
         {"target": "/runner/entrypoint.py", "mode": "ro", "kind": "bind",
          "source_class": "trusted_runner_fixture", "source": str(fixture_path)},
@@ -790,6 +796,7 @@ def _check_candidate_inspect(row: dict, *, name: str, run_id: str, container_id:
                              image_id: str, archive_root: Path, fixture_path: Path,
                              probe_path: Path,
                              env: dict[str, str], network: str,
+                             postgres_ip: str,
                              archive_sha256: str, fixture_sha256: str,
                              probe_sha256: str) -> dict:
     _verify_container(row, name=name, run_id=run_id, expected_id=container_id,
@@ -818,7 +825,7 @@ def _check_candidate_inspect(row: dict, *, name: str, run_id: str, container_id:
                                   "source": mount.get("Source")})
         elif destination == "/scratch":
             actual_mounts.append({"target": destination, "mode": "rw" if mount.get("RW") is True else "ro",
-                                  "kind": mount.get("Type"), "source_class": "dedicated_scratch",
+                                  "kind": mount.get("Type"), "source_class": "scratch",
                                   "source": "tmpfs"})
         elif destination == "/runner/entrypoint.py":
             actual_mounts.append({"target": destination, "mode": "ro" if mount.get("RW") is False else "rw",
@@ -851,8 +858,7 @@ def _check_candidate_inspect(row: dict, *, name: str, run_id: str, container_id:
             or set(host["Tmpfs"]) != {"/scratch"}
             or not {"size=2147483648", "uid=10001", "gid=10001", "mode=448"}
             <= set(host["Tmpfs"]["/scratch"].split(","))
-            or host.get("ExtraHosts") != ["db:" + row.get("NetworkSettings", {}).get("Networks", {})
-                                            .get(network, {}).get("IPAddress", "")] ):
+            or host.get("ExtraHosts") != ["db:" + postgres_ip]):
         raise GateError("Candidate container lacks reviewed isolation/resource settings")
     networks = (row.get("NetworkSettings", {}).get("Networks") or {})
     if set(networks) != {network}:
@@ -942,10 +948,11 @@ def _check_postgres_inspect(row: dict, *, name: str, run_id: str, container_id: 
 
 
 def _check_firewall_inspect(row: dict, *, name: str, run_id: str, container_id: str,
+                            kind: str,
                             image_id: str, namespace_id: str, postgres_ip: str,
                             candidate_ip: str, postgres_namespace: bool) -> None:
     _verify_container(row, name=name, run_id=run_id, expected_id=container_id,
-                      kind="firewall", image_id=image_id)
+                      kind=kind, image_id=image_id)
     host = row.get("HostConfig", {})
     log_config = host.get("LogConfig", {})
     if (host.get("NetworkMode") != "container:" + namespace_id
@@ -964,11 +971,12 @@ def _check_firewall_inspect(row: dict, *, name: str, run_id: str, container_id: 
 
 
 def _check_probe_inspect(row: dict, *, name: str, run_id: str, container_id: str,
+                         kind: str,
                          image_id: str, candidate_id: str, probe_path: Path,
                          postgres_ip: str, gateway: str, listener_port: int,
                          mode: str, environment: dict[str, str]) -> None:
     _verify_container(row, name=name, run_id=run_id, expected_id=container_id,
-                      kind="probe", image_id=image_id)
+                      kind=kind, image_id=image_id)
     config = row.get("Config", {})
     host = row.get("HostConfig", {})
     log_config = host.get("LogConfig", {})
@@ -1007,7 +1015,7 @@ def _write_redacted_log(container_id: str, log_path: Path, password: str | None)
         with os.fdopen(descriptor, "wb") as raw:
             def cap_log_file() -> None:
                 resource.setrlimit(resource.RLIMIT_FSIZE, (128 * 1024 * 1024, 128 * 1024 * 1024))
-            process = subprocess.Popen(["docker", "logs", "--timestamps", container_id],
+            process = subprocess.Popen(["docker", "logs", container_id],
                                        stdout=raw, stderr=subprocess.STDOUT,
                                        preexec_fn=cap_log_file)
             try:
@@ -1275,6 +1283,7 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path, key_path: Path,
                                                   archive_root=archive_root, fixture_path=fixture_path,
                                                   probe_path=probe_path, env=candidate_env,
                                                   network=resource_names["network"],
+                                                  postgres_ip=pg_ip,
                                                   archive_sha256=archive_sha256,
                                                   fixture_sha256=entrypoint_sha256,
                                                   probe_sha256=probe_sha256)
@@ -1303,7 +1312,7 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path, key_path: Path,
             if sidecar is None or not sidecar.get("State", {}).get("Running"):
                 raise GateError("Firewall sidecar did not remain active")
             _check_firewall_inspect(sidecar, name=resource_names[key], run_id=run_id,
-                                    container_id=ids[key], image_id=image_id,
+                                    container_id=ids[key], kind=key, image_id=image_id,
                                     namespace_id=namespace_id,
                                     postgres_ip=pg_ip, candidate_ip=candidate_ip,
                                     postgres_namespace=pg_namespace)
@@ -1337,7 +1346,8 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path, key_path: Path,
             if probe_row is None:
                 raise GateError("Trusted network probe container disappeared")
             _check_probe_inspect(probe_row, name=resource_names[key], run_id=run_id,
-                                 container_id=ids[key], image_id=predicate["runner_image_id"],
+                                 container_id=ids[key], kind=key,
+                                 image_id=predicate["runner_image_id"],
                                  candidate_id=namespace_id, probe_path=probe_path,
                                  postgres_ip=pg_ip, gateway=gateway,
                                  listener_port=host_listener.port, mode=mode,
@@ -1365,7 +1375,15 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path, key_path: Path,
             probe_result.pop("namespace", None)
             probe_result["log_sha256"] = probe_log_sha256
             if mode == "candidate":
-                network_probe_evidence = probe_result
+                network_probe_evidence = {
+                    "postgres_tcp_allowed": probe_result["postgres_tcp_allowed"],
+                    "dns_blocked": probe_result["dns_blocked"],
+                    "external_ipv4_blocked": probe_result["external_ipv4_blocked"],
+                    "external_ipv6_blocked": probe_result["external_ipv6_blocked"],
+                    "host_gateway_listener_blocked": probe_result["host_gateway_listener_blocked"],
+                    "host_listener_port": probe_result["host_listener_port"],
+                    "log_sha256": probe_result["log_sha256"],
+                }
             else:
                 postgres_probe_evidence = {
                     "dns_blocked": probe_result["dns_blocked"],
@@ -1477,6 +1495,15 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path, key_path: Path,
                   failure=failure)
     journal.close()
     finished_at = _now()
+    required_ids = (ids["candidate"], ids["postgres"], ids["network"],
+                    ids["candidate_firewall"], ids["candidate_probe"],
+                    ids["postgres_firewall"], ids["postgres_probe"])
+    if (exit_code != 0 or not cleanup_ok or any(not isinstance(value, str) for value in required_ids)
+            or not log_sha256 or not mount_evidence or not preflight_evidence
+            or not network_probe_evidence or not postgres_probe_evidence):
+        return {"run_directory": str(run_dir), "attestation": None,
+                "exit_code": exit_code, "cleanup_confirmed": cleanup_ok,
+                "log_sha256": log_sha256, "failure": failure}
     result = {
         "gate_argv": DEFAULT_GATE_COMMAND,
         "gate_command_sha256": DEFAULT_GATE_COMMAND_SHA256,
@@ -1492,6 +1519,7 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path, key_path: Path,
         "firewall_policy_sha256": FIREWALL_POLICY_SHA256,
         "network_probe_sha256": predicate["network_probe_sha256"],
         "trusted_entrypoint_sha256": predicate["trusted_entrypoint_sha256"],
+        "attestation_signer_sha256": predicate["attestation_signer_sha256"],
         "candidate_blocked_until_probe": True,
         "firewall_defaults_drop": firewall_evidence.get("firewall_defaults_drop") is True,
         "firewall_ipv4_default_drop": firewall_evidence.get("firewall_ipv4_default_drop") is True,
@@ -1509,21 +1537,32 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path, key_path: Path,
         "environment_allowlist": ENV_ALLOWLIST,
         "readonly_fixture_allowlist": FIXTURE_ALLOWLIST,
         "mounts": mount_evidence["mounts"] if mount_evidence else [],
-        "resource_limits": RESOURCE_LIMITS,
-        "resources": {"runner_container_id": ids["candidate"], "postgres_container_id": ids["postgres"],
-                      "candidate_firewall_container_id": ids["candidate_firewall"],
+        "resource_limits": ATTESTED_CANDIDATE_LIMITS,
+        "resources": {"runner_container_id": ids["candidate"], "pg_container_id": ids["postgres"],
+                      "firewall_container_id": ids["candidate_firewall"],
+                      "probe_container_id": ids["candidate_probe"],
                       "postgres_firewall_container_id": ids["postgres_firewall"],
-                      "candidate_probe_container_id": ids["candidate_probe"],
                       "postgres_probe_container_id": ids["postgres_probe"],
-                      "network_id": ids["network"], "runner_image_id": predicate["runner_image_id"],
+                      "network_id": ids["network"],
                       "test_image_id": predicate["runner_image_id"],
                       "postgres_image_id": predicate["postgres_image_id"],
                       "firewall_image_id": predicate["firewall_image_id"]},
-        "result": {"exit_code": exit_code, "log_sha256": log_sha256 or "0" * 64,
-                   "started_at_utc": started_at, "finished_at_utc": finished_at,
-                   "preflight": preflight_evidence,
-                   "preflight_passed": mount_evidence is not None and preflight_evidence is not None},
-        "cleanup": {"confirmed": cleanup_ok, "resources": cleanup_results},
+        "result": {"exit_code": exit_code, "log_sha256": log_sha256,
+                   "started_at": started_at, "finished_at": finished_at,
+                   "preflight": preflight_evidence},
+        "cleanup": {
+            "status": "confirmed",
+            "owned_resources": [
+                {"kind": kind, "id": resource_id, "state": "absent"}
+                for kind, resource_id in (
+                    ("runner_container", ids["candidate"]), ("pg_container", ids["postgres"]),
+                    ("network", ids["network"]), ("firewall_container", ids["candidate_firewall"]),
+                    ("probe_container", ids["candidate_probe"]),
+                    ("postgres_firewall_container", ids["postgres_firewall"]),
+                    ("postgres_probe_container", ids["postgres_probe"]),
+                )
+            ],
+        },
     }
     receipt = _sign_receipt(result, key_path, key_id)
     attestation_path = run_dir / "attestation.json"
