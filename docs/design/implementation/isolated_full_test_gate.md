@@ -263,8 +263,13 @@ firewalls, trusted probes, mounts, resource caps, logs, exit observation, and
 cleanup verifiers as the full gate. It signs a separate
 `skybuild.focused-validation.v1` envelope with the owner-configured validation
 principal/key. The receipt binds all source/task/command/stage/permit and intent
-digests, actual isolation evidence, exit, cleanup, and bounded pytest summary
-counts. PASS requires exit zero, at least one passing test, and zero failed,
+digests, actual isolation evidence, externally observed exit, cleanup, retained
+raw-log SHA-256, and bounded stdout-derived pytest `reported_counts`. These
+reported counts have meaning only for the exact owner-approved known patch/tree
+and fixed test profiles. Candidate stdout cannot independently prove counts
+against arbitrary hostile Python code; such code could forge a final summary.
+This focused mode does not make that broader integrity claim.
+PASS requires exit zero, a report of at least one passing test, and zero reported failed,
 errored, skipped, xfailed, or xpassed tests. Nonempty deselection is reported.
 An observed pytest failure can have a signed failure receipt; supervisor or
 cleanup uncertainty cannot produce a passing result. CLI success requires a
@@ -273,7 +278,8 @@ passing focused verdict as well as the ordinary execution conditions.
 The trusted integration producer verifies each receipt before posting the exact
 unit or long task stage. The later signed frozen input includes both actual
 receipt paths and raw-byte hashes for each task. The combined gate independently
-verifies those signatures, task/workflow tuples, nonempty passing counts, and
+verifies those signatures, approved patch/tree/test bindings, task/workflow tuples,
+nonempty passing reported counts, and
 immutable prior stage intents before its one full default suite. Focused results
 are not full-gate attestations and cannot satisfy the publisher's combined-gate
 contract.
