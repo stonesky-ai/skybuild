@@ -93,9 +93,17 @@ invocation and models a foreign invocation as a separate conflict that keeps
 exposure held. An early exploratory trace had shown that allowing a generic
 unknown-process event after observed exit would regress terminal knowledge; the
 source/model now reject that stale same-invocation transition rather than
-weakening the stop invariant. TLC/SANY, mutation check and source tests remain
-pending the root resource gate. The root owns independent review, publication,
-API coordination, and any canary/model plan.
+weakening the stop invariant. The earlier model draft passed SANY and its
+deliberately broken configuration produced the expected `CallsRespectWindow`
+counterexample at 9 states. Its safe configuration exhausted the 180-second
+TLC limit at journal bound 8 and is inconclusive. Commit
+`69a1d58397e715207f87c8390c6c8886c8e0f70c` reduces the model state using event
+counts and safety-monitor summaries without dropping the safety invariants;
+SANY, bounded safe TLC, and the mutation check for that exact head remain
+pending a new root-owned resource-gated run. The 10 focused source tests passed
+on the preceding source commit; the combined bundle and exact-head review
+remain pending. The root owns independent review, publication, API
+coordination, and any canary/model plan.
 
 ## Remaining execution-controls inventory
 
