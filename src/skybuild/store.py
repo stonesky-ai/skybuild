@@ -17,6 +17,7 @@ from .claims import Claims
 from .admission import CPUAdmission
 from .observations import Observations
 from .execution_status import ExecutionStatus
+from .board import BoardQueries
 
 
 OPERATIONS = frozenset({'tasks:read', 'tasks:write', 'tasks:claim', 'cord:send', 'cord:read', 'cord:handle'})
@@ -95,7 +96,7 @@ def _public(value):
     return value
 
 
-class Store(Claims, CPUAdmission, Observations, ExecutionStatus):
+class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
     def __init__(self, dsn: str, expected_database: str, expected_system_identifier: str | None = None):
         self.dsn = dsn
         self.expected_database = _text(expected_database, 'expected_database', 63)

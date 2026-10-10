@@ -101,7 +101,11 @@ const requests = [];
 let endPage = false;
 global.fetch = async (url, options) => {
   requests.push({url, options});
-  const data = url.includes("/reconcile-due?") ? (url.includes("after_task_id=") ?
+  const data = url.includes("/workflow-board?") ? {
+    project_id: " project ", columns: ["ready", "working", "validating", "integrating", "done", "deferred", "hold"].map(place => ({place, count: place === "ready" ? 205 : 0, oldest_age_seconds: 60, unknown_age_count: 0})),
+    tasks: [{...task, place: "ready", validation: [{stage: "unit_tests", state: "passed"}], blocked_dependencies: [" dep "]}],
+    total: 205, unenrolled_count: 2, ready_dependencies_complete: 200, ready_dependencies_blocked: 5, next_offset: null
+  } : url.includes("/reconcile-due?") ? (url.includes("after_task_id=") ?
       {scanned: 1, reassessed: ["due"], next_after_task_id: null} :
       {scanned: 100, reassessed: [], next_after_task_id: "cursor-100"}) :
     url.endsWith("/split") ? {children: [{task_id: "child"}]} :
@@ -120,6 +124,10 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 async function run() {
   get("project").value = " project "; get("token").value = "test-token";
   get("connection-form").listeners.submit({preventDefault() {}}); await tick();
+  assert.equal(get("workflow-board").children.length, 7);
+  assert.match(get("board-summary").textContent, /205 workflow tasks/);
+  assert.match(get("workflow-board").querySelectorAll()[0].textContent, /unit_tests: passed/);
+  assert.match(get("workflow-board").querySelectorAll()[0].textContent, /Waiting for:  dep /);
   get("reconcile-due").listeners.click(); await tick();
   assert.ok(requests.some(request => request.url.includes("/reconcile-due?limit=100&after_task_id=cursor-100")));
   assert.match(get("task-list").querySelectorAll()[0].textContent, /proposed · triage/);
@@ -201,6 +209,8 @@ async function run() {
   get("logout").listeners.click();
   assert.equal(get("full-task-record").textContent, "No task selected.");
   assert.equal(get("lineage").children.length, 0);
+  assert.equal(get("workflow-board").children.length, 0);
+  assert.equal(get("board-summary").textContent, "Not connected");
 }
 run().catch(error => { console.error(error); process.exitCode = 1; });
 '''
