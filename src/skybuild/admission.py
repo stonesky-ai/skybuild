@@ -193,7 +193,8 @@ class CPUAdmission:
                         raise DomainError('claim_conflict', 'Ownership lease expired before CPU reservation', 409)
             except DomainError as error:
                 if error.code not in {'control_conflict', 'stale_revision', 'claim_conflict', 'workflow_conflict',
-                                      'effect_conflict', 'capacity_conflict', 'idempotency_conflict', 'not_found'}:
+                                      'effect_conflict', 'usage_conflict', 'capacity_conflict',
+                                      'idempotency_conflict', 'not_found'}:
                     raise
                 result['reasons'] = [{'code': error.code, 'message': error.message, 'status_code': error.status_code}]
             else:

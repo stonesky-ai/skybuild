@@ -26,6 +26,7 @@ def _identifier(value: str) -> str:
 
 MAX_BODY_BYTES = 262_144
 MAX_JSON_DEPTH = 64
+USAGE_QUANTITY = r"^(?:0|[1-9][0-9]{0,17})(?:\.[0-9]{0,11}[1-9])?$"
 Identifier = Annotated[str, StringConstraints(min_length=1, max_length=200), AfterValidator(_identifier)]
 ShortText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
 LongText = Annotated[str, StringConstraints(min_length=1, max_length=32_768)]
@@ -312,6 +313,35 @@ class TaskMerge(Input):
     expected_revisions: dict[str, StrictInt]
 
 
+class TaskUsageRecord(Input):
+    event_kind: Literal["consumed", "uncertain"]
+    attempt_id: Identifier
+    task_revision: Annotated[StrictInt, Field(ge=1, lt=2**63)]
+    definition_revision: Annotated[StrictInt, Field(ge=1, lt=2**63)]
+    input_generation: Annotated[StrictInt, Field(ge=0, lt=2**63)]
+    claim_fence: Annotated[StrictInt, Field(ge=1, lt=2**63)]
+    provider: Identifier
+    model: Identifier
+    pool_id: Identifier
+    policy_window_id: Identifier
+    operation_id: Identifier
+    unit: Annotated[str, StringConstraints(min_length=1, max_length=64)]
+    quantity: Annotated[str, StringConstraints(min_length=1, max_length=32,
+                                               pattern=USAGE_QUANTITY)]
+    evidence_ref: Annotated[str, StringConstraints(min_length=1, max_length=1024)]
+    evidence_sha256: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+    reason: Annotated[str, StringConstraints(min_length=1, max_length=4096)]
+
+
+class TaskUsageResolution(Input):
+    operation_id: Identifier
+    quantity: Annotated[str, StringConstraints(min_length=1, max_length=32,
+                                               pattern=USAGE_QUANTITY)]
+    evidence_ref: Annotated[str, StringConstraints(min_length=1, max_length=1024)]
+    evidence_sha256: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+    reason: Annotated[str, StringConstraints(min_length=1, max_length=4096)]
+
+
 class MessageCreate(Input):
     recipient: Identifier
     subject: ShortText
@@ -594,6 +624,23 @@ def create_app(store: Any, *, trusted_integration: dict | None = None) -> FastAP
     @app.get(base + "/tasks/{task_id}/history")
     def history(project_id: ProjectPath, task_id: RecordPath, actor: Actor, limit: Limit = 100, offset: Offset = 0) -> list:
         return store.task_history(actor, project_id, task_id, limit=limit, offset=offset)
+
+    @app.get(base + "/tasks/{task_id}/usage-history")
+    def task_usage_history(project_id: ProjectPath, task_id: RecordPath, actor: Actor,
+                           limit: Limit = 100, offset: Offset = 0) -> dict:
+        return store.task_usage_history(actor, project_id, task_id, limit=limit, offset=offset)
+
+    @app.post(base + "/tasks/{task_id}/usage-history", status_code=201)
+    def record_task_usage(project_id: ProjectPath, task_id: RecordPath, body: TaskUsageRecord,
+                          actor: Actor, idem: Key) -> dict:
+        return store.record_task_usage(actor, project_id, task_id,
+                                       body.model_dump(mode="json"), idem)
+
+    @app.post(base + "/tasks/{task_id}/usage-history/{event_id}/resolve", status_code=201)
+    def resolve_task_usage(project_id: ProjectPath, task_id: RecordPath, event_id: RecordPath,
+                           body: TaskUsageResolution, actor: Actor, idem: Key) -> dict:
+        return store.resolve_task_usage(actor, project_id, task_id, event_id,
+                                        body.model_dump(mode="json"), idem)
 
     @app.post(base + "/tasks/{task_id}/actions/{action}")
     def task_action(project_id: ProjectPath, task_id: RecordPath, action: RecordPath, body: TaskAction,
