@@ -26,9 +26,11 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "scripts")]
 
 from skybuild.automatic_progression import (ProgressionError, bundle_manifest,
                                             frozen_gate_input, gate_members,
-                                            reviewed_members)
+                                            reviewed_members, exact_current_passes,
+                                            verify_frozen_members)
 from skybuild.automatic_focused import (FocusedError, candidate_checkout,
                                         focused_payload, signed_input)
+from skybuild.automatic_validation import static_submission
 from skybuild.client import Client, ca_file_sha256
 from skybuild.fleet_preflight import _resolved_addresses, _token_from_file
 from skybuild.manual_dispatch import _private_endpoint
@@ -374,6 +376,112 @@ def _freeze_both(client: Client, policy: dict, trust: dict, state: Path,
     return packets
 
 
+def _current_frozen(client: Client, checkout: Path, policy: dict, trust: dict,
+                    state: Path, members: list[dict], packets: list[dict],
+                    bundle: dict, permit_sha: str, conductor_intent_sha: str) -> None:
+    """Re-read authority and exact five producer artifacts before a new PR/gate."""
+    verify_frozen_members(
+        client, policy["project_id"], members, packets,
+        key=_key(Path(trust["integration"]["key_path"])),
+        key_id=trust["integration"]["key_id"], bundle_id=bundle["bundle_id"],
+        prepared_manifest_sha256=bundle["manifest_sha256"],
+        target_ref=bundle["target_ref"], base_sha=bundle["base_commit"],
+        candidate_commit=bundle["candidate_commit"], candidate_tree=bundle["candidate_tree"])
+    for position, (task, member) in enumerate(zip(policy["tasks"], members, strict=True)):
+        if task["task_id"] != member["task_id"]:
+            raise ConductorError("Current frozen task order differs from owner permit")
+        view = client.task_workflow(policy["project_id"], task["task_id"])
+        token = Store.workflow_token(view["task"])
+        if view.get("token") != token.to_dict() or token.place != Place.INTEGRATING:
+            raise ConductorError("Frozen task is no longer current Integrating work")
+        results = exact_current_passes(token)
+        prefix = gate_policy.digest(task["task_id"].encode())
+        static_path = state / (prefix + ".static.json")
+        proof = static_submission(checkout, view, task, target_ref=policy["target_ref"],
+                                  patch=gate_policy.private(Path(task["patch_path"])),
+                                  allowed_places=(Place.INTEGRATING,))
+        if _read(static_path) != proof:
+            raise ConductorError("Current static Git/source proof differs from submitted head")
+        static_uri = str(static_path) + "#sha256=" + gate_policy.digest(gate_policy.private(static_path))
+        for stage in (ValidationStage.SCANS, ValidationStage.NEEDS_REBASE):
+            result = results[stage]
+            if (result.producer != trust["validation"]["principal"]
+                    or result.artifacts != (static_uri,)
+                    or result.check_id != "exact-approved-patch-" + stage.value):
+                raise ConductorError("Current static validation lacks exact trusted report")
+        review_path = state / (prefix + ".review.json")
+        review_envelope = gate_policy.parse(gate_policy.private(review_path))
+        reviewer = [item for item in trust["reviewers"]
+                    if item["principal"] == review_envelope.get("principal")]
+        if len(reviewer) != 1 or reviewer[0]["principal"] == task["worker_id"]:
+            raise ConductorError("Current reviewer is not an independent trusted principal")
+        review = gate_policy.verify(review_envelope, gate_policy.REVIEW, reviewer[0])
+        report_path = state / (prefix + ".review-report.json")
+        report_sha = gate_policy.digest(gate_policy.private(report_path))
+        report_uri = str(report_path) + "#sha256=" + report_sha
+        report = _read(report_path)
+        workflow = {"attempt_id": token.attempt_id, "claim_fence": token.claim_fence,
+                    "input_generation": token.input_generation,
+                    "definition_revision": token.definition_revision,
+                    "policy_version": token.policy_version,
+                    "source_sha": token.source_head, "base_sha": token.target_base}
+        if (review.get("project_id") != policy["project_id"]
+                or review.get("task_id") != task["task_id"]
+                or review.get("source_head") != token.source_head
+                or review.get("source_branch") != token.source_branch
+                or review.get("base_sha") != token.target_base
+                or review.get("reviewer_principal") != reviewer[0]["principal"]
+                or review.get("verdict") != "pass"
+                or review.get("artifact_uri") != report_uri
+                or review.get("artifact_sha256") != report_sha
+                or any(review.get(name) != value for name, value in workflow.items())
+                or report.get("source_head") != token.source_head
+                or report.get("approved_tree") != proof["approved_tree"]
+                or report.get("approved_patch_sha256") != task["approved_patch_sha256"]
+                or report.get("reviewer_principal") != reviewer[0]["principal"]
+                or results[ValidationStage.CODE_REVIEW].producer != reviewer[0]["principal"]
+                or results[ValidationStage.CODE_REVIEW].artifacts != (report_uri,)):
+            raise ConductorError("Current independent code review differs from signed exact head")
+        for stage, result_stage in (("unit", ValidationStage.UNIT_TESTS),
+                                    ("long", ValidationStage.LONG_TESTS)):
+            name = f"focused-{position}-{stage}"
+            reference = gate_policy.fields(_read(
+                state / (prefix + "." + stage + ".focused.reference.json")),
+                {"path", "sha256"})
+            receipt_path = Path(reference["path"])
+            gate_policy.outside(receipt_path, checkout)
+            receipt_raw = gate_policy.private(receipt_path)
+            if gate_policy.digest(receipt_raw) != reference["sha256"]:
+                raise ConductorError("Focused receipt bytes differ from actual API artifact")
+            focused_uri = str(receipt_path) + "#sha256=" + reference["sha256"]
+            result = results[result_stage]
+            if (result.producer != trust["validation"]["principal"]
+                    or result.artifacts != (focused_uri,)
+                    or result.check_id != task["focused_profiles"][stage]):
+                raise ConductorError("Current focused result is not the signed isolated test")
+            input_raw = gate_policy.private(state / (name + ".input.json"))
+            input_payload = gate_policy.verify(gate_policy.parse(input_raw),
+                                               gate_policy.INTEGRATION, trust["integration"])
+            if input_payload.get("workflow") != workflow:
+                raise ConductorError("Focused signed input differs from current workflow tuple")
+            consumed = state / (gate_policy.digest(policy["permit_id"].encode())
+                                + "." + name + ".consumed.json")
+            gate_policy.verify_focused(gate_policy.parse(receipt_raw), trust["validation"], {
+                "permit_id": policy["permit_id"], "policy_sha256": permit_sha,
+                "consumption_sha256": gate_policy.digest(gate_policy.private(consumed)),
+                "input_sha256": gate_policy.digest(input_raw),
+                "conductor_intent_sha256": conductor_intent_sha,
+                "project_id": policy["project_id"], "task_id": task["task_id"],
+                "assignment_id": task["assignment_id"], "worker_id": task["worker_id"],
+                "brief_sha256": task["brief_sha256"],
+                "approved_patch_sha256": task["approved_patch_sha256"],
+                "source_head": token.source_head, "source_tree": proof["approved_tree"],
+                "base_sha": policy["base_sha"], "workflow": workflow,
+                "stage": stage, "profile": task["focused_profiles"][stage],
+                "runner_source": policy["runner_source"],
+                "execution_host": policy["execution_host"], "images": policy["images"]})
+
+
 def _command(argv: list[str], checkout: Path, *, timeout: int = 90) -> str:
     environment = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
     environment.update(GIT_TERMINAL_PROMPT="0", GH_PROMPT_DISABLED="1")
@@ -500,15 +608,12 @@ def _gate_input(client: Client, checkout: Path, policy: dict, trust: dict, state
                 permit_sha: str, members: list[dict], frozen: list[dict], bundle: dict,
                 pr: int, predicate: dict, conductor_intent_sha: str) -> Path:
     output = state / "gate-input.json"
+    prior = None
     if output.exists():
-        envelope = gate_policy.parse(gate_policy.private(output))
-        observed = gate_policy.verify(envelope, gate_policy.INTEGRATION, trust["integration"])
-        if (observed.get("policy_sha256") != permit_sha
-                or observed.get("conductor_intent_sha256") != conductor_intent_sha
-                or observed.get("candidate_commit") != bundle["candidate_commit"]
-                or observed.get("pr_number") != pr):
-            raise ConductorError("Retained signed gate input differs")
-        return output
+        prior = gate_policy.verify(gate_policy.parse(gate_policy.private(output)),
+                                   gate_policy.INTEGRATION, trust["integration"])
+    _current_frozen(client, checkout, policy, trust, state, members, frozen, bundle,
+                    permit_sha, conductor_intent_sha)
     signed_reviews = []
     assignments = []
     for task in policy["tasks"]:
@@ -558,10 +663,15 @@ def _gate_input(client: Client, checkout: Path, policy: dict, trust: dict, state
         bundle_id=bundle["bundle_id"], pr_number=pr,
         pr_head_sha=bundle["candidate_commit"], pr_base_sha=bundle["base_commit"],
         pr_source_ref=policy["delivery"]["pr_source_ref"],
-        frozen_at=datetime.now(timezone.utc).isoformat(),
+        frozen_at=(prior["frozen_at"] if prior is not None
+                   else datetime.now(timezone.utc).isoformat()),
         conductor_intent_sha256=conductor_intent_sha,
         key=_key(Path(trust["integration"]["key_path"])),
         key_id=trust["integration"]["key_id"])
+    if prior is not None:
+        if prior != payload:
+            raise ConductorError("Retained signed gate input differs from current frozen authority")
+        return output
     signer = trust["integration"]
     material = _key(Path(signer["key_path"]))
     envelope = {"schema": gate_policy.INTEGRATION, "key_id": signer["key_id"],
@@ -788,6 +898,11 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps({"state": "unknown_freeze_hold_get_only"}))
                 return 3
             bundle = _bundle(args.checkout, state / "prepared")
+            if (not (state / "publisher-call.intent.json").exists()
+                    and not (state / "bundle-pr.intent.json").exists()):
+                _current_frozen(client, args.checkout, policy, trust, state,
+                                members, frozen, bundle, args.permit_sha256,
+                                conductor_intent_sha)
             if (state / "publisher.confirmed.json").exists():
                 retained = _read(state / "bundle-pr.confirmed.json")
                 pr = retained["pr"]
@@ -801,9 +916,21 @@ def main(argv: list[str] | None = None) -> int:
                                         runner_pins)
             predicate_path = state / "expected-gate-predicate.json"
             _existing_or_save(predicate_path, predicate)
-            input_path = _gate_input(client, args.checkout, policy, trust, state,
-                                     args.permit_sha256, members, frozen, bundle,
-                                     pr, predicate, conductor_intent_sha)
+            publication_started = (state / "publisher-call.intent.json").exists()
+            if publication_started:
+                input_path = state / "gate-input.json"
+                retained_input = gate_policy.verify(
+                    gate_policy.parse(gate_policy.private(input_path)),
+                    gate_policy.INTEGRATION, trust["integration"])
+                if (retained_input.get("candidate_commit") != bundle["candidate_commit"]
+                        or retained_input.get("bundle_id") != bundle["bundle_id"]
+                        or retained_input.get("pr_number") != pr
+                        or retained_input.get("policy_sha256") != args.permit_sha256):
+                    raise ConductorError("Retained postpublication gate input differs")
+            else:
+                input_path = _gate_input(client, args.checkout, policy, trust, state,
+                                         args.permit_sha256, members, frozen, bundle,
+                                         pr, predicate, conductor_intent_sha)
             candidate = Path(report["candidate"])
             if (candidate != state / "prepared" / "candidate"
                     or _command(["git", "rev-parse", "HEAD"], candidate)
@@ -816,6 +943,10 @@ def main(argv: list[str] | None = None) -> int:
             if attestation is None:
                 print(json.dumps({"state": "unknown_gate_hold_get_only"}))
                 return 3
+            if not publication_started:
+                _gate_input(client, args.checkout, policy, trust, state,
+                            args.permit_sha256, members, frozen, bundle,
+                            pr, predicate, conductor_intent_sha)
             publication = _publisher_stage(args.checkout, policy, state, bundle,
                                            state / "prepared", attestation, pr)
             if publication is None:

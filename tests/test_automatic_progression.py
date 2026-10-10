@@ -71,3 +71,15 @@ def test_waits_for_independent_stage_and_rejects_fence_or_reviewer_drift(tmp_pat
     approved[1]["reviewer"] = "author"
     with pytest.raises(progression.ProgressionError):
         progression.reviewed_members(client, "project", approved, base_sha="c" * 40)
+
+
+def test_two_worker_policy_rejects_current_not_applicable_even_with_reason(tmp_path, monkeypatch):
+    client, views, approved = _setup(tmp_path, monkeypatch)
+    token = views["task-a"]["actual"]
+    evidence = tuple(replace(item, state=ResultState.NOT_APPLICABLE,
+                             policy_reason="General policy permits N/A elsewhere")
+                     if item.stage == ValidationStage.LONG_TESTS else item
+                     for item in token.evidence)
+    views["task-a"]["actual"] = replace(token, evidence=evidence)
+    views["task-a"]["token"] = views["task-a"]["actual"].to_dict()
+    assert progression.reviewed_members(client, "project", approved, base_sha="c" * 40) is None

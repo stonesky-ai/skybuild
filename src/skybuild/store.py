@@ -249,7 +249,7 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
         current = self._principal(connection, principal.principal_id)
         if not current.is_admin and operation not in current.grants.get(project_id, ()):
             raise DomainError('authorization', 'Project operation not permitted', 403)
-        if operation == 'tasks:write' and connection.execute(
+        if operation in {'tasks:write', 'integration:attest'} and connection.execute(
             "SELECT 1 WHERE lock_ledger_import(%s)", (project_id,)
         ).fetchone():
             raise DomainError('authority', 'Markdown ledger remains task authority', 409)

@@ -34,7 +34,7 @@ def _git(checkout: Path, *args: str, data: bytes | None = None,
     # candidate source never supplies this process environment.
     env = {name: value for name, value in os.environ.items()
            if not name.startswith("GIT_")}
-    env.update(PATH=os.defpath, LC_ALL="C", GIT_NO_REPLACE_OBJECTS="1",
+    env.update(LC_ALL="C", GIT_NO_REPLACE_OBJECTS="1",
                GIT_TERMINAL_PROMPT="0")
     if extra_env:
         env.update(extra_env)
@@ -53,10 +53,11 @@ def _oid(value: str) -> str:
 
 
 def static_submission(checkout: Path, view: dict, task: dict,
-                      *, target_ref: str, patch: bytes) -> dict:
+                      *, target_ref: str, patch: bytes,
+                      allowed_places: tuple[Place, ...] = (Place.VALIDATING,)) -> dict:
     """Compare the submitted head/tree with one approved patch on exact base."""
     token = Store.workflow_token(view["task"])
-    if (view.get("token") != token.to_dict() or token.place != Place.VALIDATING
+    if (view.get("token") != token.to_dict() or token.place not in allowed_places
             or token.pending_action is not None or token.superseded
             or token.task_id != task.get("task_id") or token.responsible != task.get("worker_id")
             or token.source_branch != task.get("task_branch")

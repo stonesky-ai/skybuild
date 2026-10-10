@@ -62,6 +62,17 @@ def test_signed_freeze_binds_current_review_and_full_tuple():
         check(packet(reduced), reduced)
 
 
+def test_signed_two_worker_route_rejects_policy_reason_not_applicable():
+    current = token()
+    changed = replace(current, evidence=tuple(
+        replace(result, state=ResultState.NOT_APPLICABLE,
+                policy_reason="Permitted for a different task policy")
+        if result.stage == ValidationStage.LONG_TESTS else result
+        for result in current.evidence))
+    with pytest.raises(DomainError):
+        check(packet(changed), changed)
+
+
 def test_signature_rejects_mutation_wrong_key_and_wrong_domain():
     current = token()
     frozen = packet(current)

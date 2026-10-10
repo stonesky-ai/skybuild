@@ -10,7 +10,6 @@ import hashlib
 from pathlib import Path
 import re
 
-from .integration_workflow import satisfactory_validation
 from .manual_integration import binding, digest, validation_digest
 from .store import Store
 from .trusted_integration import SCHEMA as INTEGRATION_SCHEMA, verify_signature
@@ -19,6 +18,20 @@ from .workflow import Place, ResultState, ValidationStage, _result_current
 
 class ProgressionError(ValueError):
     pass
+
+
+def exact_current_passes(token) -> dict:
+    """This two-worker permit requires five actual PASS outcomes, never N/A."""
+    if set(token.requirements) != set(ValidationStage):
+        raise ProgressionError("All five validation stages must be required")
+    results = {}
+    for stage in ValidationStage:
+        current = [item for item in token.evidence
+                   if item.stage == stage and _result_current(token, item)]
+        if len(current) != 1 or current[0].state != ResultState.PASSED:
+            raise ProgressionError("Each current required validation needs one actual PASS")
+        results[stage] = current[0]
+    return results
 
 
 def reviewed_members(client, project: str, approved: list[dict], *, base_sha: str) -> list[dict] | None:
@@ -45,10 +58,10 @@ def reviewed_members(client, project: str, approved: list[dict], *, base_sha: st
                 or token.target_base != base_sha or not token.source_head
                 or re.fullmatch(r"[0-9a-f]{40}", token.source_head) is None):
             raise ProgressionError("Author attempt, branch or frozen base differs")
-        if not satisfactory_validation(token):
+        try:
+            exact_current_passes(token)
+        except ProgressionError:
             return None
-        if set(token.requirements) != set(ValidationStage):
-            raise ProgressionError("All five configured validation stages are required")
         review_path = Path(expected["review_path"])
         if not review_path.is_absolute() or review_path.is_symlink() or not review_path.is_file():
             raise ProgressionError("Independent review artifact path is invalid")
@@ -144,36 +157,12 @@ def frozen_gate_input(client, project: str, members: list[dict], frozen_packets:
     if (len(members) != 2 or len(frozen_packets) != 2 or len(gate_members_value) != 2
             or len({member["task_id"] for member in members}) != 2):
         raise ProgressionError("Frozen gate input needs two distinct tasks")
-    for member, packet in zip(members, frozen_packets, strict=True):
-        verify_signature(packet, key=key, key_id=key_id)
-        view = client.task_workflow(project, member["task_id"])
-        token = Store.workflow_token(view["task"])
-        packet_bundle = packet.get("bundle")
-        if (view.get("token") != token.to_dict() or token.place != Place.INTEGRATING
-                or token.pending_action is not None or token.superseded
-                or token.source_head != member["head_sha"]
-                or token.source_branch != member["ref"] or token.target_base != base_sha
-                or set(token.requirements) != set(ValidationStage)
-                or not satisfactory_validation(token)
-                or packet.get("schema") != INTEGRATION_SCHEMA or packet.get("event") != "freeze"
-                or packet.get("binding") != binding(token)
-                or packet.get("validation_sha256") != validation_digest(token)
-                or not isinstance(packet_bundle, dict)
-                or packet_bundle.get("bundle_id") != bundle_id
-                or packet_bundle.get("manifest_sha256") != prepared_manifest_sha256
-                or packet_bundle.get("target_ref") != target_ref
-                or packet_bundle.get("base_commit") != base_sha
-                or packet_bundle.get("candidate_commit") != candidate_commit
-                or packet_bundle.get("candidate_tree") != candidate_tree):
-            raise ProgressionError("Frozen API task differs from signed exact attempt")
-        history = client.task_history(project, member["task_id"], limit=100,
-                                      offset=max(0, token.revision - 100))
-        exact = [row for row in history if row.get("operation") == "workflow.freeze"
-                 and row.get("event_facts", {}).get("integration_receipt") == {
-                     "authority": "trusted_signed_publisher", "sha256": digest(packet),
-                     "evidence": packet}]
-        if len(exact) != 1:
-            raise ProgressionError("Exact signed freeze is absent from API journal")
+    verify_frozen_members(client, project, members, frozen_packets, key=key,
+                          key_id=key_id, bundle_id=bundle_id,
+                          prepared_manifest_sha256=prepared_manifest_sha256,
+                          target_ref=target_ref, base_sha=base_sha,
+                          candidate_commit=candidate_commit,
+                          candidate_tree=candidate_tree)
     return {"schema": "skybuild.two-task-gate-input.v1", "policy_sha256": policy_sha256,
             "project_id": project, "target_ref": target_ref, "base_sha": base_sha,
             "members": gate_members_value,
@@ -185,3 +174,42 @@ def frozen_gate_input(client, project: str, members: list[dict], frozen_packets:
             "pr_head_sha": pr_head_sha, "pr_base_sha": pr_base_sha,
             "pr_source_ref": pr_source_ref,
             "frozen_at": frozen_at, "conductor_intent_sha256": conductor_intent_sha256}
+
+
+def verify_frozen_members(client, project: str, members: list[dict], frozen_packets: list[dict],
+                          *, key: bytes, key_id: str, bundle_id: str,
+                          prepared_manifest_sha256: str, target_ref: str,
+                          base_sha: str, candidate_commit: str,
+                          candidate_tree: str) -> None:
+    """Recheck signed freeze and current five PASS results before each new effect."""
+    if len(members) != 2 or len(frozen_packets) != 2:
+        raise ProgressionError("Current frozen check requires the exact two members")
+    for member, packet in zip(members, frozen_packets, strict=True):
+        verify_signature(packet, key=key, key_id=key_id)
+        view = client.task_workflow(project, member["task_id"])
+        token = Store.workflow_token(view["task"])
+        packet_bundle = packet.get("bundle")
+        if (view.get("token") != token.to_dict() or token.place != Place.INTEGRATING
+                or token.pending_action is not None or token.superseded
+                or token.source_head != member["head_sha"]
+                or token.source_branch != member["ref"] or token.target_base != base_sha
+                or packet.get("schema") != INTEGRATION_SCHEMA or packet.get("event") != "freeze"
+                or packet.get("binding") != binding(token)
+                or packet.get("validation_sha256") != validation_digest(token)
+                or not isinstance(packet_bundle, dict)
+                or packet_bundle.get("bundle_id") != bundle_id
+                or packet_bundle.get("manifest_sha256") != prepared_manifest_sha256
+                or packet_bundle.get("target_ref") != target_ref
+                or packet_bundle.get("base_commit") != base_sha
+                or packet_bundle.get("candidate_commit") != candidate_commit
+                or packet_bundle.get("candidate_tree") != candidate_tree):
+            raise ProgressionError("Frozen API task differs from signed exact attempt")
+        exact_current_passes(token)
+        history = client.task_history(project, member["task_id"], limit=100,
+                                      offset=max(0, token.revision - 100))
+        exact = [row for row in history if row.get("operation") == "workflow.freeze"
+                 and row.get("event_facts", {}).get("integration_receipt") == {
+                     "authority": "trusted_signed_publisher", "sha256": digest(packet),
+                     "evidence": packet}]
+        if len(exact) != 1:
+            raise ProgressionError("Exact signed freeze is absent from API journal")

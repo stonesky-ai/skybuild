@@ -17,7 +17,7 @@ import re
 import stat
 
 from .contracts import DomainError, valid_identifier
-from .integration_workflow import IntegrationWorkflow, satisfactory_validation
+from .integration_workflow import IntegrationWorkflow
 from .manual_integration import binding, canonical, digest, validation_digest
 from .store import Store
 from .workflow import Place, ResultState, ValidationStage, _result_current
@@ -96,6 +96,18 @@ def _member_review(token, member: dict) -> None:
                and member["review_artifact"] in result.artifacts]
     if len(matched) != 1:
         _deny("Current independent review does not match frozen evidence")
+
+
+def _all_required_passed(token) -> bool:
+    """Only this signed two-worker route requires actual PASS at all five stages."""
+    if set(token.requirements) != set(ValidationStage):
+        return False
+    for stage in ValidationStage:
+        current = [item for item in token.evidence
+                   if item.stage == stage and _result_current(token, item)]
+        if len(current) != 1 or current[0].state != ResultState.PASSED:
+            return False
+    return True
 
 
 def _checked_bundle(packet: dict, token) -> dict:
@@ -178,7 +190,7 @@ def _checked_packet(packet: dict, *, event: str, operation_id: str, revision: in
             or packet["producer"] != producer or packet["binding"] != binding(token)
             or packet["validation_sha256"] != validation_digest(token)
             or set(token.requirements) != set(ValidationStage)
-            or not satisfactory_validation(token) or token.pending_action is not None
+            or not _all_required_passed(token) or token.pending_action is not None
             or token.superseded):
         _deny("Trusted integration statement differs from current inputs")
     bundle = _checked_bundle(packet, token)
