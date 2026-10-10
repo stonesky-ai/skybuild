@@ -38,6 +38,7 @@ def test_terminal_observation_retries_settlement_without_new_observation(tmp_pat
     prepared = SimpleNamespace(plan=plan, operation_id=operation_id,
                                controller_head="a" * 40, controller_source_digest="b" * 64,
                                controller_profile_digest="c" * 64, interpreter_digest="0" * 64,
+                               ca_digest="1" * 64, owner_token_digest="2" * 64,
                                unit_name="skybuild-job-" + "d" * 24 + ".service",
                                launch_nonce="e" * 32)
     latest = {'phase': 'completed', 'result': 'success', 'exit_status': 0,
@@ -46,6 +47,12 @@ def test_terminal_observation_retries_settlement_without_new_observation(tmp_pat
               'invocation_id': '1' * 32, 'observation_id': observation_id}
 
     class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
         def get_cpu_worker_dispatch(self, project, operation):
             return {'state': 'terminal', 'latest_observation': latest}
 
@@ -67,5 +74,6 @@ def test_terminal_observation_retries_settlement_without_new_observation(tmp_pat
                                                 prepared.controller_source_digest,
                                                 prepared.controller_profile_digest))
     monkeypatch.setattr(bridge, '_unit_manager', lambda _path: Manager())
-    result = bridge.reconcile_worker(Client(), prepared)
+    monkeypatch.setattr(bridge, '_trusted_client', lambda *_args: Client())
+    result = bridge.reconcile_worker(prepared)
     assert result == {'observed': True, 'settled': True, 'state': 'settled'}
