@@ -663,6 +663,10 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
                 if self._petri(task):
                     return self._workflow_view(connection, principal, task)
                 self._require_no_effect_exposure(connection, project_id, task_id)
+                # Later frozen imports can lack migration 005's bookkeeping.
+                # Defaults do not assess inputs; preserve any existing marker.
+                connection.execute('INSERT INTO task_readiness (project_id, task_id) VALUES (%s, %s) ON CONFLICT DO NOTHING',
+                                   (project_id, task_id))
                 readiness = connection.execute('SELECT input_generation FROM task_readiness WHERE project_id = %s AND task_id = %s',
                                                (project_id, task_id)).fetchone()
                 from .enrollment import enrollment_token, install_token
