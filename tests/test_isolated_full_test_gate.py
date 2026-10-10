@@ -650,10 +650,12 @@ class _DockerModel:
             "GATE_PREFLIGHT_SOURCE_PATH=/scratch/workspace/src/skybuild/__init__.py",
             "GATE_COMMAND_LAUNCH=trusted_exec", "GATE_HOST_GATEWAY_PROBE=blocked",
             "GATE_EXTERNAL_DIRECT_IP_PROBE=blocked", "GATE_EXTERNAL_DNS_PROBE=blocked"))
-        return text.replace("GATE_COMMAND_LAUNCH=trusted_exec", "") if self.mutation == "missing_preflight" else text
+        text = text.replace("GATE_COMMAND_LAUNCH=trusted_exec", "") if self.mutation == "missing_preflight" else text
+        return text + "\n" + getattr(self, "pytest_summary", "1 passed in 0.01s") + "\n"
 
 
-def _execute_modeled_gate(monkeypatch, tmp_path, mutation=None):
+def _execute_modeled_gate(monkeypatch, tmp_path, mutation=None, *, focused_mode=False,
+                          pytest_summary="1 passed in 0.01s"):
     import trusted_gate_attestation as attestation
 
     key = tmp_path / "key"
@@ -698,6 +700,7 @@ def _execute_modeled_gate(monkeypatch, tmp_path, mutation=None):
     monkeypatch.setattr(gate, "_host_memory_check", lambda: 14)
     monkeypatch.setattr(gate, "_OwnedHostListener", lambda address: SimpleNamespace(port=32768, close=lambda: None))
     model = _DockerModel(predicate, mutation)
+    model.pytest_summary = pytest_summary
     monkeypatch.setattr(gate, "_docker", model)
 
     class FakeLogProcess:
@@ -710,8 +713,36 @@ def _execute_modeled_gate(monkeypatch, tmp_path, mutation=None):
 
     monkeypatch.setattr(gate.subprocess, "Popen", FakeLogProcess)
     predicate_path = tmp_path / "predicate.json"
+    if focused_mode:
+        predicate.pop("bundle_id")
+        predicate.pop("pr_number")
     predicate_path.write_text(json.dumps(predicate))
     predicate_path.chmod(0o600)
+    if focused_mode:
+        from datetime import datetime, timedelta, timezone
+        import gate_policy as policy
+        expires = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+        record = tmp_path / "focus.consumed.json"
+        record.write_text('{"consumed":true}')
+        record.chmod(0o600)
+        approved = {"permit_id": "focused-permit", "project_id": "skybuild", "base_sha": predicate["target_base"],
+                    "runner_source": runner, "execution_host": predicate["execution_host"], "expires_at": expires,
+                    "images": {name: predicate[name] for name in ("runner_image_id", "postgres_image_id", "firewall_image_id")}}
+        authorization = policy.Authorization(approved, record, "a" * 64)
+        authorization.predicate_sha256 = gate._digest_bytes(gate._canonical(predicate))
+        authorization.policy_sha256 = "b" * 64
+        authorization.trust = {"validation": {"key_id": "key-1", "principal": "trusted-validator", "key_path": str(key)}}
+        authorization.focused = {"task": {"task_id": "client", "assignment_id": "assigned", "worker_id": "worker",
+                                          "brief_sha256": "c" * 64, "approved_patch_sha256": "d" * 64},
+            "workflow": {"attempt_id": "attempt", "claim_fence": 1, "input_generation": 1, "definition_revision": 1,
+                         "policy_version": "v1", "source_sha": predicate["candidate_commit"], "base_sha": predicate["target_base"]},
+            "stage": "unit", "profile": "petri-client-unit-v1", "source_head": predicate["candidate_commit"],
+            "conductor_intent_sha256": "e" * 64}
+        monkeypatch.setattr(authorization, "check", lambda **kwargs: None)
+        tmp_path.chmod(0o700)
+        result = gate.execute(tmp_path, predicate_path, None, key, "key-1", tmp_path,
+                              _policy_authorization=authorization)
+        return result, predicate, model, key
     plan = gate.prepare(tmp_path, predicate_path)
     go = {"decision": "GO", "task_id": gate.TASK_ID, "plan_sha256": gate.plan_digest(plan),
         "predicate_sha256": plan["policy"]["predicate_sha256"], "attestation_key_id": "key-1",
@@ -726,6 +757,29 @@ def _execute_modeled_gate(monkeypatch, tmp_path, mutation=None):
     tmp_path.chmod(0o700)
     result = gate.execute(tmp_path, predicate_path, go_path, key, "key-1", tmp_path)
     return result, predicate, model, key
+
+
+def test_focused_real_builder_inspect_cleanup_sign_and_verify(monkeypatch, tmp_path):
+    import gate_policy as policy
+    result, predicate, model, key = _execute_modeled_gate(monkeypatch, tmp_path, focused_mode=True,
+                                                         pytest_summary="5 passed, 19 deselected in 0.01s")
+    receipt = json.loads(Path(result["attestation"]).read_bytes())
+    payload = policy.verify_focused(receipt, {"key_id": "key-1", "principal": "trusted-validator", "key_path": str(key)},
+                                    {"source_head": predicate["candidate_commit"], "stage": "unit"})
+    assert payload["counts"]["passed"] == 5 and payload["counts"]["collected"] == 24
+    assert payload["command"] == policy.FOCUSED_COMMANDS["petri-client-unit-v1"]
+    assert "bundle_id" not in payload["isolation"] and "pr_number" not in payload["isolation"]
+    assert result["validation_passed"] is True and model.released
+
+
+@pytest.mark.parametrize("summary", ["2 skipped in 0.01s", "no tests ran in 0.01s", "1 passed, 1 xfailed in 0.01s"])
+def test_focused_empty_or_skipped_collection_cannot_pass(monkeypatch, tmp_path, summary):
+    import gate_policy as policy
+    result, _, _, key = _execute_modeled_gate(monkeypatch, tmp_path, focused_mode=True, pytest_summary=summary)
+    assert result["validation_passed"] is False
+    with pytest.raises(policy.PolicyError, match="nonempty"):
+        policy.verify_focused(json.loads(Path(result["attestation"]).read_bytes()),
+                              {"key_id": "key-1", "principal": "trusted-validator", "key_path": str(key)}, {})
 
 
 def test_real_builder_inspect_cleanup_sign_and_verify_roundtrip(monkeypatch, tmp_path):

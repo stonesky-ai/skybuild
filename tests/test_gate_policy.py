@@ -58,13 +58,13 @@ def fixture(tmp_path, monkeypatch):
     for head in heads:
         git("merge", "--no-ff", "--no-edit", head)
     specs = []
-    for number, principal in enumerate(("owner", "integration:attest", "reviewer-one", "reviewer-two")):
+    for number, principal in enumerate(("owner", "integration:attest", "reviewer-one", "reviewer-two", "validation:attest")):
         key_path = write(authority / ("key-" + str(number)), bytes([number + 1]) * 32)
         specs.append({"key_id": "key-" + str(number), "principal": principal, "key_path": str(key_path)})
     state = authority / "state"
     state.mkdir(mode=0o700)
     trust = {"schema": policy.TRUST, "approval": specs[0], "integration": specs[1],
-             "reviewers": specs[2:], "consume_dir": str(state)}
+             "reviewers": specs[2:4], "validation": specs[4], "consume_dir": str(state)}
     trust_path = write(authority / "trust.json", trust)
     trust_sha = policy.digest(trust_path.read_bytes())
     now = datetime.now(timezone.utc)
@@ -88,7 +88,12 @@ def fixture(tmp_path, monkeypatch):
                 "worker_id": "worker-" + str(number), "task_branch": "task/member-" + str(number),
                 "brief_sha256": "2" * 64, "approved_patch_sha256": policy.digest(patch.read_bytes()),
                 "patch_path": str(patch), "owned_paths": [("one.txt", "two.txt")[number]],
-                "base_sha": base, "definition_revision": 1, "policy_version": "v1"}
+                "base_sha": base, "definition_revision": 1, "policy_version": "v1",
+                "focused_profiles": {"unit": ("petri-client", "session-scan")[number] + "-unit-v1",
+                                     "long": ("petri-client", "session-scan")[number] + "-long-v1"}}
+        brief = write(authority / ("brief-" + str(number) + ".json"), {"task_id": task["task_id"]})
+        task["brief_path"] = str(brief)
+        task["brief_sha256"] = policy.digest(brief.read_bytes())
         tasks.append(task)
         artifact = write(authority / ("review-" + str(number)), b"Independent exact-source review passed.\n")
         artifact_sha = policy.digest(artifact.read_bytes())
@@ -117,12 +122,13 @@ def fixture(tmp_path, monkeypatch):
                              "disk_path": str(authority), "disk_reserve_bytes": 4 * 1024**3},
               "delivery": {"conductor_source_sha": "4" * 40, "integration_source_sha": "5" * 40,
                            "publisher_source_sha": "6" * 40, "publisher_trust_sha256": "7" * 64,
-                           "gate_trust_sha256": trust_sha, "pr_source_ref": "task/combined", "state_dir": str(state)},
+                           "gate_trust_sha256": trust_sha, "validation_runtime_sha256": "8" * 64,
+                           "pr_source_ref": "task/combined", "state_dir": str(state)},
               "issued_at": issued, "expires_at": (now + timedelta(minutes=30)).isoformat(), "max_runs": 1}
     policy_path = authority / "policy.json"
     input_path = authority / "input.json"
 
-    def freeze():
+    def freeze(*, prior_results=True):
         write(policy_path, signed(permit, policy.APPROVAL, specs[0]))
         permit_sha = policy.digest(policy_path.read_bytes())
         conductor = {"schema": "skybuild.conductor-permit-consumption.v1", "permit_id": permit["permit_id"],
@@ -130,6 +136,32 @@ def fixture(tmp_path, monkeypatch):
                      "integration_source_sha": permit["delivery"]["integration_source_sha"], "consumed_at": reviewed,
                      "state": "consumed_hold_on_unknown"}
         record = write(state / (policy.digest(permit["permit_id"].encode()) + ".conductor.consumed.json"), conductor)
+        for number, member in enumerate(members if prior_results else []):
+            results = {}
+            for stage in ("unit", "long"):
+                stage_name = "focused-" + str(number) + "-" + stage
+                intent = write(state / (policy.digest(permit["permit_id"].encode()) + "." + stage_name + ".consumed.json"), {
+                    "schema": "skybuild.gate-permit-consumption.v1", "permit_id": permit["permit_id"],
+                    "policy_sha256": permit_sha, "input_sha256": "9" * 64,
+                    "conductor_intent_sha256": policy.digest(record.read_bytes()),
+                    "state": "consumed_hold_on_unknown", "consumed_at": reviewed, "stage": stage_name})
+                authorization = policy.Authorization(permit, intent, "9" * 64)
+                authorization.trust = trust
+                authorization.policy_sha256 = permit_sha
+                authorization.focused = {"task": tasks[number], "workflow": member["workflow"], "stage": stage,
+                    "profile": tasks[number]["focused_profiles"][stage], "source_head": member["head_sha"],
+                    "conductor_intent_sha256": policy.digest(record.read_bytes())}
+                command = policy.FOCUSED_COMMANDS[authorization.focused["profile"]]
+                isolation = {"candidate_tree": git("rev-parse", member["head_sha"] + "^{tree}"),
+                    "candidate_commit": member["head_sha"], "gate_argv": command,
+                    "gate_command_sha256": policy.digest(json.dumps(command).encode()),
+                    "result": {"exit_code": 0}, "cleanup": {"status": "confirmed"}}
+                counts = {"collected": 1, "selected": 1, "passed": 1, "failed": 0, "errors": 0,
+                          "skipped": 0, "deselected": 0, "xfailed": 0, "xpassed": 0}
+                receipt = policy.sign_focused(isolation, authorization, Path(specs[4]["key_path"]), specs[4]["key_id"], counts)
+                receipt_path = write(authority / (stage_name + ".json"), receipt)
+                results[stage] = {"path": str(receipt_path), "sha256": policy.digest(receipt_path.read_bytes())}
+            member["focused_results"] = results
         frozen = {"schema": policy.INPUT, "policy_sha256": permit_sha, "project_id": "skybuild",
                   "target_ref": permit["target_ref"], "base_sha": base, "members": members,
                   "prepared_manifest_sha256": "8" * 64,
@@ -161,6 +193,61 @@ def test_two_real_git_merges_signed_reviews_and_durable_one_shot(tmp_path, monke
     assert record["input_sha256"] == policy.digest(values["input_path"].read_bytes())
     with pytest.raises(policy.PolicyError, match="already consumed"):
         authorize(values, permit_sha)
+
+
+def test_linked_worktree_uses_its_actual_common_object_directory(tmp_path, monkeypatch):
+    values = fixture(tmp_path, monkeypatch)
+    linked = tmp_path / "linked"
+    subprocess.run(["git", "-C", str(values["checkout"]), "worktree", "add", "--detach", str(linked), "HEAD"],
+                   check=True, capture_output=True)
+    assert (linked / ".git").is_file()
+    values["checkout"] = linked
+    assert authorize(values, values["freeze"]()).record.is_file()
+
+
+def test_focused_stage_verifies_one_exact_approved_head_without_bundle_or_pr(tmp_path, monkeypatch):
+    values = fixture(tmp_path, monkeypatch)
+    permit_sha = values["freeze"](prior_results=False)
+    task, member = values["permit"]["tasks"][0], values["members"][0]
+    predicate = {name: value for name, value in values["predicate"].items() if name not in {"bundle_id", "pr_number"}}
+    predicate["candidate_commit"] = member["head_sha"]
+    predicate["candidate_tree"] = policy._tree(values["checkout"], member["head_sha"])
+    conductor = next(values["state"].glob("*.conductor.consumed.json"))
+    focused = {"schema": policy.FOCUSED_INPUT, "policy_sha256": permit_sha, "project_id": "skybuild",
+               "target_ref": values["permit"]["target_ref"], "base_sha": values["permit"]["base_sha"],
+               **{name: task[name] for name in ("task_id", "assignment_id", "worker_id", "brief_sha256")},
+               "head_sha": member["head_sha"], "workflow": member["workflow"],
+               **{name: predicate[name] for name in ("candidate_tree", "candidate_archive_sha256", "candidate_history_sha256")},
+               "conductor_intent_sha256": policy.digest(conductor.read_bytes()),
+               "submitted_at": datetime.now(timezone.utc).isoformat(), "stage": "unit"}
+    write(values["input_path"], signed(focused, policy.INTEGRATION, values["specs"][1]))
+    arguments = (values["checkout"], predicate, values["specs"][4]["key_id"], values["policy_path"], permit_sha,
+                 values["trust_path"], values["trust_sha"], values["input_path"], values["source"], gate.RESOURCE_LIMITS)
+    authorization = policy.authorize(*arguments, focused_stage="focused-0-unit")
+    assert authorization.focused["profile"] == "petri-client-unit-v1"
+    assert "bundle_id" not in predicate and "pr_number" not in predicate
+    with pytest.raises(policy.PolicyError, match="already consumed"):
+        policy.authorize(*arguments, focused_stage="focused-0-unit")
+
+
+def test_focused_whitelist_matches_trusted_launcher_and_preserves_full_command():
+    import gate_container_entrypoint as entrypoint
+    assert entrypoint.FULL_COMMAND == gate.DEFAULT_GATE_COMMAND == policy.FULL_COMMAND
+    assert entrypoint.FOCUSED_COMMANDS == policy.FOCUSED_COMMANDS
+    for command in policy.FOCUSED_COMMANDS.values():
+        assert entrypoint.fixed_command(command) == command
+    with pytest.raises(RuntimeError, match="whitelist"):
+        entrypoint.fixed_command(["python", "candidate.py"])
+
+
+@pytest.mark.parametrize("summary,passed,skipped", [("5 passed, 19 deselected in 0.20s", 5, 0),
+                                                   ("2 skipped in 0.20s", 0, 2), ("no tests ran in 0.01s", 0, 0)])
+def test_bounded_focused_pytest_count_parser(tmp_path, summary, passed, skipped):
+    log = tmp_path / "candidate.log"
+    log.write_text("preflight\n" + summary + "\n")
+    counts = gate._pytest_counts(log)
+    assert counts["passed"] == passed and counts["skipped"] == skipped
+    assert counts["collected"] == counts["selected"] + counts["deselected"]
 
 
 @pytest.mark.parametrize("mutation", ["patch", "review", "workflow", "artifact", "source", "unknown", "candidate", "brief"])
@@ -199,6 +286,28 @@ def test_wrong_owner_signature_never_consumes_or_prepares(tmp_path, monkeypatch)
     with pytest.raises(policy.PolicyError, match="signature"):
         authorize(values, policy.digest(values["policy_path"].read_bytes()))
     assert not list(values["state"].glob("*.gate.consumed.json"))
+
+
+def test_predicate_replacement_after_authorization_stops_before_preparation(tmp_path, monkeypatch):
+    values = fixture(tmp_path, monkeypatch)
+    authorization = authorize(values, values["freeze"]())
+    changed = {**values["predicate"], "candidate_commit": "0" * 40}
+    monkeypatch.setattr(gate, "_read_predicate", lambda *args, **kwargs: changed)
+    monkeypatch.setattr(gate, "prepare", lambda *args, **kwargs: pytest.fail("Preparation must not begin"))
+    with pytest.raises(gate.GateError, match="changed after one-shot"):
+        gate.execute(values["checkout"], values["input_path"], None, Path(values["specs"][4]["key_path"]),
+                     "gate-key", values["authority"], _policy_authorization=authorization)
+    assert authorization.record.is_file()
+
+
+def test_source_object_alternates_are_rejected(tmp_path, monkeypatch):
+    values = fixture(tmp_path, monkeypatch)
+    info = values["checkout"] / ".git/objects/info"
+    alternate = values["authority"] / "untrusted-objects"
+    alternate.mkdir()
+    (info / "alternates").write_text(str(alternate) + "\n")
+    with pytest.raises(policy.PolicyError, match="alternates"):
+        authorize(values, values["freeze"]())
 
 
 def test_duplicate_json_and_unknown_signature_fields_are_rejected():

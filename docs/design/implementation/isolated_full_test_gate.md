@@ -211,7 +211,69 @@ its status. A failure blocks new gate effects while preserving trusted cleanup,
 forces failure, and prevents signing. The normal full-gate receipt schema stays
 unchanged; the supervisor result also reports its consumption file and digest.
 
-The environment compatibility and one-use policy revisions are source WIP.
-Their new regression tests have not yet run under admitted resources. The
-previous c9c source review and 37 focused checks apply only to that exact source.
-No isolated Docker qualification or automatic delivery is claimed here.
+The frozen 3c77 environment revision passed 39 checks on Wonko in 3.41 seconds,
+with 87.43 MB peak memory under its 256 MiB bound, using uv 0.11.22. That evidence
+includes the unchanged project launcher with an empty offline cache. It applies
+only to exact 3c77 source. The one-use policy and focused validation revisions
+are source WIP; their new tests have not yet run under admitted resources.
+The previous c9c independent source review and 37 checks remain exact-source
+evidence. No isolated Docker qualification or automatic delivery is claimed.
+
+## Fixed focused validation before freeze
+
+The two approved assignments have distinct fixed unit and long profiles. The
+common prefix is `uv run --extra test python -m pytest -q`.
+
+| Profile | Fixed remaining arguments |
+| --- | --- |
+| `petri-client-unit-v1` | `tests/test_petri_client.py` |
+| `petri-client-long-v1` | `tests/test_petri_workers.py tests/test_manual_cord.py` |
+| `session-scan-unit-v1` | `tests/test_session_failure_scan.py -k 'reassembles or prefilter or concatenated or keeps_complete or quoted'` |
+| `session-scan-long-v1` | `tests/test_session_failure_scan.py -k 'not (reassembles or prefilter or concatenated or keeps_complete or quoted)'` |
+
+The owner policy pins each task's exact profile pair. These profiles were
+independently reviewed against the approved patches. The client long profile
+exercises mocked service and Git/Cord workflow integration; it does not claim a
+live REST service test. Scanner long selection complements unit selection and
+includes real bounded CLI, cancellation, process cleanup, and ripgrep behavior.
+The immutable runner image must already contain required executables and
+dependencies. A missing prerequisite, empty selection, or skipped test fails
+focused validation; no dependency bootstrap or network access is allowed.
+
+Use `--execute-policy --focused-stage focused-{0|1}-{unit|long}` with the same
+private permit/trust pins, signed input, signer, and output arguments. The
+focused predicate has the full image/source/isolation fields and exact candidate
+head/tree/archive/history pins, with no bundle ID or PR number. Its static full
+command fields pin the image contract; the root-selected profile determines the
+actual focused command. The trusted entrypoint accepts only the full command
+and these four exact argv lists, then guarantees the same fixed exec boundary.
+Candidate arguments cannot broaden that whitelist.
+
+Each focused stage independently consumes its one-use intent before preparation.
+Its signed integration input binds the exact task/assignment/worker, amended
+brief, workflow tuple, head/tree/archive/history, conductor intent, stage, and
+submission time. The host verifies actual private brief and patch bytes and
+reconstructs the worker tree before starting any container. Trusted runner and
+candidate paths remain separate. Linked worktrees resolve their actual common
+Git object directory; untrusted alternates are rejected, and reconstructed
+objects are written only to bounded task-owned temporary storage.
+
+Focused execution uses the same PostgreSQL, two network namespaces, default-deny
+firewalls, trusted probes, mounts, resource caps, logs, exit observation, and
+cleanup verifiers as the full gate. It signs a separate
+`skybuild.focused-validation.v1` envelope with the owner-configured validation
+principal/key. The receipt binds all source/task/command/stage/permit and intent
+digests, actual isolation evidence, exit, cleanup, and bounded pytest summary
+counts. PASS requires exit zero, at least one passing test, and zero failed,
+errored, skipped, xfailed, or xpassed tests. Nonempty deselection is reported.
+An observed pytest failure can have a signed failure receipt; supervisor or
+cleanup uncertainty cannot produce a passing result. CLI success requires a
+passing focused verdict as well as the ordinary execution conditions.
+
+The trusted integration producer verifies each receipt before posting the exact
+unit or long task stage. The later signed frozen input includes both actual
+receipt paths and raw-byte hashes for each task. The combined gate independently
+verifies those signatures, task/workflow tuples, nonempty passing counts, and
+immutable prior stage intents before its one full default suite. Focused results
+are not full-gate attestations and cannot satisfy the publisher's combined-gate
+contract.

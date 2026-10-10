@@ -169,7 +169,7 @@ def _require_sha(value: object, size: int = 64) -> str:
     return value
 
 
-def _read_predicate(path: Path) -> dict:
+def _read_predicate(path: Path, *, focused: bool = False) -> dict:
     predicate = _read_json(path)
     required = {
         "bundle_id", "pr_number", "target_ref", "target_base", "candidate_commit",
@@ -180,11 +180,14 @@ def _read_predicate(path: Path) -> dict:
         "candidate_blocked_until_probe",
         "execution_host",
     }
+    if focused:
+        required -= {"bundle_id", "pr_number"}
     if set(predicate) != required:
         raise GateError("Expected predicate fields do not match the full-test gate contract")
-    if (not isinstance(predicate["bundle_id"], str) or not predicate["bundle_id"]
-            or type(predicate["pr_number"]) is not int or predicate["pr_number"] < 1
-            or not isinstance(predicate["target_ref"], str) or not predicate["target_ref"].startswith("refs/heads/")
+    if not focused and (not isinstance(predicate["bundle_id"], str) or not predicate["bundle_id"]
+                        or type(predicate["pr_number"]) is not int or predicate["pr_number"] < 1):
+        raise GateError("Expected full-gate bundle and PR identity is invalid")
+    if (not isinstance(predicate["target_ref"], str) or not predicate["target_ref"].startswith("refs/heads/")
             or not isinstance(predicate["runner_identity"], str) or not predicate["runner_identity"]
             or predicate["runner_version"] != RUNNER_VERSION
             or predicate["execution_host"] != platform.node().split(".", 1)[0].lower()):
@@ -356,8 +359,8 @@ def _runner_provenance() -> dict:
 
 
 def prepare(checkout: Path, predicate_path: Path, runner_image_id: str | None = None,
-            postgres_image_id: str | None = None) -> dict:
-    predicate = _read_predicate(predicate_path)
+            postgres_image_id: str | None = None, *, _focused: bool = False) -> dict:
+    predicate = _read_predicate(predicate_path, focused=_focused)
     if ((runner_image_id is not None and runner_image_id != predicate["runner_image_id"])
             or (postgres_image_id is not None and postgres_image_id != predicate["postgres_image_id"])):
         raise GateError("CLI image pins differ from frozen predicate")
@@ -877,13 +880,15 @@ def _check_candidate_inspect(row: dict, *, name: str, run_id: str, container_id:
                              env: dict[str, str], network: str,
                              postgres_ip: str,
                              archive_sha256: str, fixture_sha256: str,
-                             probe_sha256: str) -> dict:
+                             probe_sha256: str, command: list[str] | None = None) -> dict:
     _verify_container(row, name=name, run_id=run_id, expected_id=container_id,
                       kind="candidate", image_id=image_id)
     config = row.get("Config", {})
     host = row.get("HostConfig", {})
     log_config = host.get("LogConfig", {})
-    if config.get("Cmd") != DEFAULT_GATE_COMMAND or config.get("User") != "10001:10001":
+    expected_command = DEFAULT_GATE_COMMAND if command is None else command
+    if (expected_command not in [DEFAULT_GATE_COMMAND, *gate_policy.FOCUSED_COMMANDS.values()]
+            or config.get("Cmd") != expected_command or config.get("User") != "10001:10001"):
         raise GateError("Candidate command or unprivileged container user differs")
     actual_env = {}
     for entry in config.get("Env", []):
@@ -1187,12 +1192,40 @@ def _host_memory_check() -> float:
     return available
 
 
+def _pytest_counts(log_path: Path) -> dict[str, int]:
+    with log_path.open("rb") as stream:
+        stream.seek(max(0, log_path.stat().st_size - 64 * 1024))
+        tail = stream.read(64 * 1024).decode("utf-8", errors="replace")
+    tail = re.sub(r"\x1b\[[0-9;]*m", "", tail)
+    summaries = [line for line in tail.splitlines()
+                 if re.search(r"\bin [0-9]+(?:\.[0-9]+)?s\b", line)
+                 and (re.search(r"\b[0-9]+ (?:passed|failed|errors?|skipped|deselected|xfailed|xpassed)\b", line)
+                      or "no tests ran" in line)]
+    if not summaries:
+        raise GateError("Focused validation has no bounded pytest collection summary")
+    counts = {name: 0 for name in ("passed", "failed", "errors", "skipped", "deselected", "xfailed", "xpassed")}
+    for number, name in re.findall(r"\b([0-9]+) (passed|failed|errors?|skipped|deselected|xfailed|xpassed)\b", summaries[-1]):
+        counts["errors" if name == "error" else name] += int(number)
+    counts["selected"] = sum(value for name, value in counts.items() if name != "deselected")
+    counts["collected"] = counts["selected"] + counts["deselected"]
+    return counts
+
+
 def execute(checkout: Path, predicate_path: Path, go_path: Path | None, key_path: Path,
             key_id: str, output_dir: Path, timeout: int = 3600, *,
             _policy_authorization: gate_policy.Authorization | None = None) -> dict:
     global _ACTIVE_POLICY_AUTHORIZATION
-    predicate = _read_predicate(predicate_path)
-    plan = prepare(checkout, predicate_path)
+    focused = _policy_authorization.focused if _policy_authorization is not None else None
+    predicate = _read_predicate(predicate_path, focused=focused is not None)
+    if (_policy_authorization is not None
+            and _digest_bytes(_canonical(predicate)) != _policy_authorization.predicate_sha256):
+        raise GateError("Expected predicate changed after one-shot authorization")
+    plan = prepare(checkout, predicate_path, _focused=focused is not None)
+    command = gate_policy.FOCUSED_COMMANDS[focused["profile"]] if focused is not None else DEFAULT_GATE_COMMAND
+    command_sha256 = _digest_bytes(json.dumps(command).encode())
+    if focused is not None:
+        plan["gate"] = {**plan["gate"], "argv": command, "command_sha256": command_sha256,
+                        "focused_profile": focused["profile"], "stage": focused["stage"]}
     if plan["policy"]["predicate_sha256"] != _digest_bytes(_canonical(predicate)):
         raise GateError("Expected predicate changed while the reviewed plan was prepared")
     plan_sha256 = plan_digest(plan)
@@ -1240,7 +1273,8 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path | None, key_path
     run_dir = output_dir / ("run-" + run_id)
     run_dir.mkdir(mode=0o700)
     journal = Journal(run_dir / "runner.journal.jsonl", {
-        "task_id": TASK_ID, "run_id": run_id, "execution_host": predicate["execution_host"],
+        "task_id": focused["task"]["task_id"] if focused is not None else TASK_ID,
+        "run_id": run_id, "execution_host": predicate["execution_host"],
         "candidate_commit": predicate["candidate_commit"], "candidate_tree": predicate["candidate_tree"],
         "candidate_archive_sha256": predicate["candidate_archive_sha256"],
         "plan_sha256": plan_sha256, "available_gib": round(available_gib, 2),
@@ -1376,7 +1410,7 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path | None, key_path
         for name, value in candidate_env.items():
             candidate_args.extend(("--env", name + "=" + value))
         candidate_args.extend(("--entrypoint", "/runner/entrypoint.py", predicate["runner_image_id"],
-                               *DEFAULT_GATE_COMMAND))
+                               *command))
         attempted["candidate"] = True
         ids["candidate"], _ = _create_run_container(resource_names["candidate"], run_id,
                                                       "candidate", candidate_args, journal)
@@ -1393,7 +1427,7 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path | None, key_path
                                                   postgres_ip=pg_ip,
                                                   archive_sha256=archive_sha256,
                                                   fixture_sha256=entrypoint_sha256,
-                                                  probe_sha256=probe_sha256)
+                                                  probe_sha256=probe_sha256, command=command)
         journal.event("candidate_isolation_verified", container_id=ids["candidate"],
                       image_id=predicate["runner_image_id"], mounts=mount_evidence["mounts"],
                       environment_allowlist=mount_evidence["environment_allowlist"])
@@ -1623,17 +1657,16 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path | None, key_path
     required_ids = (ids["candidate"], ids["postgres"], ids["network"],
                     ids["candidate_firewall"], ids["candidate_probe"],
                     ids["postgres_firewall"], ids["postgres_probe"])
-    if (failure is not None or exit_code != 0 or not cleanup_ok or any(not isinstance(value, str) for value in required_ids)
+    if (failure is not None or (exit_code != 0 and focused is None) or not cleanup_ok or any(not isinstance(value, str) for value in required_ids)
             or not log_sha256 or not mount_evidence or not preflight_evidence
             or not network_probe_evidence or not postgres_probe_evidence):
         return {"run_directory": str(run_dir), "attestation": None,
                 "exit_code": exit_code, "cleanup_confirmed": cleanup_ok,
                 "log_sha256": log_sha256, "failure": failure}
     result = {
-        "gate_argv": DEFAULT_GATE_COMMAND,
-        "gate_command_sha256": DEFAULT_GATE_COMMAND_SHA256,
+        "gate_argv": command,
+        "gate_command_sha256": command_sha256,
         "gate_policy_sha256": predicate["gate_policy_sha256"],
-        "bundle_id": predicate["bundle_id"], "pr_number": predicate["pr_number"],
         "target_ref": predicate["target_ref"], "target_base": predicate["target_base"],
         "candidate_commit": predicate["candidate_commit"], "candidate_tree": predicate["candidate_tree"],
         "candidate_archive_sha256": predicate["candidate_archive_sha256"],
@@ -1690,23 +1723,30 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path | None, key_path
             ],
         },
     }
-    receipt = _sign_receipt(result, key_path, key_id)
+    if focused is None:
+        result.update({"bundle_id": predicate["bundle_id"], "pr_number": predicate["pr_number"]})
+        receipt = _sign_receipt(result, key_path, key_id)
+    else:
+        receipt = gate_policy.sign_focused(result, _policy_authorization, key_path, key_id,
+                                          _pytest_counts(run_dir / "candidate.log"))
     attestation_path = run_dir / "attestation.json"
     _write_receipt(attestation_path, receipt)
     return {"run_directory": str(run_dir), "attestation": str(attestation_path),
             "exit_code": exit_code, "cleanup_confirmed": cleanup_ok,
-            "log_sha256": log_sha256, "failure": failure}
+            "log_sha256": log_sha256, "failure": failure,
+            "validation_passed": receipt["payload"]["verdict"] == "pass" if focused is not None else True}
 
 
 def execute_policy(checkout: Path, predicate_path: Path, policy_path: Path,
                    policy_sha256: str, trust_path: Path, trust_sha256: str, input_path: Path,
-                   key_path: Path, key_id: str, output_dir: Path, timeout: int = 3600) -> dict:
+                   key_path: Path, key_id: str, output_dir: Path, timeout: int = 3600, *,
+                   focused_stage: str | None = None) -> dict:
     global _ACTIVE_POLICY_AUTHORIZATION
     if _ACTIVE_POLICY_AUTHORIZATION is not None:
         raise GateError("Only one policy gate may execute in a supervisor process")
     authorization = gate_policy.authorize(
-        checkout, _read_predicate(predicate_path), key_id, policy_path, policy_sha256,
-        trust_path, trust_sha256, input_path, _runner_provenance(), RESOURCE_LIMITS)
+        checkout, _read_predicate(predicate_path, focused=focused_stage is not None), key_id, policy_path, policy_sha256,
+        trust_path, trust_sha256, input_path, _runner_provenance(), RESOURCE_LIMITS, focused_stage=focused_stage)
     try:
         authorization.start()
         _ACTIVE_POLICY_AUTHORIZATION = authorization
@@ -1741,6 +1781,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--policy-trust", type=Path)
     parser.add_argument("--policy-trust-sha256")
     parser.add_argument("--policy-input", type=Path)
+    parser.add_argument("--focused-stage", choices=["focused-0-unit", "focused-0-long", "focused-1-unit", "focused-1-long"])
     args = parser.parse_args(argv)
     try:
         policy_options = (args.policy_permit, args.policy_permit_sha256, args.policy_trust,
@@ -1753,8 +1794,9 @@ def main(argv: list[str] | None = None) -> int:
             result = execute_policy(args.checkout, args.expected_predicate,
                                     args.policy_permit, args.policy_permit_sha256,
                                     args.policy_trust, args.policy_trust_sha256, args.policy_input,
-                                    args.attestation_key, args.attestation_key_id, args.output_dir, args.timeout)
-        elif any(policy_options):
+                                    args.attestation_key, args.attestation_key_id, args.output_dir, args.timeout,
+                                    focused_stage=args.focused_stage)
+        elif any(policy_options) or args.focused_stage:
             raise GateError("Policy inputs require explicit --execute-policy")
         elif not args.execute:
             plan = prepare(args.checkout, args.expected_predicate,
@@ -1769,7 +1811,8 @@ def main(argv: list[str] | None = None) -> int:
                              args.attestation_key, args.attestation_key_id, args.output_dir, args.timeout)
         print(json.dumps({"executed": True, **result}, sort_keys=True))
         return 0 if (result["exit_code"] == 0 and result["cleanup_confirmed"]
-                     and result["attestation"] and result["failure"] is None) else 1
+                     and result["attestation"] and result["failure"] is None
+                     and result.get("validation_passed", True)) else 1
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError,
             GateError, gate_policy.PolicyError) as error:
         print(json.dumps({"executed": False, "error": type(error).__name__, "detail": str(error)},

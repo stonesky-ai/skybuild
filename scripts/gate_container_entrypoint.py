@@ -20,6 +20,24 @@ import tomllib
 
 UV_VERSION = "0.11.22"
 MAX_ENVIRONMENT_BYTES = 256 * 1024 * 1024
+FULL_COMMAND = ["uv", "run", "--extra", "test", "python", "-m", "pytest", "-q"]
+FOCUSED_COMMANDS = {
+    "petri-client-unit-v1": FULL_COMMAND + ["tests/test_petri_client.py"],
+    "petri-client-long-v1": FULL_COMMAND + ["tests/test_petri_workers.py", "tests/test_manual_cord.py"],
+    "session-scan-unit-v1": FULL_COMMAND + ["tests/test_session_failure_scan.py", "-k",
+                                           "reassembles or prefilter or concatenated or keeps_complete or quoted"],
+    "session-scan-long-v1": FULL_COMMAND + ["tests/test_session_failure_scan.py", "-k",
+                                           "not (reassembles or prefilter or concatenated or keeps_complete or quoted)"],
+}
+
+
+def fixed_command(arguments: list[str] | None) -> list[str]:
+    if arguments is None or arguments == FULL_COMMAND:
+        return list(FULL_COMMAND)
+    for command in FOCUSED_COMMANDS.values():
+        if arguments == command:
+            return list(command)
+    raise RuntimeError("container command is outside the reviewed fixed whitelist")
 
 
 def _prepare_environment(workspace: Path, template: Path) -> None:
@@ -126,7 +144,8 @@ def _dns_is_blocked() -> bool:
         sock.close()
 
 
-def main() -> int:
+def main(arguments: list[str] | None = None) -> int:
+    argv = fixed_command(arguments)
     release_file = Path(os.environ.get("SKYBUILD_GATE_RELEASE_FILE", ""))
     if release_file != Path("/scratch/.firewall-ready"):
         raise RuntimeError("reviewed firewall release path is missing")
@@ -174,7 +193,6 @@ def main() -> int:
         raise RuntimeError("candidate package source resolved outside its scratch copy")
     print(f"GATE_PREFLIGHT_SOURCE_PATH={expected}", flush=True)
     _network_preflight()
-    argv = ["uv", "run", "--extra", "test", "python", "-m", "pytest", "-q"]
     print("GATE_COMMAND_LAUNCH=trusted_exec", flush=True)
     os.execvpe(argv[0], argv, os.environ.copy())
     return 127
@@ -182,7 +200,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
-        raise SystemExit(main())
+        raise SystemExit(main(sys.argv[1:]))
     except Exception as error:
         print(f"GATE_PREFLIGHT_ERROR={type(error).__name__}", file=sys.stderr, flush=True)
         raise SystemExit(125)
