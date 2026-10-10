@@ -1,6 +1,8 @@
 """Bounded dispatcher collection with scratch Git and synthetic REST only."""
 from datetime import datetime, timezone
 import json
+import copy
+import hashlib
 import subprocess
 
 import pytest
@@ -13,6 +15,7 @@ from test_manual_assignment import pinned  # noqa: F401
 @pytest.fixture
 def collection(pinned, tmp_path):
     repo, assignment = pinned
+    assignment.update(schema='manual-work-v2', task_status='ready', task_revision=3)
     subprocess.run(['git', '-C', str(repo), 'checkout', '-qb', assignment['branch']], check=True)
     owned = repo / assignment['owned_paths'][0]
     owned.parent.mkdir(parents=True)
@@ -33,6 +36,12 @@ def collection(pinned, tmp_path):
     class FakeClient:
         messages = [message]
         lose_reply = False
+        task = {'project_id': 'skybuild', 'task_id': assignment['task_id'],
+                'revision': 3, 'status': 'ready', 'metadata': {}}
+
+        def get_task(self, project, task_id):
+            assert project == 'skybuild' and task_id == assignment['task_id']
+            return copy.deepcopy(self.task)
 
         def whoami(self):
             return {'principal_id': assignment['dispatcher'], 'is_admin': False,
@@ -503,3 +512,186 @@ def test_cli_unexpected_reaping_never_signals_unreserved_group(collection, monke
     monkeypatch.setattr(os, 'waitid', externally_reaped)
     monkeypatch.setattr(os, 'killpg', lambda *args: pytest.fail('Unreserved group signaled'))
     assert module.main(cli_args(collection)) == 2
+
+
+@pytest.mark.parametrize('change', ['revision', 'status', 'project', 'task', 'metadata', 'unbound', 'unavailable'])
+def test_stale_legacy_result_retains_evidence_but_blocks_review(collection, change):
+    client, _, kwargs, _, _, actions, *_ = collection
+    if change == 'revision':
+        client.task['revision'] = 4
+    elif change == 'status':
+        client.task['status'] = 'blocked'
+    elif change == 'project':
+        client.task['project_id'] = 'foreign'
+    elif change == 'task':
+        client.task['task_id'] = 'OTHER'
+    elif change == 'metadata':
+        client.task['metadata'] = {'_skybuild_workflow': {'petri': {'schema_version': 2}}}
+    elif change == 'unbound':
+        kwargs['assignment'].update(schema='manual-work-v1')
+        kwargs['assignment'].pop('task_status')
+        kwargs['assignment'].pop('task_revision')
+    else:
+        def unavailable(*args):
+            raise TimeoutError('private transport details')
+        client.get_task = unavailable
+    output = collect(collection)
+    assert output['routing'] == 'owner-attention' and output['review_required'] is False
+    assert 'private transport' not in json.dumps(output)
+    assert kwargs['destination'].exists() and len(actions) == 1
+
+
+@pytest.fixture
+def submitted_collection(collection, tmp_path):
+    from skybuild.workflow import TaskToken, Place
+    client, _, kwargs, result, *_ = collection
+    assignment = kwargs['assignment']
+    claimed = TaskToken(project_id='skybuild', task_id=assignment['task_id'], place=Place.WORKING,
+                        revision=4, attempt_id='attempt-001', claim_fence=1, input_generation=7,
+                        definition_revision=2, policy_version='policy-1',
+                        source_head=assignment['base_sha'], target_base=assignment['base_sha']).to_dict()
+    receipt = {name: claimed[name] for name in ('attempt_id', 'claim_fence', 'input_generation',
+                                               'definition_revision', 'policy_version')}
+    receipt.update(source_head=result['head_sha'], source_branch='refs/heads/' + assignment['branch'],
+                   target_base=assignment['base_sha'])
+    submitted = {**claimed, **receipt, 'input_generation': 8, 'revision': 5, 'place': 'validating'}
+    task = {'project_id': 'skybuild', 'task_id': assignment['task_id'], 'revision': 5,
+            'status': 'in-progress', 'metadata': {'_skybuild_workflow': {
+                'petri': {'schema_version': 1, 'token': submitted}}}}
+    state = {'schema': 'manual-petri-claim-v1', 'project_id': 'skybuild', 'worker': assignment['worker'],
+             'assignment_id': assignment['assignment_id'], 'task_id': assignment['task_id'],
+             'expected_revision': 3,
+             'assignment_sha256': hashlib.sha256(json.dumps(assignment, sort_keys=True).encode()).hexdigest(),
+             'token': claimed, 'claim': {'holder': assignment['worker'], 'held': True, 'fence': 1, 'task_revision': 4}}
+    intent = {'body': receipt, 'expected_revision': 4, 'idempotency_key': 'submit-key'}
+    binding = tmp_path / 'assignment.workflow.json'
+    intent_path = binding.with_name(binding.name + '.submit')
+    for path, value in ((binding, state), (intent_path, intent)):
+        path.write_text(json.dumps(value))
+        path.chmod(0o600)
+    kwargs['workflow_binding'] = binding
+    client.task = task
+    client.workflow = {'token': submitted}
+    client.history = [{'project_id': 'skybuild', 'task_id': assignment['task_id'],
+                       'actor': assignment['worker'], 'operation': 'workflow.submit', 'revision': 5,
+                       'event_facts': {'author_output_receipt': receipt}, 'after_state': copy.deepcopy(task)}]
+    reads = []
+
+    def history(project, task_id, *, limit, offset):
+        assert (project, task_id, limit, offset) == ('skybuild', assignment['task_id'], 1, intent['expected_revision'])
+        reads.append('history')
+        return copy.deepcopy(client.history)
+
+    def workflow(project, task_id):
+        reads.append('workflow')
+        return copy.deepcopy(client.workflow)
+
+    client.task_history = history
+    client.task_workflow = workflow
+    return collection, state, intent, reads
+
+
+def test_petri_submission_advances_revision_and_generation_without_stale_rejection(submitted_collection):
+    collection, _, _, reads = submitted_collection
+    output = collect(collection)
+    assert output['routing'] == 'queue-independent-review' and output['review_required'] is True
+    assert reads == ['history', 'workflow']
+
+
+@pytest.mark.parametrize('field,value', [
+    ('attempt_id', 'other-attempt'), ('claim_fence', 2), ('input_generation', 9),
+    ('definition_revision', 3), ('policy_version', 'policy-2'), ('source_head', 'f' * 40),
+    ('source_branch', 'refs/heads/task/other'), ('target_base', 'e' * 40),
+    ('place', 'hold'), ('pending_action', 'reconcile'), ('superseded', True),
+])
+def test_petri_stale_inputs_and_pending_effects_never_queue_review(submitted_collection, field, value):
+    collection, *_ = submitted_collection
+    client, _, kwargs, _, _, actions, *_ = collection
+    client.task['metadata']['_skybuild_workflow']['petri']['token'][field] = value
+    output = collect(collection)
+    assert output['routing'] == 'owner-attention' and output['review_required'] is False
+    assert kwargs['destination'].exists() and len(actions) == 1
+
+
+@pytest.mark.parametrize('change', ['missing', 'public', 'symlink', 'fingerprint', 'holder', 'fence',
+                                    'intent', 'journal', 'actor', 'unsubmitted', 'race', 'malformed'])
+def test_petri_requires_private_durable_binding_and_authoritative_submission(submitted_collection, change):
+    collection, state, intent, _ = submitted_collection
+    client, _, kwargs, *_ = collection
+    binding = kwargs['workflow_binding']
+    if change == 'missing':
+        kwargs['workflow_binding'] = None
+    elif change == 'public':
+        binding.chmod(0o644)
+    elif change == 'symlink':
+        saved = binding.with_suffix('.saved')
+        binding.rename(saved)
+        binding.symlink_to(saved)
+    elif change in {'fingerprint', 'holder', 'fence'}:
+        if change == 'fingerprint':
+            state['assignment_sha256'] = '0' * 64
+        elif change == 'holder':
+            state['claim']['holder'] = 'foreign'
+        else:
+            state['claim']['fence'] = 2
+        binding.write_text(json.dumps(state))
+    elif change == 'intent':
+        intent['body']['source_head'] = 'f' * 40
+        binding.with_name(binding.name + '.submit').write_text(json.dumps(intent))
+    elif change == 'journal':
+        client.history[0]['event_facts']['author_output_receipt']['input_generation'] = 99
+    elif change == 'actor':
+        client.history[0]['actor'] = 'foreign'
+    elif change == 'unsubmitted':
+        client.history = []
+    elif change == 'malformed':
+        client.workflow['token']['revision'] = True
+    else:
+        original = client.get_task
+        count = [0]
+        def race(*args):
+            count[0] += 1
+            task = original(*args)
+            if count[0] == 2:
+                task['revision'] += 1
+            return task
+        client.get_task = race
+    output = collect(collection)
+    assert output['routing'] == 'owner-attention' and output['review_required'] is False
+    assert kwargs['destination'].exists()
+
+
+def test_freshness_deadline_expiry_keeps_evidence_without_receipt(collection):
+    client, _, kwargs, _, _, actions, _, now, *_ = collection
+    original = client.get_task
+    def late(*args):
+        now[0] = 2001
+        return original(*args)
+    client.get_task = late
+    with pytest.raises(ResultError, match='deadline'):
+        collect(collection)
+    assert kwargs['destination'].exists() and actions == []
+
+
+def test_later_coherent_attempt_cannot_attach_to_stale_assignment(submitted_collection):
+    collection, state, intent, reads = submitted_collection
+    client, _, kwargs, *_ = collection
+    state['token']['revision'] = state['claim']['task_revision'] = 8
+    intent['expected_revision'] = 8
+    binding = kwargs['workflow_binding']
+    binding.write_text(json.dumps(state))
+    binding.with_name(binding.name + '.submit').write_text(json.dumps(intent))
+    client.history[0]['revision'] = 9
+    for task in (client.task, client.history[0]['after_state']):
+        task['revision'] = 9
+        task['metadata']['_skybuild_workflow']['petri']['token']['revision'] = 9
+    client.workflow['token']['revision'] = 9
+    output = collect(collection)
+    assert output['routing'] == 'owner-attention' and output['review_required'] is False
+    assert kwargs['destination'].exists() and reads == []
+
+
+def test_cli_accepts_explicit_workflow_binding(collection):
+    from skybuild.manual_result import _parse_args
+    args = _parse_args(cli_args(collection) + ['--workflow-binding', '/tmp/private.workflow.json'])
+    assert str(args.workflow_binding) == '/tmp/private.workflow.json'
