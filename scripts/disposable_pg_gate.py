@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 import time
 from uuid import uuid4
+from _project_environment import project_environment
 
 
 class ArtifactError(RuntimeError):
@@ -233,7 +234,7 @@ def run_gate(checkout: Path, timeout: float, image: str, command: list[str],
                 raise RuntimeError("Container port must bind only to localhost")
             port = int(match[1])
             progress("creating_databases")
-            test_env = os.environ.copy()
+            test_env = project_environment(checkout)
             # Never inherit a live application DSN into the gate.
             test_env.pop("SKYBUILD_DSN", None)
             test_env.pop("SKYBUILD_ROLE_ADMIN_DSN", None)

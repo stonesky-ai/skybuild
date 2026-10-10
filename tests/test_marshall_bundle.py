@@ -1,5 +1,6 @@
 """One-shot marshall checks use real isolated Git, explicit reviews, and fake REST."""
 import json
+from contextlib import nullcontext
 import os
 import subprocess
 from pathlib import Path
@@ -12,6 +13,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import marshall_bundle as marshall
 from skybuild.bundling import BundlePlanningError
 from test_prepare_bundle import repository, git  # noqa: F401
+
+
+ADMISSION_DETAILS = [
+    ('Available memory is below the required 6 GiB reserve', 'Available memory is below the required 6 GiB reserve'),
+    ('Available memory cannot be measured', 'Available memory cannot be measured'),
+    ('Remote refs moved or are missing; freeze new inputs', 'Remote refs moved or are missing; freeze new inputs'),
+    ('private command stderr: token=must-not-appear', None),
+    ('Available memory is below the required 6 GiB reserve\nprivate token', None),
+]
 
 
 class API:
@@ -75,6 +85,42 @@ def test_five_related_heads_prepare_without_publication(catalog):
         git(candidate, "merge-base", "--is-ancestor", member["head"], "HEAD")
     with pytest.raises(BundlePlanningError, match="new output"):
         invoke(inputs)
+
+
+@pytest.mark.parametrize('detail,expected', ADMISSION_DETAILS)
+def test_admission_diagnostic_is_static_and_preserved_without_candidate(catalog, monkeypatch, detail, expected):
+    inputs = catalog(['one'])
+    def refuse():
+        raise marshall.preparation.PreparationError(detail)
+    monkeypatch.setattr(marshall.preparation, '_reserve', refuse)
+    with pytest.raises(marshall.preparation.PreparationError):
+        invoke(inputs, prepare_next=True)
+    report = json.loads((inputs[2] / 'report.json').read_text())
+    assert report.get('error_detail') == expected
+    assert report['error'] == 'PreparationError'
+    assert not report['gate_passed'] and not report['published'] and report['prepared'] is None
+    assert not (inputs[2] / 'next/candidate').exists()
+    assert 'must-not-appear' not in json.dumps(report) and 'private token' not in json.dumps(report)
+
+
+@pytest.mark.parametrize('detail,expected', ADMISSION_DETAILS)
+def test_cli_admission_diagnostic_suppresses_untrusted_errors(monkeypatch, capsys, tmp_path, detail, expected):
+    monkeypatch.setattr(sys, 'argv', ['marshall_bundle.py', '--checkout', str(tmp_path),
+        '--catalog', str(tmp_path / 'catalog.json'), '--output', str(tmp_path / 'output'),
+        '--token-file', str(tmp_path / 'token'), '--url', 'https://private.invalid',
+        '--project', 'skybuild', '--principal', 'owner'])
+    monkeypatch.setattr(marshall, '_private_endpoint', lambda *args: None)
+    monkeypatch.setattr(marshall, '_token_from_file', lambda *args: 'credential-must-not-appear')
+    monkeypatch.setattr(marshall, 'Client', lambda *args, **kwargs: nullcontext(API([])))
+    def refuse(*args, **kwargs):
+        raise marshall.preparation.PreparationError(detail)
+    monkeypatch.setattr(marshall, 'marshall', refuse)
+    assert marshall.main() == 1
+    output = capsys.readouterr().out
+    report = json.loads(output)
+    assert report.get('error_detail') == expected
+    assert not report['ok'] and report['error'] == 'PreparationError'
+    assert all(secret not in output for secret in ('must-not-appear', 'private token'))
 
 
 def test_blocked_and_in_flight_tasks_do_not_prepare_or_fetch(catalog):
@@ -151,6 +197,7 @@ def test_cli_imports_its_own_checkout_with_a_shared_interpreter(tmp_path):
     script = Path(marshall.__file__).resolve()
     environment = dict(os.environ)
     environment.pop("PYTHONPATH", None)
+    environment["PYTHONSAFEPATH"] = "1"
     result = subprocess.run([sys.executable, str(script), "--help"], cwd=tmp_path,
                             env=environment, text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr

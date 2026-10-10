@@ -5,9 +5,9 @@ Each section retains its original ADR ID. Status applies to the decision, not im
 <a id="adr-0002"></a>
 ## ADR 0002: Task bootstrap and authority transition
 
-**Accepted ledger and destination; cutover mechanics proposed, 2026-10-08.** Keep `mastertodo.md`, `deferred.md` and `alreadydone.md` as sole SkyBuild task authority until an explicit validated cutover. Preserve stable IDs and one record per ID. Provide project-scoped tasks, full briefs/history and minimal durable Cord before distributed execution; messages grant no execution authority.
+**Accepted destination and verified cutover, 2026-10-09.** The three Markdown ledgers were sole SkyBuild task authority until the validated 2026-10-09 cutover. Preserve stable IDs and one record per ID. The deployed API provides project-scoped tasks, full briefs/history and minimal durable Cord; messages grant no execution authority.
 
-Proposed cutover: freeze source commit/hash, import all three ledgers losslessly through a disposable rehearsal into PostgreSQL, validate, record the switch and make Markdown read-only exports. API/PostgreSQL then becomes sole editable task authority. Do not use SkyKeep's queue or dual-write Markdown/API. Preserve completed/deferred evidence; after first API mutation, recover by reconciling API history, not restoring files blindly. Legacy domains migrate separately under explicit authority. Architecture sections 3–7.
+The cutover froze source commit `d79d2e1947d2c8e9edb577ab5f5093edfa3c94e3`, rehearsed the lossless import, then atomically imported 38 tasks and switched the authority receipt to `api`. The authenticated owner API verified 38 imported history events and survived the promoted service restart; an authorized task update advanced its revision. The Markdown paths now contain retirement notices, with frozen source preserved in Git history. PostgreSQL through the API is sole editable SkyBuild task authority. Do not use SkyKeep's queue or dual-write Markdown/API. Preserve completed/deferred evidence; after an API mutation, recover by reconciling API history, not restoring files blindly. Legacy domains migrate separately under explicit authority. Architecture sections 3–7.
 
 <a id="adr-0029"></a>
 ## ADR 0029: Task is the canonical work term
