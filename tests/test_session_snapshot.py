@@ -3,6 +3,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from scripts import session_snapshot
 
 
@@ -177,3 +179,79 @@ def test_run_bounded_caps_output_and_stops_timeout():
     )
     assert state == "timeout"
     assert output == ""
+
+
+@pytest.mark.parametrize("url", [
+    "http://jeltz.tail991ac1.ts.net:8443",
+    "https://attacker.example:8443",
+    "https://other.tail991ac1.ts.net:8443",
+    "https://user:password@jeltz.tail991ac1.ts.net:8443",
+    "https://jeltz.tail991ac1.ts.net:8443/path",
+])
+def test_snapshot_rejects_untrusted_url_before_reading_token_or_creating_client(
+    tmp_path, monkeypatch, url,
+):
+    def unexpected(*args, **kwargs):
+        raise AssertionError("untrusted endpoint must fail before credentials or client")
+
+    monkeypatch.setattr(session_snapshot, "_token_from_file", unexpected)
+    monkeypatch.setattr(session_snapshot, "Client", unexpected)
+    monkeypatch.setattr(session_snapshot, "checkout_snapshot", lambda _path: {"status": "available"})
+
+    result = session_snapshot.snapshot(
+        checkout=tmp_path, project_id="skybuild", task_id="TASK-1", url=url,
+        token_file=tmp_path / "owner-token",
+    )
+
+    assert result["task"] == {"status": "unavailable", "reason": "api_endpoint_untrusted"}
+
+
+def test_snapshot_accepts_only_pinned_hostname_with_private_address(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(session_snapshot, "_resolved_addresses", lambda _host: ["100.64.0.7"])
+    monkeypatch.setattr(session_snapshot, "_token_from_file", lambda _path: "x" * 32)
+    monkeypatch.setattr(session_snapshot, "checkout_snapshot", lambda _path: {"status": "available"})
+
+    class FakeClient:
+        def __init__(self, url, token, **kwargs):
+            seen.update(url=url, token=token, kwargs=kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def task_workflow(self, project_id, task_id):
+            return {"task": {"project_id": project_id, "task_id": task_id,
+                              "revision": 1, "status": "ready"},
+                    "token": {"place": "ready"}, "available_actions": []}
+
+    monkeypatch.setattr(session_snapshot, "Client", FakeClient)
+    result = session_snapshot.snapshot(
+        checkout=tmp_path, project_id="skybuild", task_id="TASK-1",
+        url="https://jeltz.tail991ac1.ts.net:8443",
+        token_file=tmp_path / "owner-token",
+    )
+
+    assert result["task"]["status"] == "available"
+    assert seen["url"] == "https://jeltz.tail991ac1.ts.net:8443"
+    assert seen["kwargs"] == {"retries": 0, "timeout": 5, "trust_env": False, "ca_file": None}
+
+
+@pytest.mark.parametrize("operation", ["checkout", "codegraph"])
+def test_path_resolution_failure_returns_unavailable_without_exception_text(monkeypatch, operation):
+    class BrokenPath:
+        def expanduser(self):
+            return self
+
+        def resolve(self):
+            raise OSError("SECRET-PATH-ERROR")
+
+    if operation == "checkout":
+        result = session_snapshot.checkout_snapshot(BrokenPath())
+    else:
+        result = session_snapshot.codegraph_snapshot(BrokenPath(), "TaskToken")
+
+    assert result == {"status": "unavailable", "reason": "checkout_path_invalid"}
+    assert "SECRET-PATH-ERROR" not in json.dumps(result)

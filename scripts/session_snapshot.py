@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import selectors
 import shutil
 import signal
@@ -14,9 +15,12 @@ import subprocess
 import sys
 import time
 
+import httpx
+
 from skybuild.client import Client
 from skybuild.contracts import valid_identifier
-from skybuild.fleet_preflight import _token_from_file
+from skybuild.fleet_preflight import _resolved_addresses, _token_from_file
+from skybuild.manual_dispatch import DispatchError, _private_endpoint
 
 
 COMMAND_TIMEOUT = 5.0
@@ -24,6 +28,8 @@ COMMAND_OUTPUT_LIMIT = 16_384
 MAX_DIRTY_PATHS = 20
 MAX_VALIDATIONS = 10
 MAX_TEXT = 2_000
+DEFAULT_API_HOSTNAME = "jeltz.tail991ac1.ts.net"
+API_PORT = 8443
 
 
 def _clean_command_env() -> dict[str, str]:
@@ -114,8 +120,35 @@ def _verify_checkout(checkout: Path) -> Path | None:
     return verified if verified == checkout else None
 
 
+def _resolve_path(path: Path) -> Path | None:
+    try:
+        return path.expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _trusted_api_url(url: str, expected_hostname: str = DEFAULT_API_HOSTNAME) -> str | None:
+    """Pin the credential-bearing request to one private HTTPS service root."""
+    label = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    if (not isinstance(expected_hostname, str) or len(expected_hostname) > 253
+            or not re.fullmatch(rf"(?:{label}\.)+ts\.net", expected_hostname)):
+        return None
+    try:
+        endpoint = httpx.URL(url)
+        if endpoint.host != expected_hostname or endpoint.port != API_PORT:
+            return None
+    except (httpx.InvalidURL, TypeError, ValueError):
+        return None
+    try:
+        return _private_endpoint(url, _resolved_addresses)
+    except (DispatchError, OSError, ValueError):
+        return None
+
+
 def checkout_snapshot(checkout: Path) -> dict:
-    requested = checkout.expanduser().resolve()
+    requested = _resolve_path(checkout)
+    if requested is None:
+        return {"status": "unavailable", "reason": "checkout_path_invalid"}
     verified = _verify_checkout(requested)
     if verified is None:
         return {"status": "unavailable", "reason": "checkout_verification_failed"}
@@ -222,9 +255,11 @@ def fetch_task_snapshot(client: Client, project_id: str, task_id: str) -> dict:
 def codegraph_snapshot(checkout: Path, query: str | None) -> dict:
     if not query:
         return {"status": "not_requested"}
-    if len(query) > 1_000 or "\x00" in query:
+    if not isinstance(query, str) or len(query) > 1_000 or "\x00" in query:
         return {"status": "unavailable", "reason": "query_invalid"}
-    checkout = checkout.expanduser().resolve()
+    checkout = _resolve_path(checkout)
+    if checkout is None:
+        return {"status": "unavailable", "reason": "checkout_path_invalid"}
     index = checkout / ".codegraph"
     if not index.is_dir() or index.is_symlink():
         return {"status": "unavailable", "reason": "index_missing_or_unsafe"}
@@ -262,7 +297,8 @@ def codegraph_snapshot(checkout: Path, query: str | None) -> dict:
 
 def snapshot(*, checkout: Path, project_id: str, task_id: str, url: str,
              token_file: Path, ca_file: Path | None = None,
-             graph_query: str | None = None) -> dict:
+             graph_query: str | None = None,
+             expected_hostname: str = DEFAULT_API_HOSTNAME) -> dict:
     result = {
         "checkout": checkout_snapshot(checkout),
         "task": {"status": "unavailable", "reason": "not_requested"},
@@ -271,9 +307,13 @@ def snapshot(*, checkout: Path, project_id: str, task_id: str, url: str,
     if not valid_identifier(project_id) or not valid_identifier(task_id):
         result["task"] = {"status": "unavailable", "reason": "invalid_identifier"}
         return result
+    trusted_url = _trusted_api_url(url, expected_hostname)
+    if trusted_url is None:
+        result["task"] = {"status": "unavailable", "reason": "api_endpoint_untrusted"}
+        return result
     try:
         token = _token_from_file(token_file)
-        with Client(url, token, retries=0, timeout=5, trust_env=False, ca_file=ca_file) as client:
+        with Client(trusted_url, token, retries=0, timeout=5, trust_env=False, ca_file=ca_file) as client:
             result["task"] = fetch_task_snapshot(client, project_id, task_id)
     except Exception:
         result["task"] = {"status": "unavailable", "reason": "credentials_or_api_unavailable"}
@@ -288,11 +328,14 @@ def main() -> int:
     parser.add_argument("--url", required=True)
     parser.add_argument("--token-file", type=Path, required=True)
     parser.add_argument("--ca-file", type=Path)
+    parser.add_argument("--expected-hostname", default=DEFAULT_API_HOSTNAME,
+                        help="Exact private API hostname pin (default: %(default)s)")
     parser.add_argument("--graph-query", help="Optional caller-supplied query; requires existing exact-checkout index")
     args = parser.parse_args()
     print(json.dumps(snapshot(checkout=args.checkout, project_id=args.project, task_id=args.task_id,
                               url=args.url, token_file=args.token_file, ca_file=args.ca_file,
-                              graph_query=args.graph_query), sort_keys=True))
+                              graph_query=args.graph_query,
+                              expected_hostname=args.expected_hostname), sort_keys=True))
     return 0
 
 
