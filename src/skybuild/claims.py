@@ -147,6 +147,9 @@ class Claims:
         if connection.execute('SELECT 1 FROM task_effects WHERE project_id = %s AND task_id = %s '
                               'AND exposure_held LIMIT 1', (project_id, task_id)).fetchone():
             raise DomainError('effect_conflict', 'Task has unresolved effect exposure', 409)
+        from .task_usage import unresolved_usage_exists
+        if unresolved_usage_exists(connection, project_id, task_id):
+            raise DomainError('usage_conflict', 'Task or its source lineage has unresolved usage exposure', 409)
 
     def claim_history(self, principal, project_id, task_id, *, limit=100, offset=0):
         from .store import _public

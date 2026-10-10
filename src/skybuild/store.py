@@ -20,6 +20,7 @@ from .observations import Observations
 from .execution_status import ExecutionStatus
 from .board import BoardQueries
 from .task_usage import TaskUsageHistory
+from .task_usage import unresolved_usage_exists
 
 
 OPERATIONS = frozenset({'tasks:read', 'tasks:write', 'tasks:claim', 'tasks:usage-record',
@@ -553,6 +554,8 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries, T
             "SELECT 1 FROM task_effects WHERE project_id = %s AND task_id = %s AND exposure_held "
             "UNION ALL SELECT 1 FROM cpu_reservations WHERE project_id = %s AND task_id = %s AND state = 'reserved' LIMIT 1",
             (task['project_id'], task['task_id'], task['project_id'], task['task_id'])).fetchone()
+        context['effects_resolved'] = context['effects_resolved'] and not unresolved_usage_exists(
+            connection, task['project_id'], task['task_id'])
         claim = connection.execute('SELECT *, lease_until > clock_timestamp() AS live FROM task_claims '
                                    'WHERE project_id = %s AND task_id = %s FOR UPDATE',
                                    (task['project_id'], task['task_id'])).fetchone()
@@ -1380,13 +1383,8 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries, T
             'SELECT 1 FROM task_effects WHERE project_id = %s AND task_id = %s '
             'AND exposure_held LIMIT 1', (project_id, task_id)).fetchone():
             raise DomainError('effect_conflict', 'Task has unresolved effect exposure', 409)
-        if connection.execute(
-            "SELECT 1 FROM task_usage_events u WHERE u.project_id = %s AND u.task_id = %s "
-            "AND u.event_kind = 'uncertain' AND NOT EXISTS ("
-            "SELECT 1 FROM task_usage_events r WHERE r.resolves_event_id = u.event_id) LIMIT 1",
-            (project_id, task_id),
-        ).fetchone():
-            raise DomainError('usage_conflict', 'Task has unresolved usage exposure', 409)
+        if unresolved_usage_exists(connection, project_id, task_id):
+            raise DomainError('usage_conflict', 'Task or its source lineage has unresolved usage exposure', 409)
 
     def create_effect_intent(self, principal, project_id, task_id, body, expected_revision, idempotency_key, *, claim_fence=None):
         """Persist intent only. Caller-supplied references never grant launch authority."""

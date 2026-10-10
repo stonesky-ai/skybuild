@@ -240,6 +240,82 @@ def test_split_and_merge_surface_deduplicated_original_usage(store, actors):
     assert history["totals"][0]["uncertain"] == "0"
 
 
+@pytest.mark.parametrize("replacement_kind", ["split", "merge"])
+def test_late_uncertainty_on_replaced_source_blocks_lineage_descendants(store, actors, replacement_kind):
+    project, people = actors
+    owner = people["owner"]
+    recorder = _principal(store, project, "late-usage-recorder", {"tasks:usage-record"})
+    source_a = create(store, owner, project, "late-source-a", acceptance_criteria=["criterion-a"])
+    attempt_a, claim_a = _claim_attempt(store, people, project, source_a)
+    source_a = _release_attempt(store, people, project, attempt_a, claim_a)
+
+    if replacement_kind == "split":
+        target_id = "late-split-child"
+        store.split_task(
+            owner, project, source_a["task_id"],
+            [
+                {"task_id": target_id, "title": "Child A", "description": "First scope",
+                 "acceptance_criteria": ["criterion-a"], "dependencies": []},
+                {"task_id": "late-split-sibling", "title": "Child B", "description": "Second scope",
+                 "acceptance_criteria": ["criterion-b"], "dependencies": []},
+            ],
+            {}, "Split before delayed provider result", source_a["revision"], "late-split",
+        )
+    else:
+        source_b = create(store, owner, project, "late-source-b", acceptance_criteria=["criterion-b"])
+        attempt_b, claim_b = _claim_attempt(store, people, project, source_b)
+        source_b = _release_attempt(store, people, project, attempt_b, claim_b)
+        target_id = "late-merged-target"
+        store.merge_tasks(
+            owner, project, [source_a["task_id"], source_b["task_id"]],
+            {"task_id": target_id, "title": "Merged", "description": "Combined scope",
+             "acceptance_criteria": ["criterion-a", "criterion-b"], "dependencies": []},
+            [], {source_a["task_id"]: source_a["revision"], source_b["task_id"]: source_b["revision"]},
+            "Merge before delayed provider result", "late-merge",
+        )
+
+    target, target_claim = _claim_attempt(
+        store, people, project, store.get_task(owner, project, target_id))
+    token = store.workflow_token(target)
+    delayed = store.record_task_usage(
+        recorder, project, source_a["task_id"],
+        _usage(attempt_a, kind="uncertain", operation="late-operation-" + replacement_kind,
+               quantity="4.25"),
+        "late-record-" + replacement_kind,
+    )
+    target = store.get_task(owner, project, target_id)
+    history = store.task_usage_history(owner, project, target_id)
+    assert delayed["task_id"] == source_a["task_id"]
+    assert [event["event_id"] for event in history["events"]] == [delayed["event_id"]]
+    assert history["totals"][0]["uncertain"] == "4.25"
+
+    store.configure_cpu_pool(people["owner"], project, 1, True, 0,
+                             "late-pool-" + replacement_kind, reason="Test lineage exposure guard")
+    store.set_cpu_local_control(people["owner"], project, True, 1,
+                                "late-local-" + replacement_kind, reason="Test lineage exposure guard")
+    _error("usage_conflict", lambda: store.reserve_cpu(
+        people["worker"], project, target_id, "late-action-" + replacement_kind,
+        token.attempt_id, 1, target["revision"], token.input_generation,
+        target_claim["fence"], 1, 2))
+    receipt = {
+        "source_head": "a" * 40,
+        "target_base": "b" * 40,
+        "source_branch": "refs/heads/task/late-usage-test",
+        "attempt_id": token.attempt_id,
+        "claim_fence": token.claim_fence,
+        "input_generation": token.input_generation,
+        "definition_revision": token.definition_revision,
+        "policy_version": token.policy_version,
+    }
+    _error("workflow_conflict", lambda: store.workflow_transition(
+        people["worker"], project, target_id, "submit", receipt,
+        target["revision"], "blocked-late-submit-" + replacement_kind))
+    _error("usage_conflict", lambda: store.release_claim(
+        people["worker"], project, target_id, target_claim["fence"],
+        target["revision"], "blocked-late-release-" + replacement_kind,
+        reason="Late source exposure remains unresolved"))
+
+
 @pytest.mark.parametrize("statement", [
     "UPDATE skybuild.task_usage_events SET reason = 'rewritten' WHERE project_id = %s",
     "DELETE FROM skybuild.task_usage_events WHERE project_id = %s",

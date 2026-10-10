@@ -17,6 +17,19 @@ _FIELDS = frozenset({
 })
 
 
+def unresolved_usage_exists(connection, project_id, task_id):
+    """Whether this task or any replaced source has unresolved uncertainty."""
+    return bool(connection.execute(
+        "WITH RECURSIVE ancestors(task_id) AS ("
+        "SELECT %s::text UNION SELECT l.source_task_id FROM task_lineage l "
+        "JOIN ancestors a ON l.target_task_id = a.task_id WHERE l.project_id = %s) "
+        "SELECT 1 FROM task_usage_events u WHERE u.project_id = %s "
+        "AND u.task_id IN (SELECT task_id FROM ancestors) AND u.event_kind = 'uncertain' "
+        "AND NOT EXISTS (SELECT 1 FROM task_usage_events r WHERE r.resolves_event_id = u.event_id) LIMIT 1",
+        (task_id, project_id, project_id),
+    ).fetchone())
+
+
 def _text(value, name, *, maximum=200):
     if (not isinstance(value, str) or not value.strip() or len(value) > maximum
             or "\x00" in value):
@@ -84,6 +97,9 @@ class TaskUsageHistory:
             actor = self._authorize(connection, principal, project_id, "tasks:usage-record")
 
             def mutation():
+                # Structural edits, claims and usage writes share graph-lock then
+                # task-row-lock order so late source events cannot race lineage.
+                self._graph_lock(connection, project_id)
                 self._task(connection, project_id, task_id, lock=True)
                 connection.execute(
                     "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
