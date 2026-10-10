@@ -1,12 +1,42 @@
 # SkyBuild implementation plan
 
-Derived from architecture revision A41, 2026-10-09. Status: MVP sequence refined; the launch-free task API and frozen-ledger cutover are complete for the SkyBuild project. Fleet activation and model execution remain separate boundaries. [architecture.md](architecture.md) governs. This plan supersedes the delivery section of the dated combined revision 2 plan.
+Derived from architecture revision A42, 2026-10-09. Status: MVP sequence refined; the launch-free task API and frozen-ledger cutover are complete for the SkyBuild project. Fleet activation and model execution remain separate boundaries. [architecture.md](architecture.md) governs. This plan supersedes the delivery section of the dated combined revision 2 plan.
 
 ## Planning discipline
 
 When architecture changes, update the affected work areas, dependencies, interfaces, acceptance and task records here in the same revision. Keep detail proportional to the next decision. Each major item should have a compact brief with exact scope, fixed interfaces, completion evidence and a bounded correction allowance when selected for implementation. Task IDs below originated in the frozen [ledger snapshot](mastertodo.md); this plan is not a second queue, and the API is now authoritative.
 
 The selected [bootstrap brief](implementation/bootstrap.md) fixes the first API/Store contract and manually assigned work scopes. Introduce migration or execution area plans when those boundaries are ready for sustained work and need independent review. Keep this parent plan as the sequence and boundary map, and link each area's governing architecture sections.
+
+## Petri workflow project (priority 2)
+
+Parent task: `SKYBUILD-PETRI`. Architecture section 5 governs the [Petri plan](petri_workflow.md).
+The owner approved implementation through subtasks, in parallel where dependencies permit.
+Use seven places and carry validation results on the task token.
+Confirmed validation or integration failures return the task to Ready.
+Preserve the existing task API, journal, dependencies, claims and effect controls.
+
+Implement four small classes and one transition table in the existing Store/API interfaces.
+Then connect existing producers and add the seven-column workbench.
+Keep SNAKES optional. Do not add another database, event bus or scheduler.
+
+The API contains 12 implementation tasks at priority 2.
+Each task lists its author model, reviewer model and estimated generation time.
+Generation requires 3 hours 50 minutes to 6 hours of total model work.
+The serial build budget is approximately 8.5–14.5 hours, including review, tests, corrections and one combined gate.
+Slot waits, missing components and production promotion are additional.
+These estimates need calibration from actual results.
+
+Tasks 03 and 04 can generate in parallel after task 02.
+Tasks 06, 07, 08, 09 and 10 can generate in parallel after task 05.
+Task 11 waits for tasks 09 and 10.
+Task 12 joins all implementation branches.
+The ideal generation-only critical path is 2 hours 10 minutes to 3 hours 25 minutes.
+This range excludes review, tests, corrections and integration.
+
+This plan does not implement or deploy the software.
+Existing components keep their task identity and ownership.
+Petri changes their interfaces where necessary instead of repeating their scope.
 
 ## MVP delivery target
 

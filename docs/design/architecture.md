@@ -1,6 +1,6 @@
 # SkyBuild architecture
 
-Design revision: A41, 2026-10-09. Status: evolving planning draft. Owner-confirmed decisions are distinguished below from proposed mechanics and unanswered policy choices. This revision supersedes the dated combined SkyBuild revision 2 plan. The owner requested successive refinement for compact components, limited premium tokens, self-hosting and optional local/rented inference. The owner authorizes repository implementation and isolated validation toward the parallel MVP. The launch-free task API is deployed and owns the imported SkyBuild ledger; worker launch, fleet activation, unqualified inference and paid resource starts retain separate controls.
+Design revision: A42, 2026-10-09. Status: evolving planning draft. Owner-confirmed decisions are distinguished below from proposed mechanics and unanswered policy choices. This revision supersedes the dated combined SkyBuild revision 2 plan. The owner requested successive refinement for compact components, limited premium tokens, self-hosting and optional local/rented inference. The owner authorizes repository implementation and isolated validation toward the parallel MVP. The launch-free task API is deployed and owns the imported SkyBuild ledger; worker launch, fleet activation, unqualified inference and paid resource starts retain separate controls.
 
 Reading map: sections 1–7 define the bootstrap and extraction boundary; 8–10 define later controlled execution; 13–16 refine compactness, routing, host lifecycle and building SkyBuild itself. Section 17 records failure-driven revisions. A bounded assignment loads the governing sections it needs, not every research report.
 
@@ -188,7 +188,23 @@ Initially, task assignment is a coordination hint for one manually selected exec
 
 ### Task workflow, append-only journal and control page
 
-Owner-confirmed: every unfinished task must have a known next action or specific blocker and a responsible component/person. Code completion is a phase, not evidence that the task can merge. Model the lifecycle as an explicit state machine with a flowchart and guarded action-to-state transitions, comparable to a Jira workflow. [Task workflow](task_workflow.md) derives from this section and defines the proposed phases and transition table; [ADR 0031](../adr/tasks.md#adr-0031) records the accepted requirements. State-machine mechanics remain proposed.
+Owner-confirmed on 2026-10-09: the project name is **Petri**, at **priority 2**.
+Use exactly seven places: Ready, Working, Validating, Integrating, Done, Deferred and Hold.
+The normal path is Ready, Working, Validating, Integrating, Done.
+Unit tests, scans, long tests, code review and needs rebase are validation stages carried by the token.
+Confirmed validation and integration failures return the task to Ready with the fault and next action.
+Each unfinished task needs a next action or named blocker and a responsible party.
+Code completion alone does not mean accepted completion.
+
+[Task workflow](task_workflow.md) and the [Petri plan](petri_workflow.md) define transitions, evidence, dependencies and the workbench.
+[ADR 0031](../adr/tasks.md#adr-0031) retains the journal requirements.
+The owner approves implementation through subtasks, in parallel where dependencies permit.
+The implementation and rollout remain proposed.
+
+Kernel behavior and persistence can generate in parallel after their shared interface is accepted.
+Independent adapters and board work can then generate together after the guarded API contract is accepted.
+The Petri plan assigns shared ownership and joins all branches before final acceptance.
+Parallel generation does not change runtime transition order or launch authority.
 
 The core control page lists outstanding tasks, status/phase, next action, blocker, owner, evidence freshness and bundle/attempt. It supports editing description, scope, definition of done and considerations; requesting rework or reassessment; splitting/merging tasks; changing dependencies; and deferring until a date or major milestone. Show the current definition and journal together, with affected reviews/tests/readiness made stale when their inputs change. A bounded model planning scan may propose considerations, missing requirements, decomposition, dependencies and estimates; it cannot silently adopt a new definition, spend authority or dependency graph. Model scanning requires the same qualified profile/budget controls as other inference; basic task management remains usable without it.
 
