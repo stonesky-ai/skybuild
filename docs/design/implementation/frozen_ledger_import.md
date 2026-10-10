@@ -1,6 +1,6 @@
 # Frozen SkyBuild ledger import rehearsal
 
-This records an earlier disposable PostgreSQL rehearsal of SKYBUILD-TASK-CUTOVER. That rehearsal did not switch task authority: its receipt deliberately recorded `authority = markdown`, and Store refused API task writes for the rehearsed project. The later live cutover is complete. As of 2026-10-10, the authenticated SkyBuild API is the sole task authority; `mastertodo.md`, `deferred.md` and `alreadydone.md` contain retirement notices.
+This records an earlier disposable PostgreSQL rehearsal of SKYBUILD-TASK-CUTOVER. That rehearsal did not switch task authority: its receipt deliberately recorded `authority = markdown`, and Store refused API task writes for the rehearsed project. The later live cutover is complete. The 2026-10-09 pilot verification confirmed that the authenticated SkyBuild API is the sole task authority; `mastertodo.md`, `deferred.md` and `alreadydone.md` contain retirement notices.
 
 ## Frozen inputs and mapping
 
