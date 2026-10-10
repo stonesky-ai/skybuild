@@ -82,6 +82,40 @@ def test_restricted_runtime_admin_auth_and_authority_fence(controls):
     assert client.get(base, headers=headers(tokens)).status_code == 403
 
 
+def test_reservation_routes_use_existing_transaction_rules(controls):
+    _, runtime, client, project, people, tokens = controls
+    request = setup(runtime, people, project, task_id='cpu-rest-reservation')
+    base = f'/api/v1/projects/{project}/cpu-reservations'
+    worker_headers = headers(tokens, 'worker')
+    explain = client.post(base + '/explain', headers=worker_headers, json=request)
+    assert explain.status_code == 200
+    assert explain.json()['eligible'] is True
+    assert explain.json()['physical_dispatch_authorized'] is False
+    reserved = client.post(base, headers=worker_headers, json=request)
+    assert reserved.status_code == 200 and reserved.json()['state'] == 'reserved'
+    cancelled = client.post(base + '/' + request['action_id'] + '/cancel', headers=worker_headers,
+                            json={'reason': 'No dispatch was prepared'})
+    assert cancelled.status_code == 200 and cancelled.json()['state'] == 'cancelled'
+    replay = client.post(base, headers=worker_headers, json=request)
+    assert replay.status_code == 200 and replay.json()['state'] == 'cancelled'
+
+
+def test_worker_cannot_prepare_owner_only_cpu_dispatch(controls):
+    _, _, client, project, _, tokens = controls
+    request = {'action_id': 'action-1', 'operation_id': 'operation-1',
+               'profile_id': 'bounded-trusted-cpu-patch-v1', 'host_id': 'host-1',
+               'worker_id': 'worker-1', 'unit_name': 'skybuild-job-' + 'a' * 24 + '.service',
+               'launch_nonce': 'b' * 32, 'source_digest': 'c' * 64,
+               'controller_head': '2' * 40, 'controller_source_digest': '3' * 64,
+               'controller_profile_digest': '4' * 64, 'interpreter_digest': '5' * 64,
+               'permit_digest': 'd' * 64, 'assignment_digest': 'e' * 64,
+               'patch_digest': 'f' * 64, 'argv_digest': '1' * 64,
+               'approved_until': '2099-01-01T00:00:00Z'}
+    response = client.post(f'/api/v1/projects/{project}/cpu-worker-dispatches/prepare',
+                           headers=headers(tokens, 'worker'), json=request)
+    assert response.status_code == 403
+
+
 @pytest.mark.parametrize('route,changes', [
     ('central', {'enabled': 'true'}), ('central', {'enabled': 1}),
     ('central', {'capacity': True}), ('central', {'capacity': -1}),
@@ -278,6 +312,36 @@ def test_client_local_and_read_use_scoped_paths_without_implicit_revisions():
     assert requests[1].headers['Idempotency-Key'] == 'stable'
     assert 'If-Match' not in requests[1].headers
     assert json.loads(requests[1].content) == {'enabled': False, 'expected_generation': 7, 'reason': '  stop  '}
+
+
+def test_client_cpu_reservation_and_worker_dispatch_routes():
+    requests = []
+
+    def transport(request):
+        requests.append(request)
+        return httpx.Response(200, json={'ok': True})
+
+    with Client('https://private.test', 'token', transport=httpx.MockTransport(transport)) as client:
+        client.explain_cpu('project', {'action_id': 'a'})
+        client.reserve_cpu('project', {'action_id': 'a'})
+        client.cancel_cpu_reservation('project', 'a', reason='unused')
+        client.prepare_cpu_worker_dispatch('project', {'action_id': 'a'})
+        client.begin_cpu_worker_dispatch('project', 'operation')
+        client.get_cpu_worker_dispatch('project', 'operation')
+        client.record_cpu_worker_invocation('project', 'operation', {'invocation_id': 'a' * 32})
+        client.observe_cpu_worker_dispatch('project', 'operation', {'observation_id': str(uuid4())})
+        client.settle_cpu_worker_dispatch('project', 'operation', observation_id=str(uuid4()))
+    assert [request.url.raw_path.decode() for request in requests] == [
+        '/api/v1/projects/project/cpu-reservations/explain',
+        '/api/v1/projects/project/cpu-reservations',
+        '/api/v1/projects/project/cpu-reservations/a/cancel',
+        '/api/v1/projects/project/cpu-worker-dispatches/prepare',
+        '/api/v1/projects/project/cpu-worker-dispatches/operation/begin',
+        '/api/v1/projects/project/cpu-worker-dispatches/operation',
+        '/api/v1/projects/project/cpu-worker-dispatches/operation/invocation',
+        '/api/v1/projects/project/cpu-worker-dispatches/operation/observations',
+        '/api/v1/projects/project/cpu-worker-dispatches/operation/settle',
+    ]
 
 
 def test_cli_mutation_requires_explicit_enable_or_disable(monkeypatch):

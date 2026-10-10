@@ -14,6 +14,7 @@ from starlette.exceptions import HTTPException
 
 from . import __version__
 from .contracts import DomainError, Principal, valid_identifier
+from .cpu_worker_dispatch import CPUWorkerDispatch
 from .web import install_workbench
 from .workflow import TRANSITIONS, _workflow_event
 
@@ -192,6 +193,80 @@ class CPUCentralControl(CPULocalControl):
     capacity: Annotated[StrictInt, Field(ge=0, lt=2**31)]
 
 
+class CPUReservationRequest(Input):
+    task_id: Identifier
+    action_id: Identifier
+    attempt_id: Identifier
+    units: Annotated[StrictInt, Field(ge=1, lt=2**31)]
+    expected_revision: Annotated[StrictInt, Field(ge=1, lt=2**63)]
+    readiness_generation: Annotated[StrictInt, Field(ge=1, lt=2**63)]
+    claim_fence: Annotated[StrictInt, Field(ge=1, lt=2**63)]
+    generation: Annotated[StrictInt, Field(ge=1, lt=2**63)]
+    local_generation: Annotated[StrictInt, Field(ge=1, lt=2**63)]
+
+
+class CPUReservationCancel(Input):
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4096)]
+
+
+class CPUWorkerPrepare(Input):
+    action_id: Identifier
+    operation_id: Identifier
+    profile_id: Literal["bounded-trusted-cpu-patch-v1"]
+    host_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
+    worker_id: Identifier
+    unit_name: Annotated[str, StringConstraints(pattern=r"^skybuild-job-[0-9a-f]{24}\.service$")]
+    launch_nonce: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
+    source_digest: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+    controller_head: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}$")]
+    controller_source_digest: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+    controller_profile_digest: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+    interpreter_digest: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+    permit_digest: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+    assignment_digest: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+    patch_digest: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+    argv_digest: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+    approved_until: AwareDatetime
+
+
+class CPUWorkerInvocation(Input):
+    host_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
+    unit_name: Annotated[str, StringConstraints(pattern=r"^skybuild-job-[0-9a-f]{24}\.service$")]
+    launch_nonce: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
+    invocation_id: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
+
+    @field_validator("invocation_id")
+    @classmethod
+    def nonzero_invocation(cls, value):
+        if value == "0" * 32:
+            raise ValueError("InvocationID cannot be the systemd zero value")
+        return value
+
+
+class CPUWorkerObservation(CPUWorkerInvocation):
+    observation_id: Annotated[str, StringConstraints(pattern=r"^[0-9a-fA-F-]{36}$")]
+    phase: Literal["running", "unknown", "failed", "completed"]
+    result: str | None = None
+    exit_status: StrictInt | None = None
+    worker_result_digest: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")] | None = None
+
+    @model_validator(mode="after")
+    def terminal_proof(self):
+        if self.phase == "completed":
+            if self.result != "success" or self.exit_status != 0 or self.worker_result_digest is None:
+                raise ValueError("Settleable completion needs success, exit 0 and worker result digest")
+        elif self.phase == "failed":
+            if not self.result or self.worker_result_digest is not None:
+                raise ValueError("Failed terminal evidence needs a result and no success digest")
+        elif self.result is not None or self.exit_status is not None or self.worker_result_digest is not None:
+            raise ValueError("Nonterminal observation cannot include result fields")
+        return self
+
+
+class CPUWorkerSettle(Input):
+    observation_id: Annotated[str, StringConstraints(pattern=r"^[0-9a-fA-F-]{36}$")]
+
+
 class ClaimLease(Input):
     lease_seconds: Annotated[StrictInt, Field(ge=1, le=300)] = 60
 
@@ -315,6 +390,7 @@ def create_app(store: Any) -> FastAPI:
     """Create an app without connecting, migrating, or reading configuration."""
     app = FastAPI(title="SkyBuild", version=__version__)
     app.add_middleware(BodyLimit)
+    cpu_worker = CPUWorkerDispatch(store)
 
     @app.exception_handler(DomainError)
     async def domain_error(request: Request, error: DomainError) -> JSONResponse:
@@ -404,6 +480,47 @@ def create_app(store: Any) -> FastAPI:
     def set_cpu_local_control(project_id: ProjectPath, body: CPULocalControl, actor: Actor, idem: Key) -> dict:
         return store.set_cpu_local_control(actor, project_id, body.enabled,
                                            body.expected_generation, idem, reason=body.reason)
+
+    @app.post(base + "/cpu-reservations/explain")
+    def explain_cpu(project_id: ProjectPath, body: CPUReservationRequest, actor: Actor) -> dict:
+        return store.explain_cpu(actor, project_id, **body.model_dump())
+
+    @app.post(base + "/cpu-reservations")
+    def reserve_cpu(project_id: ProjectPath, body: CPUReservationRequest, actor: Actor) -> dict:
+        return store.reserve_cpu(actor, project_id, **body.model_dump())
+
+    @app.post(base + "/cpu-reservations/{action_id}/cancel")
+    def cancel_cpu(project_id: ProjectPath, action_id: RecordPath, body: CPUReservationCancel,
+                   actor: Actor) -> dict:
+        return store.cancel_cpu_reservation(actor, project_id, action_id, reason=body.reason)
+
+    @app.post(base + "/cpu-worker-dispatches/prepare")
+    def prepare_cpu_worker(project_id: ProjectPath, body: CPUWorkerPrepare, actor: Actor) -> dict:
+        fields = body.model_dump(exclude={"action_id", "operation_id"})
+        return cpu_worker.prepare(actor, project_id, body.action_id, body.operation_id, **fields)
+
+    @app.get(base + "/cpu-worker-dispatches/{operation_id}")
+    def get_cpu_worker_dispatch(project_id: ProjectPath, operation_id: RecordPath, actor: Actor) -> dict:
+        return cpu_worker.get(actor, project_id, operation_id)
+
+    @app.post(base + "/cpu-worker-dispatches/{operation_id}/begin")
+    def begin_cpu_worker(project_id: ProjectPath, operation_id: RecordPath, actor: Actor) -> dict:
+        return cpu_worker.begin(actor, project_id, operation_id)
+
+    @app.post(base + "/cpu-worker-dispatches/{operation_id}/invocation")
+    def record_cpu_worker_invocation(project_id: ProjectPath, operation_id: RecordPath,
+                                     body: CPUWorkerInvocation, actor: Actor) -> dict:
+        return cpu_worker.record_invocation(actor, project_id, operation_id, **body.model_dump())
+
+    @app.post(base + "/cpu-worker-dispatches/{operation_id}/observations")
+    def observe_cpu_worker(project_id: ProjectPath, operation_id: RecordPath,
+                           body: CPUWorkerObservation, actor: Actor) -> dict:
+        return cpu_worker.observe(actor, project_id, operation_id, **body.model_dump())
+
+    @app.post(base + "/cpu-worker-dispatches/{operation_id}/settle")
+    def settle_cpu_worker(project_id: ProjectPath, operation_id: RecordPath,
+                          body: CPUWorkerSettle, actor: Actor) -> dict:
+        return cpu_worker.settle(actor, project_id, operation_id, **body.model_dump())
 
     @app.post(base + "/tasks", status_code=201)
     def create_task(project_id: ProjectPath, body: TaskCreate, actor: Actor, idem: Key) -> dict:
