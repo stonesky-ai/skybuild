@@ -13,7 +13,7 @@ The Task 12 branch contains the following pinned implementation parents:
 | Parent | Head |
 | --- | --- |
 | Shared API contract, Task 05 | `8c792ebe9e4df5536063c7abbcf61c3e37968821` |
-| Worker adapters, Task 06 | `c29fcf7ebc2d1db7c73bf3dd2ad1517f24a1a6f8` |
+| Worker adapters, Task 06 | `d193fa6ee50da1123ef5fd0bb7aa2598f510e95c` |
 | Validation adapter, Task 07 | `71b1345d3502e85dbea04b6cbe23070e30c34c7c` |
 | Integration adapter, Task 08 | `c1d3eb85f08a787adb92f7c74b28d0250c84a03b` |
 | Recovery, Task 09 | `bbce72377e7070b7ef5fcda69bfa3de304e93798` |
