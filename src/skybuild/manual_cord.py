@@ -68,7 +68,8 @@ def _private_write(destination: Path, payload: bytes) -> None:
 
 
 def receive_assignment(client: Client, project: str, checkout: Path, *, worker: str,
-                       dispatcher: str, message_id: str, destination: Path) -> dict:
+                       dispatcher: str, message_id: str, destination: Path,
+                       expected_envelope: dict | None = None) -> dict:
     """Save one sender-checked, committed assignment and acknowledge its receipt."""
     messages = client.inbox(project, limit=100, offset=0)
     if not isinstance(messages, list):
@@ -85,6 +86,8 @@ def receive_assignment(client: Client, project: str, checkout: Path, *, worker: 
         envelope = json.loads(message["body"])
     except (KeyError, TypeError, ValueError) as error:
         raise ManualCordError("Assignment message body is invalid JSON") from error
+    if expected_envelope is not None and envelope != expected_envelope:
+        raise ManualCordError("Received assignment differs from approved exact envelope")
     snapshot = verify_assignment(envelope, checkout, worker=worker)
     if envelope["dispatcher"] != dispatcher:
         raise ManualCordError("Assignment dispatcher differs from authenticated sender")
