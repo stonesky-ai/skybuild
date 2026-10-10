@@ -119,13 +119,21 @@ def test_firewall_sidecar_requires_a_bounded_writable_lock_tmpfs():
         "HostConfig": {
             "NetworkMode": "container:" + "c" * 64, "CapAdd": ["NET_ADMIN"], "CapDrop": ["ALL"],
             "Privileged": False, "ReadonlyRootfs": True,
-            "Tmpfs": {"/run": "rw,nosuid,nodev,size=1048576,mode=493"},
+            "Tmpfs": {"/run": "rw,nosuid,nodev,size=1048576,mode=0755"},
             "Memory": 128 * 1024**2, "MemorySwap": 128 * 1024**2,
             "NanoCpus": 250_000_000, "PidsLimit": 32, "PortBindings": {},
+            "SecurityOpt": ["no-new-privileges:true"],
         "LogConfig": {"Type": "local", "Config": {"max-size": "4m", "max-file": "2"}},
         },
         "Mounts": [{"Type": "tmpfs", "Destination": "/run", "RW": True}],
     }
+    gate._check_firewall_inspect(row, name="candidate-firewall", run_id="run",
+                                 container_id="a" * 64, kind="candidate_firewall",
+                                 image_id="sha256:" + "b" * 64, namespace_id="c" * 64,
+                                 postgres_ip="172.18.0.2", candidate_ip="172.18.0.3",
+                                 postgres_namespace=False)
+    row["Mounts"] = []
+    row["HostConfig"]["SecurityOpt"] = ["no-new-privileges"]
     gate._check_firewall_inspect(row, name="candidate-firewall", run_id="run",
                                  container_id="a" * 64, kind="candidate_firewall",
                                  image_id="sha256:" + "b" * 64, namespace_id="c" * 64,
@@ -156,9 +164,9 @@ def test_postgres_inspection_requires_exact_tmpfs_and_no_extra_mounts():
             "LogConfig": {"Type": "local", "Config": {"max-size": "32m", "max-file": "2"}},
             "CapAdd": [], "CapDrop": ["ALL"], "SecurityOpt": ["no-new-privileges:true"],
             "Tmpfs": {
-                destinations[0]: "rw,nosuid,nodev,noexec,size=1073741824,uid=999,gid=999,mode=448",
-                destinations[1]: "rw,nosuid,nodev,noexec,size=16777216,uid=999,gid=999,mode=2045",
-                destinations[2]: "rw,nosuid,nodev,noexec,size=134217728,uid=999,gid=999,mode=1023",
+                destinations[0]: "rw,nosuid,nodev,noexec,size=1073741824,uid=999,gid=999,mode=0700",
+                destinations[1]: "rw,nosuid,nodev,noexec,size=16777216,uid=999,gid=999,mode=3775",
+                destinations[2]: "rw,nosuid,nodev,noexec,size=134217728,uid=999,gid=999,mode=1777",
             },
         },
         "Mounts": [{"Type": "tmpfs", "Destination": path, "RW": True} for path in destinations],
@@ -263,7 +271,7 @@ def _candidate_row(tmp_path):
                        "ShmSize": 256 * 1024**2, "Privileged": False,
                        "LogConfig": {"Type": "local", "Config": {"max-size": "128m", "max-file": "2"}},
                        "PidMode": "private", "IpcMode": "private", "PortBindings": {},
-                       "Tmpfs": {"/scratch": "rw,exec,nosuid,nodev,size=2147483648,uid=10001,gid=10001,mode=448"},
+                       "Tmpfs": {"/scratch": "rw,exec,nosuid,nodev,size=2147483648,uid=10001,gid=10001,mode=0700"},
                        "ExtraHosts": ["db:172.18.0.3"],
                        "CapDrop": ["ALL"], "SecurityOpt": ["no-new-privileges:true"]},
         "Mounts": mounts,
@@ -290,6 +298,22 @@ def test_candidate_inspection_accepts_only_exact_mount_and_environment_policy(tm
     assert {item["source"] for item in result["mounts"]} == {
         "sha256:" + "d" * 64, "tmpfs", "sha256:" + "e" * 64, "sha256:" + "f" * 64
     }
+
+
+def test_candidate_inspection_accepts_docker_29_tmpfs_representation(tmp_path):
+    row, archive, fixture, probe, env = _candidate_row(tmp_path)
+    row["Mounts"] = [mount for mount in row["Mounts"] if mount["Destination"] != "/scratch"]
+    row["HostConfig"]["SecurityOpt"] = ["no-new-privileges"]
+    result = gate._check_candidate_inspect(
+        row, name="candidate-run", run_id="run", container_id="a" * 64,
+        image_id="sha256:" + "b" * 64, archive_root=archive, fixture_path=fixture,
+        probe_path=probe, env=env, network="internal-net", archive_sha256="d" * 64,
+        fixture_sha256="e" * 64, probe_sha256="f" * 64,
+        postgres_ip="172.18.0.3",
+    )
+    assert any(item == {"target": "/scratch", "mode": "rw", "kind": "tmpfs",
+                       "source_class": "scratch", "source": "tmpfs"}
+               for item in result["mounts"])
 
 
 @pytest.mark.parametrize("mutation", ["extra_mount", "extra_env", "port_bind", "extra_network", "privileged"])
@@ -622,8 +646,6 @@ class _DockerModel:
                 for field in value.split(","):
                     if field.startswith("size="):
                         field = "size=" + str(self._bytes(field.split("=", 1)[1]))
-                    elif field.startswith("mode="):
-                        field = "mode=" + str(int(field.split("=", 1)[1], 8))
                     normalized.append(field)
                 tmpfs[target] = ",".join(normalized)
                 mounts.append({"Type": "tmpfs", "Destination": target, "RW": True})
