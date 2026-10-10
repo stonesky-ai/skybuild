@@ -1,0 +1,6 @@
+services:
+  api:
+    image: sha256:77bc01222c9c018d44968198e26d0be4618825b35ba07bb8c993002bce4f51c5
+    pull_policy: never
+    ports: !override
+      - "127.0.0.1:8000:8000"
