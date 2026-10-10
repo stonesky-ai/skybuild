@@ -129,7 +129,7 @@ def test_migration_014_digest_and_append_only_dispatch_guards(cpu_dispatch):
     request, _, _ = _make_reservation(runtime, people, project)
     pins = _pins(request["action_id"], "operation-" + uuid4().hex)
     assert _prepare(client, project, tokens["owner"], pins).status_code == 200
-    with pytest.raises(psycopg.Error):
+    with pytest.raises(DomainError, match="Database operation unavailable"):
         with admin._connection() as connection:
             connection.execute("UPDATE cpu_worker_dispatches SET patch_digest = %s WHERE operation_id = %s",
                                ("a" * 64, pins["operation_id"]))
