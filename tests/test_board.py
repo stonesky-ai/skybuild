@@ -63,3 +63,25 @@ def test_board_route_forwards_authenticated_scope_and_bounds():
         assert result.json() == {"project_id": "project", "limit": 5, "offset": 10}
         for query in ("limit=0", "limit=101", "offset=-1"):
             assert client.get("/api/v1/projects/project/workflow-board?" + query, headers=headers).status_code == 422
+
+
+def test_snapshot_is_configured_before_database_identity_read(monkeypatch):
+    from skybuild.store import Store
+    calls = []
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def execute(self, statement):
+            calls.append(statement)
+            return self
+        def fetchone(self): return {"name": "skybuild_test_board"}
+    monkeypatch.setattr("skybuild.store.psycopg.connect", lambda *args, **kwargs: Connection())
+    store = Store("unused", "skybuild_test_board")
+    with store._connection(consistent_snapshot=True):
+        pass
+    assert calls[0] == "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"
+    assert calls[1] == "SELECT current_database() AS name"
+    calls.clear()
+    with store._connection():
+        pass
+    assert calls[0] == "SELECT current_database() AS name"

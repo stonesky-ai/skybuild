@@ -60,9 +60,8 @@ class BoardQueries:
         from .store import TASK_SELECT, _public
 
         self._page(limit, offset)
-        with self._connection() as connection:
-            # Counts and cards use one database snapshot, including dependency acceptance.
-            connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        # Configure the snapshot before Store identity and authorization reads.
+        with self._connection(consistent_snapshot=True) as connection:
             self._authorize(connection, principal, project_id, "tasks:read")
             complete = set()
             dependency_select = TASK_SELECT.replace(

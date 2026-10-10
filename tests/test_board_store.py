@@ -41,3 +41,15 @@ def test_bare_done_dependency_does_not_show_current_acceptance(store, actors):
     assert result["ready_dependencies_complete"] == 0
     assert result["ready_dependencies_blocked"] == 1
     assert result["tasks"][0]["blocked_dependencies"] == ["dependency"]
+
+
+def test_authenticated_board_route_uses_valid_snapshot(store, actors):
+    from fastapi.testclient import TestClient
+    from skybuild.api import create_app
+    project, people = actors
+    task = create(store, people["owner"], project, "board-route")
+    store.initialize_workflow(people["owner"], project, task["task_id"], task["revision"], "route-init")
+    with TestClient(create_app(store)) as client:
+        result = client.get(f"/api/v1/projects/{project}/workflow-board", headers={"Authorization": "Bearer " + people["worker_token"]})
+    assert result.status_code == 200
+    assert result.json()["total"] == 1

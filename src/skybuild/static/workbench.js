@@ -156,10 +156,13 @@
       for (const task of board.tasks.filter(item => item.place === place)) {
         const item = document.createElement("li"), button = document.createElement("button");
         button.type = "button"; button.dataset.taskId = task.task_id;
-        const stages = (task.validation || []).map(result => `${result.stage}: ${result.state}`).join(" · ");
+        const stages = ["unit_tests", "scans", "long_tests", "code_review", "needs_rebase"].map(stage => {
+          const results = (task.validation || []).filter(result => result.stage === stage);
+          return `${stage}: ${results.length ? results.map(result => result.state).join(", ") : "unavailable"}`;
+        }).join(" · ");
         button.textContent = `${task.task_id}: ${task.title}\nPriority ${task.priority} · ${task.responsible}\n${task.blocker || task.next_action || "No next action"}`;
         if (task.blocked_dependencies.length) button.textContent += `\nWaiting for: ${task.blocked_dependencies.join(", ")}`;
-        if (stages) button.textContent += `\n${stages}`;
+        button.textContent += `\nEvidence: ${task.evidence_freshness || "unavailable"}\n${stages}`;
         button.setAttribute("aria-current", String(selected?.task_id === task.task_id));
         button.addEventListener("click", () => perform(async () => { await selectTask(task.task_id); notice("Task loaded."); }));
         item.append(button); list.append(item);

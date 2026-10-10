@@ -107,9 +107,11 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
         self.expected_system_identifier = expected_system_identifier
 
     @contextmanager
-    def _connection(self):
+    def _connection(self, *, consistent_snapshot=False):
         try:
             with psycopg.connect(self.dsn, connect_timeout=5, row_factory=dict_row) as connection:
+                if consistent_snapshot:
+                    connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
                 if self.expected_system_identifier is None:
                     identity = connection.execute('SELECT current_database() AS name').fetchone()
                 else:

@@ -103,7 +103,7 @@ global.fetch = async (url, options) => {
   requests.push({url, options});
   const data = url.includes("/workflow-board?") ? {
     project_id: " project ", columns: ["ready", "working", "validating", "integrating", "done", "deferred", "hold"].map(place => ({place, count: place === "ready" ? 205 : 0, oldest_age_seconds: 60, unknown_age_count: 0})),
-    tasks: [{...task, place: "ready", validation: [{stage: "unit_tests", state: "passed"}], blocked_dependencies: [" dep "]}],
+    tasks: [{...task, place: "ready", evidence_freshness: "stale", validation: [{stage: "unit_tests", state: "passed"}], blocked_dependencies: [" dep "]}],
     total: 205, unenrolled_count: 2, ready_dependencies_complete: 200, ready_dependencies_blocked: 5, next_offset: null
   } : url.includes("/reconcile-due?") ? (url.includes("after_task_id=") ?
       {scanned: 1, reassessed: ["due"], next_after_task_id: null} :
@@ -127,6 +127,8 @@ async function run() {
   assert.equal(get("workflow-board").children.length, 7);
   assert.match(get("board-summary").textContent, /205 workflow tasks/);
   assert.match(get("workflow-board").querySelectorAll()[0].textContent, /unit_tests: passed/);
+  assert.match(get("workflow-board").querySelectorAll()[0].textContent, /Evidence: stale/);
+  assert.match(get("workflow-board").querySelectorAll()[0].textContent, /scans: unavailable/);
   assert.match(get("workflow-board").querySelectorAll()[0].textContent, /Waiting for:  dep /);
   get("reconcile-due").listeners.click(); await tick();
   assert.ok(requests.some(request => request.url.includes("/reconcile-due?limit=100&after_task_id=cursor-100")));
