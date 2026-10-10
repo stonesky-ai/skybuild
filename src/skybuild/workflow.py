@@ -358,6 +358,7 @@ class WorkflowContext(TypedDict, total=False):
     control_authorized: bool
     resume_due: bool
     failure_confirmed: bool
+    now: datetime
 
 
 _ACTIVE_PLACES = (Place.READY, Place.WORKING, Place.VALIDATING, Place.INTEGRATING)
@@ -539,7 +540,7 @@ def _stale_evidence(token):
     return tuple(replace(result, state=ResultState.STALE) for result in token.evidence)
 
 
-def _defer_trigger(token, event):
+def _defer_trigger(token, event, context):
     if ("until" in event) == ("milestone_task_id" in event):
         _record_error("Deferral requires exactly one date or milestone")
     if "until" in event:
@@ -549,6 +550,14 @@ def _defer_trigger(token, event):
             _record_error("Deferral date must include a timezone")
         if value.tzinfo is None or value.utcoffset() is None:
             _record_error("Deferral date must include a timezone")
+        now = context.get("now")
+        if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+            _record_error("Deferral requires a trusted offset-aware current time")
+        accepted_pending = (token.pending_action == "defer" and event.get("reason") == token.hold_reason and
+                            event.get("responsible", token.responsible) == token.responsible)
+        unchanged = value.isoformat() == token.deferred_until and (accepted_pending or token.place == Place.DEFERRED)
+        if value <= now and not unchanged:
+            raise DomainError("workflow_conflict", "Deferral date has already passed", 409)
         return {"deferred_until": value.isoformat(), "milestone_task_id": None}
     milestone = event["milestone_task_id"]
     if not valid_identifier(milestone) or milestone == token.task_id:
@@ -581,7 +590,9 @@ def _apply_control(token, event, context, spec):
         results = tuple(item for item in token.evidence if identity(item) != identity(result)) + (result,)
         changes.update(evidence=results, findings=tuple(dict.fromkeys(token.findings + result.findings)))
         if result.state == ResultState.FAILED:
-            fault = "; ".join(result.findings) or f"{result.stage.value}: {result.check_id} failed"
+            # Keep the full findings in the result and journal. Repeated display
+            # summaries must also fit the bounded token's total JSON size.
+            fault = ("; ".join(result.findings) or f"{result.stage.value}: {result.check_id} failed")[:512]
             changes.update(place=Place.READY, faults=token.faults + (fault,), blocker=fault,
                            next_action="Correct the validation fault and submit the task again",
                            evidence=tuple(replace(item, state=ResultState.STALE) if item != result else item for item in results))
@@ -602,7 +613,7 @@ def _apply_control(token, event, context, spec):
                        interrupted_place=token.interrupted_place if token.pending_action else token.place,
                        next_action=event.get("next_action", "Resolve the control request"))
         if name == "defer":
-            changes.update(_defer_trigger(token, event))
+            changes.update(_defer_trigger(token, event, context))
         else:
             changes.update(deferred_until=None, milestone_task_id=None)
         if context.get("effects_resolved") is not True:
@@ -621,7 +632,7 @@ def _apply_control(token, event, context, spec):
         if "until" in event or "milestone_task_id" in event:
             if token.place != Place.DEFERRED:
                 _record_error("Only Deferred accepts a deferral trigger")
-            changes.update(_defer_trigger(token, event))
+            changes.update(_defer_trigger(token, event, context))
     return replace(token, **changes)
 
 

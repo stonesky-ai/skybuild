@@ -1,5 +1,6 @@
 """Validation and owner controls preserve task identity and effect ownership."""
 from dataclasses import replace
+from datetime import datetime, timezone
 from itertools import product
 
 import pytest
@@ -20,7 +21,8 @@ def context(current, **changes):
     facts = {name: getattr(current, name) for name in
              ("source_head", "target_base", "definition_revision", "input_generation", "policy_version")}
     facts.update(current_inputs=True, effects_resolved=True, result_authorized=True,
-                 control_authorized=True, failure_confirmed=True)
+                 control_authorized=True, failure_confirmed=True,
+                 now=datetime(2026, 10, 10, tzinfo=timezone.utc))
     facts.update(changes)
     return facts
 
@@ -192,3 +194,43 @@ def test_missing_authority_and_missing_policy_reason_fail_closed():
         apply(current, "validation_result", result=result(current, state=ResultState.NOT_APPLICABLE).to_dict())
     with pytest.raises(DomainError):
         apply(current, "hold", context(current, control_authorized=False), reason="Stop")
+
+
+@pytest.mark.parametrize("until", ["2026-10-10T00:00:00+00:00", "2026-10-09T23:59:59+00:00"])
+def test_new_deferral_rejects_exact_now_and_past(until):
+    with pytest.raises(DomainError, match="already passed"):
+        apply(token(), "defer", reason="Later", until=until)
+
+
+def test_future_deferral_uses_offset_and_trusted_clock():
+    current = token()
+    assert apply(current, "defer", reason="Later", until="2026-10-09T19:00:00-06:00").place == Place.DEFERRED
+    with pytest.raises(DomainError):
+        apply(current, "defer", context(current, now=None), reason="Later", until="2030-01-01T00:00:00+00:00")
+
+
+def test_accepted_pending_deferral_can_finish_after_trigger_but_cannot_change_to_past():
+    current = token(Place.INTEGRATING)
+    until = "2026-10-10T01:00:00+00:00"
+    pending = apply(current, "defer", context(current, effects_resolved=False), reason="Later", until=until)
+    later = context(pending, now=datetime(2026, 10, 11, tzinfo=timezone.utc))
+    after = apply(pending, "defer", later, reason="Later", until=until)
+    assert after.place == Place.DEFERRED and after.deferred_until == until
+    with pytest.raises(DomainError):
+        apply(pending, "defer", later, reason="Changed", until="2026-10-10T02:00:00+00:00")
+    with pytest.raises(DomainError):
+        apply(pending, "defer", later, reason="Different decision", until=until)
+    assert apply(after, "update_control", context(after, now=later["now"]), reason="Same trigger", until=until).place == Place.DEFERRED
+    with pytest.raises(DomainError):
+        apply(after, "update_control", context(after, now=later["now"]), reason="Changed", until="2026-10-10T03:00:00+00:00")
+
+
+def test_large_valid_findings_cannot_prevent_failure_recovery():
+    current = token()
+    findings = ("a" * 2500, "b" * 2500)
+    failed = result(current, state=ResultState.FAILED, findings=findings)
+    request = event(current, "validation_result", result=failed.to_dict())
+    after = TaskWorkflow().apply(current, request, context(current))
+    assert after.place == Place.READY and len(after.blocker) == 512
+    assert after.findings == findings and after.evidence == (failed,)
+    assert TaskWorkflow.journal_facts(current, after, request)["result"]["findings"] == list(findings)
