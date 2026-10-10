@@ -169,17 +169,19 @@ def test_worker_rechecks_exact_permit_and_assignment_before_work(tmp_path, monke
              "envelope_sha256": permit.envelope_sha256(assignment)}
     approved = {"schema": "skybuild.auto-cpu-patch-permit.v1",
                 "profile": "bounded-trusted-cpu-patch-v1", "slots": 2,
+                "project_id": "skybuild", "host_id": socket.gethostname(),
                 "approved_until": expiry.isoformat(), "source_head": "d" * 40,
                 "workers": [entry, {"different": True}]}
     path = tmp_path / "approved.json"
     path.write_text(json.dumps(approved))
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     permit.check_worker_permit(path, digest, checkout=tmp_path, assignment=assignment,
-                               worker="worker_1", patch_sha256="c" * 64, approved_until=expiry)
+                               project="skybuild", worker="worker_1", patch_sha256="c" * 64,
+                               approved_until=expiry)
     assert checked == [{"require_job_unit": False}]
     with pytest.raises(permit.PermitError, match="assignment differs"):
         permit.check_worker_permit(path, digest, checkout=tmp_path, assignment=assignment,
-                                   worker="worker_1", patch_sha256="e" * 64,
+                                   project="skybuild", worker="worker_1", patch_sha256="e" * 64,
                                    approved_until=expiry)
 
 

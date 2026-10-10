@@ -262,7 +262,8 @@ def run(client: Client, *, project: str, worker: str, dispatcher: str, checkout:
             or received.get("place") != "working"):
         raise PatchWorkerError("Trusted preclaim identity differs")
     check_worker_permit(permit_path, permit_sha256, checkout=checkout, assignment=assignment,
-                        worker=worker, patch_sha256=patch_sha256, approved_until=approved_until)
+                        project=project, worker=worker, patch_sha256=patch_sha256,
+                        approved_until=approved_until)
     verify_assignment(assignment, checkout, worker=worker)
     if assignment["dispatcher"] != dispatcher:
         raise PatchWorkerError("Assignment dispatcher differs")

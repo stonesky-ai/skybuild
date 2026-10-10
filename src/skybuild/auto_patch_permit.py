@@ -88,10 +88,19 @@ def check_source(checkout: Path, permit: dict, *, require_job_unit: bool = True)
     if (entry in {"skybuild.auto_patch_controller", "skybuild.auto_patch_worker"}
             and Path(main.__file__).resolve() != checkout / "src" / "skybuild" / (entry.rsplit(".", 1)[1] + ".py")):
         raise PermitError("Executing worker or controller is outside the approved checkout")
+    if entry in {"skybuild.auto_patch_controller", "skybuild.auto_patch_worker"}:
+        path = Path(main.__file__)
+        relative = path.resolve().relative_to(checkout).as_posix()
+        committed = subprocess.run(["git", "show", "HEAD:" + relative], cwd=checkout,
+                                   capture_output=True, check=False, timeout=5)
+        if (path.is_symlink() or not path.is_file() or path.stat().st_size > 2_097_152
+                or os.fsencode(relative) not in tracked_paths or committed.returncode
+                or committed.stdout != path.read_bytes()):
+            raise PermitError("Executing worker or controller bytes differ from approved head")
 
 
 def check_worker_permit(path: Path, expected_sha256: str, *, checkout: Path,
-                        assignment: dict, worker: str, patch_sha256: str,
+                        assignment: dict, project: str, worker: str, patch_sha256: str,
                         approved_until: datetime) -> None:
     if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
         raise PermitError("Worker permit digest is invalid")
@@ -101,6 +110,7 @@ def check_worker_permit(path: Path, expected_sha256: str, *, checkout: Path,
     permit = json.loads(raw)
     if (not isinstance(permit, dict) or permit.get("schema") != "skybuild.auto-cpu-patch-permit.v1"
             or permit.get("profile") != "bounded-trusted-cpu-patch-v1"
+            or permit.get("project_id") != project or permit.get("host_id") != socket.gethostname()
             or permit.get("slots") != 2 or _when(permit.get("approved_until")) != approved_until
             or approved_until <= datetime.now(timezone.utc)):
         raise PermitError("Worker permit scope or interval differs")
