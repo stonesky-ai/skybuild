@@ -267,6 +267,11 @@ def _tree_manifest(root: Path) -> dict[str, str]:
     return result
 
 
+def _has_pinned_runner_python(environment: Path) -> bool:
+    python = environment / "skybuild-venv/bin/python"
+    return python.is_symlink() and os.readlink(python) == "/usr/local/bin/python3.14"
+
+
 def _prepare_runner_environment(context: Path, uv_cache: Path) -> dict:
     environment = context / "runner-environment"
     environment.mkdir(mode=0o700)
@@ -310,7 +315,7 @@ def _prepare_runner_environment(context: Path, uv_cache: Path) -> dict:
             remaining = _run(["docker", "container", "inspect", name], timeout=20, check=False)
             if remaining.returncode == 0:
                 raise BuildError("environment builder container cleanup is unconfirmed")
-    if not (environment / "skybuild-venv/bin/python").is_file():
+    if not _has_pinned_runner_python(environment):
         raise BuildError("offline runner environment preparation did not produce its Python")
     return {"container_name": name, "container_removed": True,
             "resource_limits": {"memory": "2g", "cpus": 1, "pids": 64,

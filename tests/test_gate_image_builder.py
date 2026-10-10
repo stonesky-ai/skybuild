@@ -52,6 +52,18 @@ def test_git_package_staging_uses_private_hashed_copy_and_rejects_symlinks(tmp_p
         builder._copy_pinned_package(fifo, tmp_path / "private" / "race.deb", expected)
 
 
+def test_runner_python_link_is_checked_against_pinned_image_path(tmp_path):
+    binary_dir = tmp_path / "skybuild-venv" / "bin"
+    binary_dir.mkdir(parents=True)
+    python = binary_dir / "python"
+    python.symlink_to("/usr/local/bin/python3.14")
+
+    assert builder._has_pinned_runner_python(tmp_path)
+    python.unlink()
+    python.symlink_to("/usr/bin/python3")
+    assert not builder._has_pinned_runner_python(tmp_path)
+
+
 def test_runner_environment_metadata_is_static_and_binds_exact_project_lock(tmp_path):
     project = tmp_path / "project"
     environment = tmp_path / "environment"
