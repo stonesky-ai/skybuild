@@ -10,8 +10,9 @@ import subprocess
 import sys
 from uuid import uuid4
 
-# A shared editable environment may point at a different worktree.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+# Select this checkout's source and helpers, including when safe-path mode is enabled.
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path[:0] = [str(SCRIPT_DIR.parent / "src"), str(SCRIPT_DIR)]
 
 from _repo_guard import verify_skybuild
 import prepare_bundle as preparation

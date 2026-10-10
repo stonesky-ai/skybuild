@@ -197,6 +197,7 @@ def test_cli_imports_its_own_checkout_with_a_shared_interpreter(tmp_path):
     script = Path(marshall.__file__).resolve()
     environment = dict(os.environ)
     environment.pop("PYTHONPATH", None)
+    environment["PYTHONSAFEPATH"] = "1"
     result = subprocess.run([sys.executable, str(script), "--help"], cwd=tmp_path,
                             env=environment, text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
