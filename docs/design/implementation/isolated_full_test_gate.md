@@ -22,7 +22,9 @@ The runner uses the pinned local test image with `UV_OFFLINE=1` and
 
 The supervisor verifies a clean trusted checkout and candidate checkout, the
 candidate commit and tree, the target-base ancestry, and the raw
-`git archive --format=tar` SHA-256. It rejects unsafe archive members and
+`git archive --format=tar` SHA-256. A kernel file-size limit bounds archive
+production to 512 MiB before the producer can fill host storage; production
+also has a 120-second timeout. It rejects unsafe archive members and
 extracts source into a private run directory. The candidate container receives
 that archive read-only, one bounded scratch tmpfs, and two read-only trusted
 runner fixtures. It runs as UID 10001 with a read-only root filesystem,
@@ -35,8 +37,28 @@ The container environment is an exact allowlist. Three synthetic DSNs point to
 three databases in one disposable PostgreSQL container. No live application
 DSN or user credential enters the candidate. The entrypoint emits a blocked
 marker, waits for the supervisor release file, and only then copies the source
-archive to scratch, verifies the import path, checks connectivity denial, and
-starts the unchanged full test command.
+archive to scratch, verifies the source package path without importing candidate
+code, checks connectivity denial, and executes the unchanged full test command.
+The trusted Python launcher starts in isolated mode. No candidate module runs
+before the fixed command exec. Scratch permits executable test fixtures while
+retaining its 2 GiB tmpfs size, UID, nosuid, nodev, and resource limits.
+
+Existing ledger tests require two frozen source commits:
+`6d96075f88493d0b54577a2a8c9526f19a78a5ed` and
+`d79d2e1947d2c8e9edb577ab5f5093edfa3c94e3`. The supervisor constructs a shallow
+Git fixture containing only those commits and their trees/blobs. Its pack has
+a 64 MiB kernel write bound. The fixture receives synthetic HEAD, refs, shallow
+metadata, and a minimal config; host Git config, hooks, alternates, credentials,
+and remotes are never copied. It lives in `.git` beneath the existing read-only
+`/candidate` mount. Scratch `.git` links to that read-only fixture; scratch HOME
+contains only a generated Git safe.directory entry for the scratch workspace.
+
+`candidate_history_sha256` independently pins the entire fixture. Its digest
+is SHA-256 of canonical compact JSON mapping each relative fixture filename to
+the SHA-256 of its raw bytes, including the pack, index, and synthetic metadata.
+Preparation and execution reconstruct and compare that digest. The plan also
+records the fixed commit list, pack size, size bound, and read-only requirement.
+The trusted expected predicate must supply the approved digest.
 
 ## Network isolation
 
@@ -49,9 +71,10 @@ Both namespace policies set IPv4 and IPv6 INPUT, OUTPUT, and FORWARD defaults
 to DROP. Candidate IPv4 OUTPUT allows only the exact PostgreSQL address on TCP
 5432 plus established replies. PostgreSQL IPv4 INPUT allows only the exact
 candidate address on TCP 5432 plus established replies. Both namespaces allow
-loopback and established traffic. DNS requests to Docker's embedded resolver
-are denied. The runner compares complete `iptables-save` and `ip6tables-save`
-output to the policy before release.
+loopback and established traffic. Traffic to Docker's embedded resolver address
+is denied on every port before loopback acceptance, including ports rewritten
+by Docker's resolver NAT. The runner compares complete filter-table output from
+`iptables-save -t filter` and `ip6tables-save -t filter` to the policy before release.
 
 Trusted probes run in both namespaces before candidate release. They require
 DNS, external IPv4, external IPv6, and an owned unexpected-port host listener
@@ -79,8 +102,9 @@ The host journal records create intent, full resource IDs, firewall and probe
 results, candidate exit status, and independent cleanup confirmations. Logs
 are redacted for the synthetic PostgreSQL password and hashed by the host.
 The host signs the final receipt with the pinned HMAC key only after it observes
-the candidate exit and cleanup results. Uncertain cleanup remains an explicit
-failure.
+the candidate exit and cleanup results. Any supervisor exception forces a failed
+exit and prevents signing. CLI success also requires a written attestation and
+no supervisor failure. Uncertain cleanup remains an explicit failure.
 
 The helper imports `scripts/trusted_gate_attestation.py`; its raw SHA-256 is
 bound by the expected predicate, clean trusted checkout, plan, and GO record.
@@ -89,9 +113,14 @@ is never mounted into a container.
 
 ## Execution status
 
-Unit tests cover policy binding, environment and mount rejection, archive
-safety, firewall rule parsing, key checks, cleanup reconciliation, and log
-redaction. They do not prove Docker behavior. Do not claim a full-suite pass
+Focused tests cover policy binding, environment and mount rejection, bounded
+archive production, deterministic sanitized history and local Git fetch,
+hostile pre-exec imports, firewall rule parsing, key checks, cleanup
+reconciliation, and chunk-boundary log redaction. A Docker model interprets the
+actual builder arguments and feeds the actual inspect verifiers. The modeled
+execution signs and verifies its real assembled receipt, and rejects deliberate
+IP, helper-label, log-format, preflight, test-exit, cleanup, and receipt changes.
+These checks do not prove Docker behavior. Do not claim a full-suite pass
 until an independent source review approves the exact runner commit and root
 issues GO for the reviewed plan and resource host. The actual isolated runtime
 rehearsal is still required for qualification.

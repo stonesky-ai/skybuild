@@ -1,8 +1,9 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -I
 """Trusted preflight that runs inside the candidate test container."""
 from __future__ import annotations
 
 import os
+from importlib.machinery import PathFinder
 from pathlib import Path
 import shutil
 import socket
@@ -83,21 +84,26 @@ def main() -> int:
         raise RuntimeError("candidate archive mount unexpectedly permits writes")
     if workspace.exists():
         raise RuntimeError("scratch workspace unexpectedly exists")
-    shutil.copytree(source, workspace, symlinks=True)
+    shutil.copytree(source, workspace, symlinks=True, ignore=shutil.ignore_patterns(".git"))
+    if not (source / ".git/HEAD").is_file():
+        raise RuntimeError("sanitized readonly Git history fixture is missing")
+    (workspace / ".git").symlink_to(source / ".git", target_is_directory=True)
     print("GATE_CANDIDATE_COPY=complete", flush=True)
     for relative in ("home", "tmp", "uv-cache", "pytest-tmp", "pytest-cache"):
         (Path("/scratch") / relative).mkdir(mode=0o700)
+    (Path("/scratch/home") / ".gitconfig").write_text(
+        "[safe]\n\tdirectory = /scratch/workspace\n", encoding="ascii")
     os.chdir(workspace)
-    sys.path.insert(0, str(workspace / "src"))
-    import skybuild
-
+    # PathFinder inspects filenames only. It must never execute candidate code
+    # before this trusted launcher reaches the fixed command exec boundary.
+    spec = PathFinder.find_spec("skybuild", [str(workspace / "src")])
     expected = (workspace / "src/skybuild/__init__.py").resolve()
-    actual = Path(skybuild.__file__).resolve()
-    if actual != expected:
-        raise RuntimeError("candidate package import resolved outside its scratch copy")
-    print(f"GATE_PREFLIGHT_IMPORT={actual}", flush=True)
+    if spec is None or spec.origin is None or Path(spec.origin).resolve() != expected:
+        raise RuntimeError("candidate package source resolved outside its scratch copy")
+    print(f"GATE_PREFLIGHT_SOURCE_PATH={expected}", flush=True)
     _network_preflight()
     argv = ["uv", "run", "--extra", "test", "python", "-m", "pytest", "-q"]
+    print("GATE_COMMAND_LAUNCH=trusted_exec", flush=True)
     os.execvpe(argv[0], argv, os.environ.copy())
     return 127
 
