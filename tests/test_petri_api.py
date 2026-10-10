@@ -129,3 +129,48 @@ def test_computed_and_reserved_task_writes_fail_before_store(api, body):
     assert client.patch(path, json=body).status_code == 422
     assert client.post(path.rsplit("/", 1)[0], json={"task_id": "T", "title": "Title", "description": "Brief", **body}).status_code == 422
     assert not store.calls
+
+
+
+def submission_receipt():
+    return {"source_head": "a" * 40, "target_base": "b" * 40,
+            "source_branch": "refs/heads/task/petri", "attempt_id": "attempt-1", "claim_fence": 1,
+            "input_generation": 2, "definition_revision": 3, "policy_version": ""}
+
+
+def test_submit_accepts_exact_output_receipt_without_trusted_facts(api):
+    client, store = api
+    receipt = submission_receipt()
+    assert client.post(PATH, json={"event": "submit", **receipt}).status_code == 200
+    assert store.calls[-1][-1] == ("submit", receipt, 7, "operation-1")
+    receipt.update(source_head="a" * 64, target_base="b" * 64)
+    assert client.post(PATH, json={"event": "submit", **receipt}).status_code == 200
+
+
+@pytest.mark.parametrize("change", [
+    {"source_head": "abc"}, {"source_head": "A" * 40}, {"target_base": None},
+    {"source_branch": "task/petri"}, {"source_branch": "refs/heads/../main"},
+    {"source_branch": "refs/heads/task.lock"}, {"source_branch": "refs/heads/bad name"},
+    {"attempt_id": "bad/attempt"}, {"claim_fence": True}, {"claim_fence": 0},
+    {"input_generation": 2**63}, {"definition_revision": -1}, {"policy_version": "bad\x00policy"},
+    {"submission_verified": True}, {"context": {"submission_verified": True}}, {"reason": "Unexpected"},
+])
+def test_submit_rejects_invalid_or_forged_receipt_before_store(api, change):
+    client, store = api
+    assert client.post(PATH, json={"event": "submit", **submission_receipt(), **change}).status_code == 422
+    assert not store.calls
+
+
+@pytest.mark.parametrize("field", list(submission_receipt()))
+def test_submit_requires_each_receipt_field(api, field):
+    client, store = api
+    receipt = submission_receipt()
+    receipt.pop(field)
+    assert client.post(PATH, json={"event": "submit", **receipt}).status_code == 422
+    assert not store.calls
+
+
+def test_other_events_reject_submission_receipt(api):
+    client, store = api
+    assert client.post(PATH, json={"event": "freeze", **submission_receipt()}).status_code == 422
+    assert not store.calls
