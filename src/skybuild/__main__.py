@@ -311,7 +311,7 @@ def main(argv: list[str] | None = None) -> int:
                 result = action(connection, _environment("SKYBUILD_EXPECTED_DATABASE"), args.role)
             print(json.dumps(result, indent=2))
             return 0 if result["ok"] else 1
-        from .store import Store
+        from .store import OPERATIONS, Store
 
         store = Store(_environment("SKYBUILD_DSN"), _environment("SKYBUILD_EXPECTED_DATABASE"))
         if args.command == "cpu-explain":
@@ -328,7 +328,7 @@ def main(argv: list[str] | None = None) -> int:
             for grant in args.grant:
                 project, area, verb = grant.rsplit(":", 2)
                 operation = f"{area}:{verb}"
-                if not project or operation not in {"tasks:read", "tasks:write", "cord:read", "cord:send", "cord:handle"}:
+                if not project or operation not in OPERATIONS:
                     raise ValueError("Use --grant PROJECT:OPERATION with a supported operation")
                 grants.setdefault(project, set()).add(operation)
             token = sys.stdin.readline(4098).rstrip("\r\n") if args.token_stdin else _environment("SKYBUILD_TOKEN")
