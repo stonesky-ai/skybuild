@@ -36,7 +36,7 @@ def collection(pinned, tmp_path):
 
         def whoami(self):
             return {'principal_id': assignment['dispatcher'], 'is_admin': False,
-                    'grants': {'skybuild': ['cord:send', 'cord:read', 'cord:handle']}}
+                    'grants': {'skybuild': ['tasks:read', 'cord:send', 'cord:read', 'cord:handle']}}
 
         def inbox(self, project, *, limit, offset):
             pages.append(offset)
@@ -71,6 +71,32 @@ def collection(pinned, tmp_path):
 def collect(c):
     client, repo, kwargs, *_ = c
     return receive_result(client, 'skybuild', repo, **kwargs)
+
+
+@pytest.mark.parametrize('change', ['admin', 'principal', 'project', 'missing', 'extra', 'duplicate', 'malformed'])
+def test_collector_requires_exact_dispatcher_profile(collection, change):
+    client, _, kwargs, _, _, actions, *_ = collection
+    identity = client.whoami()
+    scopes = identity['grants']['skybuild']
+    if change == 'admin':
+        identity['is_admin'] = True
+    elif change == 'principal':
+        identity['principal_id'] = 'another-dispatcher'
+    elif change == 'project':
+        identity['grants']['foreign'] = list(scopes)
+    elif change == 'missing':
+        scopes.remove('tasks:read')
+    elif change == 'extra':
+        scopes.append('tasks:write')
+    elif change == 'duplicate':
+        scopes[-1] = scopes[0]
+    else:
+        scopes[-1] = ['cord:handle']
+    client.whoami = lambda: identity
+    with pytest.raises(ResultError, match='scoped dispatcher'):
+        collect(collection)
+    assert not kwargs['destination'].exists()
+    assert actions == []
 
 
 def test_lost_receipt_reply_replays_same_persisted_result_without_handling(collection):
