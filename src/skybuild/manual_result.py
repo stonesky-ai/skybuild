@@ -78,7 +78,7 @@ def _review_freshness(client, call, project, assignment, result, workflow_bindin
             or claimed['project_id'] != project or claimed['task_id'] != task_id
             or claimed['place'] != 'working' or claimed['pending_action'] is not None
             or claimed['superseded'] or claimed['revision'] != claim.get('task_revision')
-            or claimed['revision'] <= assignment['task_revision']):
+            or claimed['revision'] != assignment['task_revision'] + 1):
         raise ResultError('Petri claim binding is invalid')
     receipt = {name: claimed[name] for name in ('attempt_id', 'claim_fence', 'input_generation',
                                                'definition_revision', 'policy_version')}

@@ -578,7 +578,7 @@ def submitted_collection(collection, tmp_path):
     reads = []
 
     def history(project, task_id, *, limit, offset):
-        assert (project, task_id, limit, offset) == ('skybuild', assignment['task_id'], 1, 4)
+        assert (project, task_id, limit, offset) == ('skybuild', assignment['task_id'], 1, intent['expected_revision'])
         reads.append('history')
         return copy.deepcopy(client.history)
 
@@ -671,6 +671,24 @@ def test_freshness_deadline_expiry_keeps_evidence_without_receipt(collection):
     with pytest.raises(ResultError, match='deadline'):
         collect(collection)
     assert kwargs['destination'].exists() and actions == []
+
+
+def test_later_coherent_attempt_cannot_attach_to_stale_assignment(submitted_collection):
+    collection, state, intent, reads = submitted_collection
+    client, _, kwargs, *_ = collection
+    state['token']['revision'] = state['claim']['task_revision'] = 8
+    intent['expected_revision'] = 8
+    binding = kwargs['workflow_binding']
+    binding.write_text(json.dumps(state))
+    binding.with_name(binding.name + '.submit').write_text(json.dumps(intent))
+    client.history[0]['revision'] = 9
+    for task in (client.task, client.history[0]['after_state']):
+        task['revision'] = 9
+        task['metadata']['_skybuild_workflow']['petri']['token']['revision'] = 9
+    client.workflow['token']['revision'] = 9
+    output = collect(collection)
+    assert output['routing'] == 'owner-attention' and output['review_required'] is False
+    assert kwargs['destination'].exists() and reads == []
 
 
 def test_cli_accepts_explicit_workflow_binding(collection):
