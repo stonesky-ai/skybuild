@@ -26,6 +26,15 @@ allows an ordinary task call after grace, and `CallsRespectWindow` must produce
 a counterexample. The model is not evidence that an OS process was physically
 stopped or that the caller's server-reconciliation evidence was authenticated.
 
+At commit `9dab055975b5374692701dccfd5f3aef3537f08a`, the safe bounded TLC run
+completed with 9,074 distinct states in 4 seconds. The deliberate mutation did
+not reach its intended invariant counterexample: TLC exited 75 on an
+incomplete primed Boolean assignment (`badCallWindow = null`). This was a
+model-expression bug, not a passing mutation check. The three safety-monitor
+primed Boolean updates in all three call actions are now parenthesized, and a
+focused source preflight checks all nine expressions. The corrected exact head
+still requires fresh SANY, safe TLC, and mutation runs.
+
 The first exploratory trace exposed an important stale-observation issue: an
 unqualified `unknown` sample after the exact invocation had been observed
 exited could make terminal evidence appear to regress. The model now allows

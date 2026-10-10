@@ -118,9 +118,9 @@ TaskCall ==
     /\ admitted
     /\ (contact = "connected" \/ Policy = FinishCurrent)
     /\ callsObserved' = TRUE
-    /\ badCallWindow' = badCallWindow \/ (now >= Cutoff)
-    /\ badCallParked' = badCallParked \/ clockParked
-    /\ badCallClock' = badCallClock \/ ~clockReady
+    /\ badCallWindow' = (badCallWindow \/ (now >= Cutoff))
+    /\ badCallParked' = (badCallParked \/ clockParked)
+    /\ badCallClock' = (badCallClock \/ ~clockReady)
     /\ clockReady' = FALSE
     /\ journalCount' = journalCount + 1
     /\ UNCHANGED <<now, contact, clockParked, operatorStop, stopAck, process,
@@ -136,9 +136,9 @@ BrokenLateTaskCall ==
     /\ process = "running"
     /\ admitted
     /\ callsObserved' = TRUE
-    /\ badCallWindow' = badCallWindow \/ (now >= Cutoff)
-    /\ badCallParked' = badCallParked \/ clockParked
-    /\ badCallClock' = badCallClock \/ ~clockReady
+    /\ badCallWindow' = (badCallWindow \/ (now >= Cutoff))
+    /\ badCallParked' = (badCallParked \/ clockParked)
+    /\ badCallClock' = (badCallClock \/ ~clockReady)
     /\ clockReady' = FALSE
     /\ journalCount' = journalCount + 1
     /\ UNCHANGED <<now, contact, clockParked, operatorStop, stopAck, process,
@@ -153,9 +153,9 @@ CloseoutCall ==
     /\ ~foreignConflict
     /\ process = "running"
     /\ callsObserved' = TRUE
-    /\ badCallWindow' = badCallWindow \/ (now < Cutoff \/ now >= GraceEnd)
-    /\ badCallParked' = badCallParked \/ clockParked
-    /\ badCallClock' = badCallClock \/ ~clockReady
+    /\ badCallWindow' = (badCallWindow \/ (now < Cutoff \/ now >= GraceEnd))
+    /\ badCallParked' = (badCallParked \/ clockParked)
+    /\ badCallClock' = (badCallClock \/ ~clockReady)
     /\ clockReady' = FALSE
     /\ journalCount' = journalCount + 1
     /\ UNCHANGED <<now, contact, clockParked, operatorStop, stopAck, process,

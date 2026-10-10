@@ -1,7 +1,10 @@
 """Focused safety tests for the local attempt closeout reducer and journal."""
 import hashlib
 import json
+import re
 import stat
+from collections import Counter
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +21,18 @@ def pin(**changes):
                   invocation_id="invocation-1", policy_version="closeout-v1")
     values.update(changes)
     return AttemptPin(**values)
+
+
+def test_tla_boolean_next_assignments_are_parenthesized():
+    model = Path(__file__).parents[1] / "docs/design/models/AttemptCloseout.tla"
+    assignments = re.findall(
+        r"^\s*(?:/\\\s*)?(badCall(?:Window|Parked|Clock))'\s*=\s*(.+)$",
+        model.read_text(), re.MULTILINE,
+    )
+    assert Counter(name for name, _ in assignments) == {
+        "badCallWindow": 3, "badCallParked": 3, "badCallClock": 3,
+    }
+    assert all(rhs.startswith("(") and rhs.endswith(")") for _, rhs in assignments)
 
 
 def clock(epoch, boot_id="boot-1"):
