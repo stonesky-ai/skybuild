@@ -1524,7 +1524,8 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path | None, key_path
                                                   probe_sha256=probe_sha256, command=command)
         journal.event("candidate_isolation_verified", container_id=ids["candidate"],
                       image_id=predicate["runner_image_id"], mounts=mount_evidence["mounts"],
-                      environment_allowlist=mount_evidence["environment_allowlist"])
+                      environment_allowlist=mount_evidence["environment_allowlist"],
+                      init_process_enabled=mount_evidence["init_process_enabled"])
         candidate_ip = _container_ipv4(candidate_row, resource_names["network"])
         _wait_candidate_blocked(resource_names["candidate"], run_id, ids["candidate"],
                                 predicate["runner_image_id"], journal)
