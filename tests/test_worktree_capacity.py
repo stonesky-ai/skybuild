@@ -32,7 +32,7 @@ def test_capacity_reserve_refuses_insufficient_slots(repository, monkeypatch):
             pytest.fail("over-capacity reservation was granted")
 
 
-def test_capacity_lock_serializes_concurrent_integrations(repository, monkeypatch):
+def test_capacity_lock_serializes_concurrent_creation_sections(repository, monkeypatch):
     monkeypatch.setattr(capacity, "_worktree_count", lambda _: 63)
     first_entered = threading.Event()
     release_first = threading.Event()
@@ -66,4 +66,39 @@ def test_capacity_lock_serializes_concurrent_integrations(repository, monkeypatc
     first_thread.join(2)
     second_thread.join(2)
     assert not first_thread.is_alive() and not second_thread.is_alive()
+    assert not failures
+
+
+def test_integration_lock_allows_preparation_but_serializes_integrators(repository):
+    prepared = threading.Event()
+    second_integrator = threading.Event()
+    failures = []
+
+    def prepare():
+        try:
+            with capacity.reserve_worktree_slots(repository, 2):
+                prepared.set()
+        except Exception as error:
+            failures.append(error)
+
+    def integrate():
+        try:
+            with capacity.serialize_integrations(repository):
+                second_integrator.set()
+        except Exception as error:
+            failures.append(error)
+
+    with capacity.serialize_integrations(repository):
+        with capacity.reserve_worktree_slots(repository, 1):
+            pass  # Candidate registration has completed; the full gate may run.
+        preparer = threading.Thread(target=prepare, daemon=True)
+        integrator = threading.Thread(target=integrate, daemon=True)
+        preparer.start()
+        integrator.start()
+        assert prepared.wait(2)
+        assert not second_integrator.wait(0.1)
+    assert second_integrator.wait(2)
+    preparer.join(2)
+    integrator.join(2)
+    assert not preparer.is_alive() and not integrator.is_alive()
     assert not failures
