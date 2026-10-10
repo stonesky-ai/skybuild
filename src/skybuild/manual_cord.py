@@ -119,8 +119,17 @@ def receive_assignment(client: Client, project: str, checkout: Path, *, worker: 
 
 
 def _petri_token(task):
-    petri = task.get("metadata", {}).get("_skybuild_workflow", {}).get("petri")
-    return petri.get("token") if isinstance(petri, dict) and petri.get("schema_version") == 1 else None
+    if not isinstance(task, dict) or not isinstance(task.get("metadata", {}), dict):
+        raise ManualCordError("Task response is invalid")
+    workflow = task.get("metadata", {}).get("_skybuild_workflow", {})
+    if not isinstance(workflow, dict):
+        raise ManualCordError("Workflow response is invalid")
+    petri = workflow.get("petri")
+    if isinstance(petri, dict) and petri.get("schema_version") == 1:
+        if not isinstance(petri.get("token"), dict):
+            raise ManualCordError("Petri task response is invalid")
+        return petri["token"]
+    return None
 
 
 def _workflow_path(assignment_path):
@@ -144,7 +153,7 @@ def _claim_assignment(client, project, assignment, task, destination, worker):
         _private_write(intent_path, (json.dumps(intent, sort_keys=True) + "\n").encode())
     elif existing != intent:
         raise ManualCordError("Assignment differs from the durable claim intent")
-    key = "manual-claim-" + hashlib.sha256((project + "\n" + assignment["assignment_id"]).encode()).hexdigest()
+    key = "manual-claim-" + hashlib.sha256((project + "\n" + assignment["assignment_id"] + "\n" + fingerprint).encode()).hexdigest()
     claim = client.claim_task(project, assignment["task_id"], expected_revision=intent["expected_revision"],
                               idempotency_key=key, lease_seconds=300)
     view = client.task_workflow(project, assignment["task_id"])
