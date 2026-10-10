@@ -23,11 +23,15 @@ The existing Wonko host watch is transient. This command cannot renew it.
 Worker capabilities are separate from active jobs. A completed one-shot worker
 is not a persistent service. This command never replays a worker attempt.
 
-Wowbagger does not yet have the reviewed managed runtime. Status reports this
-missing prerequisite. Its deployment, fresh host watch, scoped API identities,
-controller profile, pinned image, permits and qualified task inputs must precede
-worker launch. The current runtime targets Wonko; host qualification must precede
-a Wowbagger deployment. No owner token goes to a worker container.
+Wowbagger now has the reviewed runtime and exact worker image. Its networkless
+image smoke passed on that host. Its bounded managed watch runs for 60 minutes;
+the service lifetime is 3700 seconds. The inventory observes this exact service.
+It does not restart or renew the watch. Wonko's current watch is also bounded.
+
+Runtime and image capability checks do not establish product-worker readiness.
+Scoped API identities, controller profiles, permits and qualified task inputs
+must precede worker launch. The first two-worker controller remains on Wonko.
+No owner token goes to a worker container. No product job is active on Wowbagger.
 
 Output is JSON. A host failure does not hide the other host results. Driver
 output stays private. Exit 1 means a service is missing, stopped, unready, or
