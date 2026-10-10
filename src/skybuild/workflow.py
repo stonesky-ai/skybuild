@@ -354,14 +354,31 @@ class WorkflowContext(TypedDict, total=False):
     publication_verified: bool
     task_included: bool
     policy_reason: str
+    result_authorized: bool
+    control_authorized: bool
+    resume_due: bool
+    failure_confirmed: bool
 
 
-# Task 03 extends this catalogue with validation and control transitions.
+_ACTIVE_PLACES = (Place.READY, Place.WORKING, Place.VALIDATING, Place.INTEGRATING)
+_CONTROL_EVENTS = frozenset({"validation_result", "validation_failure", "integration_failure",
+                             "work_failure", "hold", "release_hold", "defer", "resume_deferred",
+                             "reopen", "update_control"})
 TRANSITIONS = (
     TransitionSpec("claim", (Place.READY,), Place.WORKING, "claim"),
     TransitionSpec("submit", (Place.WORKING,), Place.VALIDATING, "submit"),
     TransitionSpec("freeze", (Place.VALIDATING,), Place.INTEGRATING, "freeze"),
     TransitionSpec("accept", (Place.INTEGRATING,), Place.DONE, "accept"),
+    TransitionSpec("validation_result", (Place.VALIDATING,), None, "validation_result"),
+    TransitionSpec("validation_failure", (Place.VALIDATING,), Place.READY, "validation_failure"),
+    TransitionSpec("integration_failure", (Place.INTEGRATING,), Place.READY, "integration_failure"),
+    TransitionSpec("work_failure", (Place.WORKING,), Place.READY, "work_failure"),
+    TransitionSpec("hold", _ACTIVE_PLACES + (Place.DEFERRED,), Place.HOLD, "hold"),
+    TransitionSpec("release_hold", (Place.HOLD,), Place.READY, "release_hold"),
+    TransitionSpec("defer", _ACTIVE_PLACES + (Place.HOLD,), Place.DEFERRED, "defer"),
+    TransitionSpec("resume_deferred", (Place.DEFERRED,), Place.READY, "resume_deferred"),
+    TransitionSpec("reopen", (Place.DONE,), Place.READY, "reopen"),
+    TransitionSpec("update_control", (Place.HOLD, Place.DEFERRED), None, "update_control"),
 )
 
 
@@ -394,6 +411,8 @@ class TaskWorkflow:
 
     @staticmethod
     def _guard(token: TaskToken, name: str, context: WorkflowContext) -> bool:
+        if name in _CONTROL_EVENTS:
+            return _control_guard(token, name, context)
         if not isinstance(context, dict) or token.superseded or token.pending_action is not None:
             return False
         if context.get("current_inputs") is not True or context.get("effects_resolved") is not True:
@@ -446,6 +465,8 @@ class TaskWorkflow:
         spec = next((item for item in TRANSITIONS if item.event == event["event"]), None)
         if spec is None or token.place not in spec.sources or not self._guard(token, spec.guard, context):
             raise DomainError("workflow_conflict", "Workflow transition is not enabled", 409)
+        if spec.event in _CONTROL_EVENTS:
+            return _apply_control(token, event, context, spec)
         # Normal-path events have no caller-controlled detail fields.
         if set(event) != {"event", "operation_id", "expected_revision"}:
             _record_error("Unsupported fields for normal workflow transition")
@@ -469,16 +490,139 @@ class TaskWorkflow:
         if ((before.project_id, before.task_id) != (after.project_id, after.task_id) or
                 after.revision != before.revision + 1 or event["expected_revision"] != before.revision):
             _record_error("Journal facts require one revision of the same task")
-        return {"project_id": after.project_id, "task_id": after.task_id,
+        facts = {"project_id": after.project_id, "task_id": after.task_id,
                 "operation_id": event["operation_id"], "event": event["event"],
                 "from_place": before.place.value, "to_place": after.place.value,
                 "revision": after.revision, "input_generation": after.input_generation,
                 "attempt_id": after.attempt_id, "claim_fence": after.claim_fence,
                 "source_head": after.source_head, "target_base": after.target_base,
                 "definition_revision": after.definition_revision, "policy_version": after.policy_version,
-                "bundle_id": after.bundle_id, "policy_reason": after.policy_reason,
+                "bundle_id": after.bundle_id, "pending_action": after.pending_action,
+                "policy_reason": after.policy_reason,
                 "acceptance_mode": ("without_publication" if after.policy_reason is not None else "publication")
                 if after.place in {Place.INTEGRATING, Place.DONE} else None}
+        facts.update({name: event[name] for name in ("reason", "result", "until", "milestone_task_id")
+                      if name in event})
+        return facts
+
+
+def _control_guard(token, name, context):
+    if not isinstance(context, dict) or token.superseded or context.get("current_inputs") is not True:
+        return False
+    for field in ("source_head", "target_base", "definition_revision", "input_generation", "policy_version"):
+        if field not in context or type(context[field]) is not type(getattr(token, field)) or context[field] != getattr(token, field):
+            return False
+    if name == "validation_result":
+        return context.get("result_authorized") is True
+    if token.pending_action is not None and name not in {
+            token.pending_action, "validation_failure", "integration_failure", "work_failure"}:
+        return False
+    if context.get("control_authorized") is not True and not (name == "resume_deferred" and context.get("resume_due") is True):
+        return False
+    if name in {"validation_failure", "integration_failure"}:
+        return context.get("failure_confirmed") is True
+    if name == "work_failure":
+        return context.get("failure_confirmed") is True or context.get("effects_resolved") is True
+    if name in {"release_hold", "resume_deferred", "reopen"}:
+        return context.get("effects_resolved") is True
+    return token.pending_action is None or token.pending_action == name
+
+
+def _result_current(token, result):
+    return all(type(getattr(result, name)) is type(getattr(token, name)) and
+               getattr(result, name) == getattr(token, name)
+               for name in ("project_id", "task_id", "attempt_id", "claim_fence", "source_head",
+                            "target_base", "definition_revision", "input_generation", "policy_version"))
+
+
+def _stale_evidence(token):
+    return tuple(replace(result, state=ResultState.STALE) for result in token.evidence)
+
+
+def _defer_trigger(token, event):
+    if ("until" in event) == ("milestone_task_id" in event):
+        _record_error("Deferral requires exactly one date or milestone")
+    if "until" in event:
+        try:
+            value = datetime.fromisoformat(event["until"].replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            _record_error("Deferral date must include a timezone")
+        if value.tzinfo is None or value.utcoffset() is None:
+            _record_error("Deferral date must include a timezone")
+        return {"deferred_until": value.isoformat(), "milestone_task_id": None}
+    milestone = event["milestone_task_id"]
+    if not valid_identifier(milestone) or milestone == token.task_id:
+        _record_error("Invalid deferral milestone")
+    return {"deferred_until": None, "milestone_task_id": milestone}
+
+
+def _apply_control(token, event, context, spec):
+    name = spec.event
+    allowed = {"event", "operation_id", "expected_revision"}
+    allowed |= {"result"} if name == "validation_result" else {"reason", "next_action", "responsible"}
+    if name in {"defer", "update_control"}:
+        allowed |= {"until", "milestone_task_id"}
+    if set(event) - allowed:
+        _record_error("Unsupported fields for workflow transition")
+    changes = {"place": spec.destination or token.place, "revision": token.revision + 1}
+    if name == "validation_result":
+        if "result" not in event:
+            _record_error("Validation progress requires a result")
+        result = ValidationResult.from_dict(event["result"])
+        if not _result_current(token, result):
+            raise DomainError("workflow_conflict", "Validation result inputs are stale", 409)
+        if not result.producer.strip() or not result.check_id.strip():
+            _record_error("Validation result requires a producer and check identity")
+        if result.state == ResultState.STALE:
+            _record_error("Stale results belong to their original history")
+        if result.state == ResultState.NOT_APPLICABLE and not (result.policy_reason and result.policy_reason.strip()):
+            _record_error("Not-applicable validation requires a policy reason")
+        identity = lambda item: (item.stage, item.check_id, item.parameters, item.tool_version)
+        results = tuple(item for item in token.evidence if identity(item) != identity(result)) + (result,)
+        changes.update(evidence=results, findings=tuple(dict.fromkeys(token.findings + result.findings)))
+        if result.state == ResultState.FAILED:
+            fault = "; ".join(result.findings) or f"{result.stage.value}: {result.check_id} failed"
+            changes.update(place=Place.READY, faults=token.faults + (fault,), blocker=fault,
+                           next_action="Correct the validation fault and submit the task again",
+                           evidence=tuple(replace(item, state=ResultState.STALE) if item != result else item for item in results))
+        return replace(token, **changes)
+    reason = event.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        _record_error("Workflow control requires a reason")
+    for field in ("next_action", "responsible"):
+        if field in event:
+            if not event[field].strip():
+                _record_error(f"Workflow control requires a nonempty {field}")
+            changes[field] = event[field]
+    if name in {"validation_failure", "integration_failure", "work_failure"}:
+        changes.update(faults=token.faults + (reason,), blocker=reason, evidence=_stale_evidence(token),
+                       next_action=event.get("next_action", "Correct the fault and reassess the task"))
+    elif name in {"hold", "defer"}:
+        changes.update(hold_reason=reason, blocker=reason,
+                       interrupted_place=token.interrupted_place if token.pending_action else token.place,
+                       next_action=event.get("next_action", "Resolve the control request"))
+        if name == "defer":
+            changes.update(_defer_trigger(token, event))
+        else:
+            changes.update(deferred_until=None, milestone_task_id=None)
+        if context.get("effects_resolved") is not True:
+            changes.update(place=token.place, pending_action=name,
+                           next_action="Resolve the active effects before applying the control request")
+        else:
+            changes["pending_action"] = None
+    elif name in {"release_hold", "resume_deferred", "reopen"}:
+        changes.update(blocker=None, hold_reason=None, deferred_until=None, milestone_task_id=None,
+                       interrupted_place=None, pending_action=None,
+                       next_action=event.get("next_action", "Reassess inputs, dependencies and permissions before admission"))
+        if name == "reopen":
+            changes.update(input_generation=token.input_generation + 1, evidence=_stale_evidence(token))
+    elif name == "update_control":
+        changes.update(hold_reason=reason, blocker=reason)
+        if "until" in event or "milestone_task_id" in event:
+            if token.place != Place.DEFERRED:
+                _record_error("Only Deferred accepts a deferral trigger")
+            changes.update(_defer_trigger(token, event))
+    return replace(token, **changes)
 
 
 ACTION_FIELDS = frozenset({"reason", "next_action", "responsible", "until", "milestone_task_id"})
