@@ -79,6 +79,31 @@ def test_execution_absence_does_not_prove_safety_and_held_effects_need_reconcili
     assert analyze(p)["verdict"] == "insufficient_evidence"
 
 
+@pytest.mark.parametrize("changes", [{"status": "done"}, {"phase": "done"},
+                                    {"status": "done", "phase": "done"}])
+def test_guarded_transition_detects_matching_corruption_across_views(changes):
+    row = task(Place.VALIDATING)
+    row["status"] = "in-progress"
+    row.update(changes)
+    p = packet(row)
+    p["workflow"] = {"task": deepcopy(row) | {"enabled_actions": []},
+                     "token": Store.workflow_token(row).to_dict(), "available_actions": []}
+    p["history"] = {"complete": True, "items": [{"revision": 1, "operation": "workflow.submit",
+                      "event_facts": {"to_place": "validating"}, "after_state": deepcopy(row)}]}
+    result = analyze(p)
+    assert result["verdict"] == "contradiction"
+    assert next(c for c in result["checks"] if c["code"] == "guarded_transition_projection")["outcome"] == "contradiction"
+
+
+def test_legacy_enrollment_preserves_compatibility_fields():
+    row = task(Place.HOLD)
+    row.update(status="blocked", phase="reassess")
+    p = packet(row)
+    p["history"] = {"complete": True, "items": [{"revision": 1, "operation": "workflow_initialized",
+                                                "after_state": deepcopy(row)}]}
+    assert analyze(p)["verdict"] == "consistent"
+
+
 def test_inventory_finishes_full_page_with_another_request_and_rejects_duplicates():
     class API:
         calls = []

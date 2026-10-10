@@ -148,6 +148,23 @@ def analyze(packet):
             checks.append(check("latest_journal_state", "contradiction" if differences else "supported",
                                 {"revision": latest.get("revision"), "different_fields": differences},
                                 "Reconcile the latest journal snapshot and task record." if differences else None))
+            # Guarded transitions write compatibility fields as well as the token.
+            # Enrollment intentionally preserves legacy status/phase, so do not
+            # apply this mapping to workflow_initialized or ordinary task edits.
+            facts = latest.get("event_facts") or {}
+            if str(latest.get("operation", "")).startswith("workflow."):
+                expected_status = {"ready": "ready", "working": "in-progress",
+                                   "validating": "in-progress", "integrating": "in-progress",
+                                   "done": "done", "deferred": "deferred", "hold": "blocked"}
+                destination = facts.get("to_place")
+                agrees = (destination == token.place.value and destination in expected_status
+                          and task.get("status") == expected_status[destination]
+                          and task.get("phase") == destination)
+                checks.append(check("guarded_transition_projection",
+                                    "supported" if agrees else "contradiction",
+                                    {"to_place": destination, "token_place": token.place.value,
+                                     "status": task.get("status"), "phase": task.get("phase")},
+                                    None if agrees else "Reconcile the guarded transition facts, token and compatibility fields."))
     if execution:
         truncated = [name for name in ("effects", "reservations", "observations")
                      if execution.get(name, {}).get("truncated")]

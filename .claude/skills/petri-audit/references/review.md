@@ -25,3 +25,5 @@ Each review has this form:
 Save all records as one JSON list. `assemble` rejects mismatched revisions, report digests and duplicate task reviews. It preserves false-positive dismissals separately. False-negative observations can add proposals even when the tool reported consistency. Every proposal stays pending and non-executing. Keep originals and append a new review artifact after re-review; do not overwrite evidence.
 
 The model is an independent judgment, not an accuracy oracle. Report sample composition, confirmed/false-positive/false-negative/inconclusive counts and concrete corrections. Do not claim population accuracy from a small stratified sample. No outcome renews approval or authorizes an API mutation.
+
+For a latest complete guarded `workflow.*` journal event, compare its `event_facts.to_place` with the token, status and phase. The `workflow_initialized` enrollment event preserves legacy compatibility fields; do not apply the guarded-transition mapping to it. No proposals is a valid result when the evidence identifies no actionable defect.
