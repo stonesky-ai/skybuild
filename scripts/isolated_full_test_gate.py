@@ -767,17 +767,36 @@ def _wait_exit(name: str, run_id: str, container_id: str, kind: str,
     raise GateError("Owned container exceeded its bounded execution deadline")
 
 
+def _missing_container_error(stderr: str, name: str) -> bool:
+    return stderr.strip() in {
+        f"Error: No such object: {name}",
+        f"Error: No such container: {name}",
+        f"Error response from daemon: No such object: {name}",
+        f"Error response from daemon: No such container: {name}",
+        f"Error response from daemon: no such object: {name}",
+        f"Error response from daemon: no such container: {name}",
+    }
+
+
+def _missing_network_error(stderr: str, name: str) -> bool:
+    return stderr.strip() in {
+        f"Error: No such network: {name}",
+        f"Error response from daemon: No such network: {name}",
+        f"Error response from daemon: no such network: {name}",
+        f"Error response from daemon: network {name} not found",
+    }
+
+
 def _container_info(name: str, run_id: str, expected_id: str | None, kind: str,
                     image_id: str | None = None) -> dict | None:
     target = expected_id or name
     result = _docker("inspect", "--type", "container", target, check=False)
     if result.returncode:
-        if result.stderr.strip() in {f"Error: No such object: {target}", f"Error: No such container: {target}"}:
+        if _missing_container_error(result.stderr, target):
             if expected_id is None:
                 return None
             by_name = _docker("inspect", "--type", "container", name, check=False)
-            if by_name.returncode and by_name.stderr.strip() in {
-                    f"Error: No such object: {name}", f"Error: No such container: {name}"}:
+            if by_name.returncode and _missing_container_error(by_name.stderr, name):
                 return None
             if by_name.returncode:
                 raise GateError("Container absence/name reconciliation is unknown")
@@ -828,7 +847,7 @@ def _remove_container(name: str, run_id: str, container_id: str | None,
 def _network_info(name: str, run_id: str, expected_id: str | None) -> dict | None:
     result = _docker("network", "inspect", name, check=False)
     if result.returncode:
-        if result.stderr.strip() == f"Error: No such network: {name}":
+        if _missing_network_error(result.stderr, name):
             return None
         raise GateError("Network inspection outcome is unknown")
     rows = json.loads(result.stdout)
@@ -932,7 +951,7 @@ def _check_candidate_inspect(row: dict, *, name: str, run_id: str, container_id:
             or host.get("NanoCpus") != 2_000_000_000 or host.get("PidsLimit") != 256
             or host.get("ShmSize") != 256 * 1024**2 or host.get("Privileged") is not False
             or log_config.get("Type") != "local"
-            or log_config.get("Config") != {"max-size": "128m", "max-file": "1"}
+            or log_config.get("Config") != {"max-size": "128m", "max-file": "2"}
             or host.get("PidMode") == "host" or host.get("IpcMode") == "host"
             or host.get("PortBindings") not in ({}, None)
             or host.get("CapAdd") not in ([], None)
@@ -1016,7 +1035,7 @@ def _check_postgres_inspect(row: dict, *, name: str, run_id: str, container_id: 
             or host.get("Memory") != 1536 * 1024**2 or host.get("PidsLimit") != 128
             or host.get("PortBindings") not in ({}, None) or host.get("ReadonlyRootfs") is not True
             or log_config.get("Type") != "local"
-            or log_config.get("Config") != {"max-size": "32m", "max-file": "1"}
+            or log_config.get("Config") != {"max-size": "32m", "max-file": "2"}
             or host.get("CapAdd") not in ([], None) or "ALL" not in host.get("CapDrop", [])
             or host.get("SecurityOpt") is None
             or "no-new-privileges:true" not in host.get("SecurityOpt", [])
@@ -1052,7 +1071,7 @@ def _check_firewall_inspect(row: dict, *, name: str, run_id: str, container_id: 
             or mounts[0].get("Type") != "tmpfs" or mounts[0].get("Destination") != "/run"
             or mounts[0].get("RW") is not True
             or log_config.get("Type") != "local"
-            or log_config.get("Config") != {"max-size": "4m", "max-file": "1"}
+            or log_config.get("Config") != {"max-size": "4m", "max-file": "2"}
             or row.get("Config", {}).get("Cmd") != [
                 "-ec", _firewall_script(postgres_ip, candidate_ip,
                                          postgres_namespace=postgres_namespace)]
@@ -1090,7 +1109,7 @@ def _check_probe_inspect(row: dict, *, name: str, run_id: str, container_id: str
             or host.get("NanoCpus") != 250_000_000 or host.get("PidsLimit") != 32
             or host.get("PortBindings") not in ({}, None) or actual != expected
             or log_config.get("Type") != "local"
-            or log_config.get("Config") != {"max-size": "4m", "max-file": "1"}
+            or log_config.get("Config") != {"max-size": "4m", "max-file": "2"}
             or actual_environment != environment
             or config.get("Entrypoint") != ["/usr/bin/env"]
             or config.get("Cmd") != ["python3", "/runner/network_probe.py", mode,
@@ -1373,7 +1392,7 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path | None, key_path
         pg_args = [
             "--network", resource_names["network"], "--memory=1536m", "--memory-swap=1536m",
             "--cpus=1", "--pids-limit=128", "--read-only", "--cap-drop=ALL",
-            "--log-driver=local", "--log-opt=max-size=32m", "--log-opt=max-file=1",
+            "--log-driver=local", "--log-opt=max-size=32m", "--log-opt=max-file=2",
             "--security-opt=no-new-privileges", "--user", "999:999",
             "--tmpfs", "/var/lib/postgresql/data:rw,nosuid,nodev,noexec,size=1073741824,uid=999,gid=999,mode=0700",
             "--tmpfs", "/var/run/postgresql:rw,nosuid,nodev,noexec,size=16777216,uid=999,gid=999,mode=3775",
@@ -1403,7 +1422,7 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path | None, key_path
             "--network", resource_names["network"], "--add-host", "db:" + pg_ip,
             "--memory=4g", "--memory-swap=4g",
             "--cpus=2", "--pids-limit=256", "--shm-size=256m", "--read-only",
-            "--log-driver=local", "--log-opt=max-size=128m", "--log-opt=max-file=1",
+            "--log-driver=local", "--log-opt=max-size=128m", "--log-opt=max-file=2",
             "--cap-drop=ALL", "--security-opt=no-new-privileges", "--user", "10001:10001",
             "--workdir", "/scratch", "--mount",
             f"type=bind,src={archive_root},dst=/candidate,readonly", "--tmpfs",
@@ -1448,7 +1467,7 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path | None, key_path
                 "--network=container:" + namespace_id, "--memory=128m", "--memory-swap=128m",
                 "--cpus=0.25", "--pids-limit=32", "--read-only", "--cap-drop=ALL",
                 "--tmpfs", "/run:rw,nosuid,nodev,size=1m,mode=0755",
-                "--log-driver=local", "--log-opt=max-size=4m", "--log-opt=max-file=1",
+                "--log-driver=local", "--log-opt=max-size=4m", "--log-opt=max-file=2",
                 "--cap-add=NET_ADMIN", "--security-opt=no-new-privileges", "--entrypoint", "/bin/sh",
                 image_id, "-ec", _firewall_script(pg_ip, candidate_ip, postgres_namespace=pg_namespace),
             ]
@@ -1476,7 +1495,7 @@ def execute(checkout: Path, predicate_path: Path, go_path: Path | None, key_path
             probe_args = [
                 "--network=container:" + namespace_id, "--memory=128m", "--memory-swap=128m",
                 "--cpus=0.25", "--pids-limit=32", "--read-only", "--cap-drop=ALL",
-                "--log-driver=local", "--log-opt=max-size=4m", "--log-opt=max-file=1",
+                "--log-driver=local", "--log-opt=max-size=4m", "--log-opt=max-file=2",
                 "--security-opt=no-new-privileges", "--mount",
                 f"type=bind,src={probe_path},dst=/runner/network_probe.py,readonly",
             ]
