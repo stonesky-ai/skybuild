@@ -22,7 +22,10 @@ dispatch, Client, contracts, and JobUnitManager modules with bytes at a clean
 controller Git HEAD. It also requires an owner-controlled, mode-0600 profile
 manifest outside the controller checkout and private worker attempt state. The
 worker import checkout must equal the verified controller source root; the
-candidate clone is made separately under private attempt state. The manifest schema is
+candidate clone is made separately under private attempt state. The bridge
+constructs the exact `JobUnitManager` with Python's real `subprocess.run`; its
+launch and reconcile APIs accept no caller-supplied process witness. The
+manifest schema is
 `skybuild.cpu-worker-controller-profile.v1` and has exactly these fields:
 
 ```json

@@ -134,6 +134,14 @@ def _attempt_log_path(state_dir: Path, attempt_id: str) -> Path:
     return state_dir / ('worker-' + _digest(attempt_id.encode()) + '.log')
 
 
+def _unit_manager(state_dir: Path) -> JobUnitManager:
+    """Construct the production adapter; no caller-supplied process witness."""
+    manager = JobUnitManager(state_dir)
+    if type(manager) is not JobUnitManager or manager.run is not subprocess.run:
+        raise CPUWorkerBridgeError('CPU bridge requires the pinned JobUnitManager and subprocess runner')
+    return manager
+
+
 def _write_exclusive(path: Path, data: bytes, mode: int = 0o600) -> None:
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
     with os.fdopen(descriptor, 'wb') as stream:
@@ -413,7 +421,7 @@ def prepare_worker(client: Any, plan: CPUWorkerPlan, *, action_id: str, operatio
                              assignment_digest, argv_digest, unit_name, launch_nonce)
 
 
-def launch_worker(client: Any, manager: JobUnitManager, prepared: PreparedCPUWorker) -> dict:
+def launch_worker(client: Any, prepared: PreparedCPUWorker) -> dict:
     def verify_pins() -> None:
         if prepared.plan.checkout.resolve(strict=True) != Path(__file__).resolve().parents[2]:
             raise CPUWorkerBridgeError('Worker import checkout differs from the controller source root')
@@ -438,8 +446,8 @@ def launch_worker(client: Any, manager: JobUnitManager, prepared: PreparedCPUWor
             or _digest(_file_bytes(prepared.plan.permit_file, limit=16384, private=True)) != prepared.plan.permit_digest):
         raise CPUWorkerBridgeError('Immutable worker snapshots changed after preparation')
     _validate_permit(prepared.plan, assignment, assignment_digest)
-    if not manager.state_dir.is_absolute() or manager.state_dir.resolve().is_relative_to(prepared.plan.checkout.resolve()):
-        raise CPUWorkerBridgeError('JobUnitManager state must remain outside the source checkout')
+    _private_dir(prepared.plan.external_state_dir)
+    manager = _unit_manager(prepared.plan.external_state_dir)
     authorization = client.begin_cpu_worker_dispatch(prepared.plan.project_id, prepared.operation_id)
     if authorization.get('start_once') is not True:
         return {'started': False, 'reason': 'one-shot launch authorization was already consumed'}
@@ -461,7 +469,7 @@ def launch_worker(client: Any, manager: JobUnitManager, prepared: PreparedCPUWor
             'launch_nonce': prepared.launch_nonce}
 
 
-def reconcile_worker(client: Any, manager: JobUnitManager, prepared: PreparedCPUWorker) -> dict:
+def reconcile_worker(client: Any, prepared: PreparedCPUWorker) -> dict:
     """Persist exact natural completion; any mismatch or uncertainty stays held."""
     def verify_pins() -> None:
         if _controller_pin(prepared.plan, prepared.interpreter_digest) != (
@@ -469,6 +477,8 @@ def reconcile_worker(client: Any, manager: JobUnitManager, prepared: PreparedCPU
                 prepared.controller_profile_digest):
             raise CPUWorkerBridgeError('Trusted controller or owner profile changed after preparation')
 
+    _private_dir(prepared.plan.external_state_dir)
+    manager = _unit_manager(prepared.plan.external_state_dir)
     current = client.get_cpu_worker_dispatch(prepared.plan.project_id, prepared.operation_id)
     if current.get('state') == 'settled':
         return {'observed': True, 'settled': True, 'state': 'settled'}
