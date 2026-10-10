@@ -8,8 +8,17 @@ current task to continue during a contact outage before cutoff. It covers
 reconnect, current-clock observation, restart invalidation, clock
 parking/reconciliation, checkpoint summaries,
 operator stop request/observation, process uncertainty and exposure release.
-`JournalRoom` bounds the event history at eight records so TLC explores a
-finite state space; it is a model bound, not a production journal limit.
+`JournalRoom` bounds modeled journal events at eight so TLC explores a finite
+state space; it is a model bound, not a production journal limit. To control
+the state count, the model stores this event count instead of event payloads,
+stores only the presence/time of the one pinned-task admission (the task ID is
+fixed structurally), and uses
+monotonic safety-monitor flags instead of an append-only call history. TLC
+checks invariants in every reachable state, so the flags preserve detection of
+any task/closeout window, parked-clock, or missing-current-clock violation.
+This abstraction intentionally omits journal content/hash behavior and call
+ordering/multiplicity; those remain source-test concerns. The mutation still
+emits a concrete after-grace task call and must violate `CallsRespectWindow`.
 
 Run `tlc` against `AttemptCloseout.cfg` for the bounded safety check. Run
 `AttemptCloseout-broken.cfg` as a mutation: `BrokenLateTaskCall` deliberately

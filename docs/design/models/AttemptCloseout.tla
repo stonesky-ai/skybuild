@@ -1,5 +1,5 @@
 ---------------- MODULE AttemptCloseout ----------------
-EXTENDS Naturals, Sequences, FiniteSets
+EXTENDS Naturals, FiniteSets
 
 CONSTANTS Cutoff, GraceEnd, FinishCurrent, CheckpointStop, Policy, Broken
 ASSUME Cutoff \in Nat
@@ -10,10 +10,12 @@ ASSUME Broken \in BOOLEAN
 
 PinnedTask == "task-1"
 VARIABLES now, clockReady, contact, clockParked, operatorStop, stopAck,
-          process, exposureHeld, foreignConflict, admissions, calls, journal
+          process, exposureHeld, foreignConflict, admitted, admissionAt,
+          callsObserved, badCallWindow, badCallParked, badCallClock, journalCount
 
 vars == <<now, clockReady, contact, clockParked, operatorStop, stopAck,
-          process, exposureHeld, foreignConflict, admissions, calls, journal>>
+          process, exposureHeld, foreignConflict, admitted, admissionAt,
+          callsObserved, badCallWindow, badCallParked, badCallClock, journalCount>>
 
 Init ==
     /\ now = 0
@@ -25,60 +27,70 @@ Init ==
     /\ process = "running"
     /\ exposureHeld = TRUE
     /\ foreignConflict = FALSE
-    /\ admissions = <<>>
-    /\ calls = <<>>
-    /\ journal = <<>>
+    /\ admitted = FALSE
+    /\ admissionAt = 0
+    /\ callsObserved = FALSE
+    /\ badCallWindow = FALSE
+    /\ badCallParked = FALSE
+    /\ badCallClock = FALSE
+    /\ journalCount = 0
 
 Advance ==
     /\ now < 4
     /\ now' = now + 1
     /\ UNCHANGED <<clockReady, contact, clockParked, operatorStop, stopAck,
-                    process, exposureHeld, foreignConflict, admissions, calls, journal>>
+                    process, exposureHeld, foreignConflict, admitted, admissionAt,
+                    callsObserved, badCallWindow, badCallParked, badCallClock, journalCount>>
 
 ObserveClock ==
     /\ ~clockReady
     /\ ~clockParked
     /\ clockReady' = TRUE
-    /\ journal' = Append(journal, [kind |-> "clock_sample", at |-> now])
-    /\ UNCHANGED <<now, contact, clockParked, operatorStop, stopAck,
-                    process, exposureHeld, foreignConflict, admissions, calls>>
+    /\ journalCount' = journalCount + 1
+    /\ UNCHANGED <<now, contact, clockParked, operatorStop, stopAck, process,
+                    exposureHeld, foreignConflict, admitted, admissionAt,
+                    callsObserved, badCallWindow, badCallParked, badCallClock>>
 
 Restart ==
     /\ clockReady
     /\ clockReady' = FALSE
-    /\ UNCHANGED <<now, contact, clockParked, operatorStop, stopAck,
-                    process, exposureHeld, foreignConflict, admissions, calls, journal>>
+    /\ UNCHANGED <<now, contact, clockParked, operatorStop, stopAck, process,
+                    exposureHeld, foreignConflict, admitted, admissionAt,
+                    callsObserved, badCallWindow, badCallParked, badCallClock, journalCount>>
 
 LoseContact ==
     /\ contact = "connected"
     /\ contact' = "lost"
-    /\ journal' = Append(journal, [kind |-> "contact_lost", at |-> now])
-    /\ UNCHANGED <<now, clockReady, clockParked, operatorStop, stopAck,
-                    process, exposureHeld, foreignConflict, admissions, calls>>
+    /\ journalCount' = journalCount + 1
+    /\ UNCHANGED <<now, clockReady, clockParked, operatorStop, stopAck, process,
+                    exposureHeld, foreignConflict, admitted, admissionAt,
+                    callsObserved, badCallWindow, badCallParked, badCallClock>>
 
 RestoreContact ==
     /\ contact = "lost"
     /\ contact' = "connected"
-    /\ journal' = Append(journal, [kind |-> "contact_restored", at |-> now])
-    /\ UNCHANGED <<now, clockReady, clockParked, operatorStop, stopAck,
-                    process, exposureHeld, foreignConflict, admissions, calls>>
+    /\ journalCount' = journalCount + 1
+    /\ UNCHANGED <<now, clockReady, clockParked, operatorStop, stopAck, process,
+                    exposureHeld, foreignConflict, admitted, admissionAt,
+                    callsObserved, badCallWindow, badCallParked, badCallClock>>
 
 ParkClock ==
     /\ ~clockParked
     /\ clockParked' = TRUE
     /\ clockReady' = FALSE
-    /\ journal' = Append(journal, [kind |-> "clock_parked", at |-> now])
-    /\ UNCHANGED <<now, contact, operatorStop, stopAck, process,
-                    exposureHeld, foreignConflict, admissions, calls>>
+    /\ journalCount' = journalCount + 1
+    /\ UNCHANGED <<now, contact, operatorStop, stopAck, process, exposureHeld,
+                    foreignConflict, admitted, admissionAt, callsObserved,
+                    badCallWindow, badCallParked, badCallClock>>
 
 ReconcileClock ==
     /\ clockParked
     /\ clockParked' = FALSE
     /\ clockReady' = FALSE
-    /\ journal' = Append(journal, [kind |-> "clock_reconciled", at |-> now,
-                                   cutoff |-> Cutoff])
-    /\ UNCHANGED <<now, contact, operatorStop, stopAck, process,
-                    exposureHeld, foreignConflict, admissions, calls>>
+    /\ journalCount' = journalCount + 1
+    /\ UNCHANGED <<now, contact, operatorStop, stopAck, process, exposureHeld,
+                    foreignConflict, admitted, admissionAt, callsObserved,
+                    badCallWindow, badCallParked, badCallClock>>
 
 AdmitPinnedTask ==
     /\ clockReady
@@ -87,11 +99,14 @@ AdmitPinnedTask ==
     /\ ~clockParked
     /\ ~operatorStop
     /\ ~foreignConflict
-    /\ admissions' = Append(admissions, [task |-> PinnedTask, at |-> now])
+    /\ ~admitted
+    /\ admitted' = TRUE
+    /\ admissionAt' = now
     /\ clockReady' = FALSE
-    /\ journal' = Append(journal, [kind |-> "admit", task |-> PinnedTask, at |-> now])
-    /\ UNCHANGED <<now, contact, clockParked, operatorStop, stopAck,
-                    process, exposureHeld, foreignConflict, calls>>
+    /\ journalCount' = journalCount + 1
+    /\ UNCHANGED <<now, contact, clockParked, operatorStop, stopAck, process,
+                    exposureHeld, foreignConflict, callsObserved, badCallWindow,
+                    badCallParked, badCallClock>>
 
 TaskCall ==
     /\ clockReady
@@ -100,14 +115,16 @@ TaskCall ==
     /\ ~operatorStop
     /\ ~foreignConflict
     /\ process = "running"
-    /\ Len(admissions) > 0
+    /\ admitted
     /\ (contact = "connected" \/ Policy = FinishCurrent)
-    /\ calls' = Append(calls, [kind |-> "task", at |-> now,
-                               parked |-> clockParked, clocked |-> clockReady])
+    /\ callsObserved' = TRUE
+    /\ badCallWindow' = badCallWindow \/ (now >= Cutoff)
+    /\ badCallParked' = badCallParked \/ clockParked
+    /\ badCallClock' = badCallClock \/ ~clockReady
     /\ clockReady' = FALSE
-    /\ journal' = Append(journal, [kind |-> "task_call", at |-> now])
-    /\ UNCHANGED <<now, contact, clockParked, operatorStop, stopAck,
-                    process, exposureHeld, foreignConflict, admissions>>
+    /\ journalCount' = journalCount + 1
+    /\ UNCHANGED <<now, contact, clockParked, operatorStop, stopAck, process,
+                    exposureHeld, foreignConflict, admitted, admissionAt>>
 
 BrokenLateTaskCall ==
     /\ Broken
@@ -117,13 +134,15 @@ BrokenLateTaskCall ==
     /\ ~operatorStop
     /\ ~foreignConflict
     /\ process = "running"
-    /\ Len(admissions) > 0
-    /\ calls' = Append(calls, [kind |-> "task", at |-> now,
-                               parked |-> clockParked, clocked |-> clockReady])
+    /\ admitted
+    /\ callsObserved' = TRUE
+    /\ badCallWindow' = badCallWindow \/ (now >= Cutoff)
+    /\ badCallParked' = badCallParked \/ clockParked
+    /\ badCallClock' = badCallClock \/ ~clockReady
     /\ clockReady' = FALSE
-    /\ journal' = Append(journal, [kind |-> "broken_task_call", at |-> now])
-    /\ UNCHANGED <<now, contact, clockParked, operatorStop, stopAck,
-                    process, exposureHeld, foreignConflict, admissions>>
+    /\ journalCount' = journalCount + 1
+    /\ UNCHANGED <<now, contact, clockParked, operatorStop, stopAck, process,
+                    exposureHeld, foreignConflict, admitted, admissionAt>>
 
 CloseoutCall ==
     /\ clockReady
@@ -133,67 +152,76 @@ CloseoutCall ==
     /\ ~operatorStop
     /\ ~foreignConflict
     /\ process = "running"
-    /\ calls' = Append(calls, [kind |-> "closeout", at |-> now,
-                               parked |-> clockParked, clocked |-> clockReady])
+    /\ callsObserved' = TRUE
+    /\ badCallWindow' = badCallWindow \/ (now < Cutoff \/ now >= GraceEnd)
+    /\ badCallParked' = badCallParked \/ clockParked
+    /\ badCallClock' = badCallClock \/ ~clockReady
     /\ clockReady' = FALSE
-    /\ journal' = Append(journal, [kind |-> "closeout_call", at |-> now])
-    /\ UNCHANGED <<now, contact, clockParked, operatorStop, stopAck,
-                    process, exposureHeld, foreignConflict, admissions>>
+    /\ journalCount' = journalCount + 1
+    /\ UNCHANGED <<now, contact, clockParked, operatorStop, stopAck, process,
+                    exposureHeld, foreignConflict, admitted, admissionAt>>
 
 RecordCheckpoint ==
-    /\ journal' = Append(journal, [kind |-> "checkpoint", task |-> PinnedTask, at |-> now])
+    /\ journalCount' = journalCount + 1
     /\ UNCHANGED <<now, clockReady, contact, clockParked, operatorStop, stopAck,
-                    process, exposureHeld, foreignConflict, admissions, calls>>
+                    process, exposureHeld, foreignConflict, admitted, admissionAt,
+                    callsObserved, badCallWindow, badCallParked, badCallClock>>
 
 RequestOperatorStop ==
     /\ ~operatorStop
     /\ operatorStop' = TRUE
-    /\ journal' = Append(journal, [kind |-> "operator_stop_requested", at |-> now])
+    /\ journalCount' = journalCount + 1
     /\ UNCHANGED <<now, clockReady, contact, clockParked, stopAck, process,
-                    exposureHeld, foreignConflict, admissions, calls>>
+                    exposureHeld, foreignConflict, admitted, admissionAt,
+                    callsObserved, badCallWindow, badCallParked, badCallClock>>
 
 ObserveUnknown ==
     /\ process # "exited"
     /\ process' = "unknown"
     /\ exposureHeld' = TRUE
-    /\ journal' = Append(journal, [kind |-> "process_unknown", at |-> now])
+    /\ journalCount' = journalCount + 1
     /\ UNCHANGED <<now, clockReady, contact, clockParked, operatorStop, stopAck,
-                    foreignConflict, admissions, calls>>
+                    foreignConflict, admitted, admissionAt, callsObserved,
+                    badCallWindow, badCallParked, badCallClock>>
 
 ObserveExited ==
     /\ process # "exited"
     /\ process' = "exited"
-    /\ journal' = Append(journal, [kind |-> "process_exited", at |-> now])
+    /\ journalCount' = journalCount + 1
     /\ UNCHANGED <<now, clockReady, contact, clockParked, operatorStop, stopAck,
-                    exposureHeld, foreignConflict, admissions, calls>>
+                    exposureHeld, foreignConflict, admitted, admissionAt,
+                    callsObserved, badCallWindow, badCallParked, badCallClock>>
 
 ObserveForeignInvocation ==
     /\ foreignConflict = FALSE
     /\ foreignConflict' = TRUE
     /\ exposureHeld' = TRUE
-    /\ journal' = Append(journal, [kind |-> "foreign_process_identity", at |-> now])
+    /\ journalCount' = journalCount + 1
     /\ UNCHANGED <<now, clockReady, contact, clockParked, operatorStop, stopAck,
-                    process, admissions, calls>>
+                    process, admitted, admissionAt, callsObserved, badCallWindow,
+                    badCallParked, badCallClock>>
 
 AcknowledgeOperatorStop ==
     /\ operatorStop
     /\ process = "exited"
     /\ stopAck = FALSE
     /\ stopAck' = TRUE
-    /\ journal' = Append(journal, [kind |-> "operator_stop_observed", at |-> now])
+    /\ journalCount' = journalCount + 1
     /\ UNCHANGED <<now, clockReady, contact, clockParked, operatorStop, process,
-                    exposureHeld, foreignConflict, admissions, calls>>
+                    exposureHeld, foreignConflict, admitted, admissionAt,
+                    callsObserved, badCallWindow, badCallParked, badCallClock>>
 
 ReconcileExposure ==
     /\ process = "exited"
     /\ ~foreignConflict
     /\ exposureHeld
     /\ exposureHeld' = FALSE
-    /\ journal' = Append(journal, [kind |-> "exposure_reconciled", at |-> now])
+    /\ journalCount' = journalCount + 1
     /\ UNCHANGED <<now, clockReady, contact, clockParked, operatorStop, stopAck,
-                    process, foreignConflict, admissions, calls>>
+                    process, foreignConflict, admitted, admissionAt, callsObserved,
+                    badCallWindow, badCallParked, badCallClock>>
 
-JournalRoom == Len(journal) < 8
+JournalRoom == journalCount < 8
 Next == Advance \/ Restart \/ (JournalRoom /\ (ObserveClock \/ LoseContact \/ RestoreContact
         \/ ParkClock \/ ReconcileClock \/ AdmitPinnedTask \/ TaskCall
         \/ BrokenLateTaskCall \/ CloseoutCall \/ RecordCheckpoint
@@ -202,15 +230,12 @@ Next == Advance \/ Restart \/ (JournalRoom /\ (ObserveClock \/ LoseContact \/ Re
 
 Spec == Init /\ [][Next]_vars
 
-OnlyPinnedTask == \A i \in 1..Len(admissions) : admissions[i].task = PinnedTask
-AdmissionsBeforeCutoff == \A i \in 1..Len(admissions) : admissions[i].at < Cutoff
-CallsRespectWindow ==
-    \A i \in 1..Len(calls) :
-        IF calls[i].kind = "task"
-        THEN calls[i].at < Cutoff
-        ELSE Cutoff <= calls[i].at /\ calls[i].at < GraceEnd
-NoCallWhileClockParked == \A i \in 1..Len(calls) : ~calls[i].parked
-EveryCallHasCurrentClock == \A i \in 1..Len(calls) : calls[i].clocked
+OnlyPinnedTask == PinnedTask = "task-1"
+AdmissionsBeforeCutoff == admitted => admissionAt < Cutoff
+CallsRespectWindow == ~badCallWindow
+NoCallWhileClockParked == ~badCallParked
+EveryCallHasCurrentClock == ~badCallClock
+CallViolationsHaveObservation == callsObserved \/ (~badCallWindow /\ ~badCallParked /\ ~badCallClock)
 UnknownRetainsExposure == process = "unknown" => exposureHeld
 StopAckNeedsOperatorAndExit == stopAck => operatorStop /\ process = "exited"
 UncertainOrRunningRetainsExposure == process # "exited" => exposureHeld
