@@ -226,3 +226,63 @@ def test_result_refuses_rename_from_outside_scope(pinned, tmp_path):
         send_result(client, "skybuild", repo, worktree, worker="wonko",
                     assignment=envelope, result=result)
     assert client.sent == []
+
+def test_legacy_receive_adapter_binds_real_producer_to_cpu_bridge(pinned, tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+    from skybuild.cpu_worker_bridge import CPUWorkerBridgeError, _read_assignment
+
+    repo, envelope = pinned
+    token = {"project_id": "skybuild", "task_id": envelope["task_id"],
+             "place": "ready", "pending_action": None, "superseded": False}
+
+    class FencedClient(FakeClient):
+        def get_task(self, project, task_id):
+            return super().get_task(project, task_id) | {
+                "metadata": {"_skybuild_workflow": {"petri": {"token": token}}}}
+
+        def claim_task(self, project, task_id, **kwargs):
+            assert task_id == envelope["task_id"]
+            assert kwargs["expected_revision"] == 2
+            return {"holder": "wonko", "held": True, "fence": 1, "task_revision": 3,
+                    "lease_until": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()}
+
+        def task_workflow(self, project, task_id):
+            return {"token": token | {"place": "working", "attempt_id": "attempt-one",
+                                      "claim_fence": 1, "revision": 3}}
+
+    state = tmp_path / "cpu-assignment"
+    state.mkdir(mode=0o700)
+    received = receive_assignment(FencedClient([message(envelope)]), "skybuild", repo,
+        worker="wonko", dispatcher="jeltz", message_id="assignment-1",
+        destination=state / "assignment.json", expected_envelope=envelope)
+    preclaim = state / "preclaim.json"
+    from skybuild.auto_patch_controller import _bind_legacy_preclaim
+    assert "task_id" not in received
+    bound = _bind_legacy_preclaim(received, state / "assignment.json",
+        expected_envelope=envelope, project="skybuild")
+    assert "task_id" not in received
+    preclaim.write_text(json.dumps(bound))
+    preclaim.chmod(0o600)
+    plan = SimpleNamespace(assignment_dir=state, checkout=repo,
+                           worker_id="wonko", dispatcher_id="jeltz")
+    assignment, claim, workflow, digest = _read_assignment(plan)
+    assert claim["task_id"] == assignment["task_id"] == envelope["task_id"]
+    assert claim["attempt_id"] == workflow["token"]["attempt_id"] == "attempt-one"
+    assert claim["claim_fence"] == workflow["token"]["claim_fence"] == 1
+    assert len(digest) == 64
+    for changed in ({k: v for k, v in bound.items() if k != "task_id"},
+                    bound | {"task_id": "SKYBUILD-OTHER"}):
+        preclaim.write_text(json.dumps(changed))
+        with pytest.raises(CPUWorkerBridgeError, match="fenced preclaim identity"):
+            _read_assignment(plan)
+
+    from skybuild.auto_patch_controller import AutoControllerError
+    for changed in (received | {"attempt_id": "other"}, received | {"claim_fence": 2},
+                    received | {"task_id": "SKYBUILD-OTHER"}):
+        with pytest.raises(AutoControllerError, match="exact saved claim"):
+            _bind_legacy_preclaim(changed, state / "assignment.json",
+                expected_envelope=envelope, project="skybuild")
+    with pytest.raises(AutoControllerError, match="exact saved claim"):
+        _bind_legacy_preclaim(received, state / "assignment.json",
+            expected_envelope=envelope, project="other-project")

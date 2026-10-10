@@ -104,7 +104,23 @@ def _setup(tmp_path, monkeypatch, *, fail_at=None):
             raise controller.ManualCordError("claim failed")
         destination.write_text(json.dumps(expected_envelope))
         destination.chmod(0o600)
-        return {"place": "working", "attempt_id": "attempt-" + worker,
+        intent = {"schema": "manual-petri-claim-v1", "project_id": "skybuild", "worker": worker,
+            "assignment_id": expected_envelope["assignment_id"], "task_id": expected_envelope["task_id"],
+            "expected_revision": expected_envelope["task_revision"],
+            "assignment_sha256": hashlib.sha256(json.dumps(expected_envelope, sort_keys=True).encode()).hexdigest()}
+        intent_path = destination.with_name(destination.name + ".workflow.json.intent")
+        intent_path.write_text(json.dumps(intent))
+        intent_path.chmod(0o600)
+        workflow = {**intent, "project_id": "skybuild", "task_id": expected_envelope["task_id"],
+            "assignment_id": expected_envelope["assignment_id"], "worker": worker,
+            "token": {"project_id": "skybuild", "task_id": expected_envelope["task_id"],
+                      "place": "working", "attempt_id": "attempt-" + worker, "claim_fence": 1, "revision": 3},
+            "claim": {"holder": worker, "held": True, "fence": 1, "task_revision": 3}}
+        path = destination.with_name(destination.name + ".workflow.json")
+        path.write_text(json.dumps(workflow))
+        path.chmod(0o600)
+        return {"base_sha": expected_envelope["base_sha"], "verified": True,
+                "place": "working", "attempt_id": "attempt-" + worker,
                 "claim_fence": 1, "assignment_id": expected_envelope["assignment_id"],
                 "message_id": "message-" + worker}
 

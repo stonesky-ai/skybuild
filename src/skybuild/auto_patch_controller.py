@@ -51,6 +51,42 @@ def _read_json(path: Path, *, maximum: int = 32768) -> dict:
     return value
 
 
+def _bind_legacy_preclaim(received: dict, assignment_path: Path, *,
+                          expected_envelope: dict, project: str) -> dict:
+    """Bind a legacy receive receipt to its verified assignment and saved claim."""
+    assignment = _read_json(assignment_path)
+    workflow = _read_json(assignment_path.with_name(assignment_path.name + ".workflow.json"))
+    intent = _read_json(assignment_path.with_name(assignment_path.name + ".workflow.json.intent"))
+    expected_intent = {"schema": "manual-petri-claim-v1", "project_id": project,
+        "worker": assignment.get("worker"), "assignment_id": assignment.get("assignment_id"),
+        "task_id": assignment.get("task_id"), "expected_revision": assignment.get("task_revision"),
+        "assignment_sha256": hashlib.sha256(json.dumps(assignment, sort_keys=True).encode()).hexdigest()}
+    token = workflow.get("token")
+    claim = workflow.get("claim")
+    if (intent != expected_intent or any(workflow.get(k) != v for k, v in expected_intent.items())
+            or assignment != expected_envelope or not isinstance(token, dict)
+            or not isinstance(claim, dict) or workflow.get("project_id") != project
+            or workflow.get("task_id") != assignment.get("task_id")
+            or workflow.get("assignment_id") != assignment.get("assignment_id")
+            or workflow.get("worker") != assignment.get("worker")
+            or token.get("project_id") != project
+            or token.get("task_id") != assignment.get("task_id")
+            or token.get("place") != "working" or token.get("pending_action") is not None
+            or received.get("assignment_id") != assignment.get("assignment_id")
+            or received.get("base_sha") != assignment.get("base_sha")
+            or received.get("verified") is not True or received.get("place") != "working"
+            or not isinstance(received.get("attempt_id"), str) or not received["attempt_id"]
+            or received["attempt_id"] != token.get("attempt_id")
+            or type(received.get("claim_fence")) is not int or received["claim_fence"] < 1
+            or received["claim_fence"] != token.get("claim_fence")
+            or claim.get("fence") != received["claim_fence"]
+            or token.get("revision") != claim.get("task_revision")
+            or claim.get("holder") != assignment.get("worker") or claim.get("held") is not True
+            or ("task_id" in received and received["task_id"] != assignment.get("task_id"))):
+        raise AutoControllerError("Legacy receive receipt does not bind the exact saved claim")
+    return {**received, "task_id": assignment["task_id"]}
+
+
 def _controller_git(repo: Path, *args: str, timeout: int = 30,
                     authenticated: bool = False) -> bytes:
     if any(name.startswith("GIT_") and name != "GIT_PAGER" for name in os.environ):
@@ -589,7 +625,10 @@ def run(*, repo: Path, manifest: Path, project: str, dispatcher: str, url: str,
                                               expected_envelope=item["envelope"])
             if received.get("place") != "working" or not received.get("attempt_id"):
                 raise AutoControllerError("Worker claim has no fenced attempt")
-            _save_new(assignment_dir / "preclaim.json", received)
+            _save_new(worker_root / "receive-receipt.json", received)
+            bound_preclaim = _bind_legacy_preclaim(received, assignment_dir / "assignment.json",
+                expected_envelope=item["envelope"], project=project)
+            _save_new(assignment_dir / "preclaim.json", bound_preclaim)
             current = None
             with Client(url, _token_from_file(Path(item["token_file"])), retries=0, timeout=10,
                         trust_env=False, ca_file=ca_file, expected_ca_sha256=ca_digest) as worker_client:
