@@ -1,5 +1,7 @@
 # SkyBuild agent instructions
 
+For `/skybuild-existing-project`, `$skybuild-existing-project`, “onboard an existing project”, or “plan legacy backlog migration”, read [.claude/skills/skybuild-existing-project/SKILL.md](.claude/skills/skybuild-existing-project/SKILL.md). Load this occasional methodology only for adoption or legacy reconciliation planning.
+
 ## Start and scope
 
 - Work in the SkyBuild checkout. Before any Git or GitHub write, confirm `git rev-parse --show-toplevel` is that checkout and both `origin` fetch and push URLs point to `stonesky-ai/skybuild`. SkyKeep is a separate repository. Pass the checkout path explicitly to workflow scripts.
