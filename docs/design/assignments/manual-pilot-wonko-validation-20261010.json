@@ -1,0 +1,25 @@
+{
+  "schema": "manual-work-brief-v1",
+  "assignment_id": "MWP-20261010-WONKO-REPORT-001",
+  "task_id": "SKYBUILD-PILOT-WONKO-REPORT",
+  "worker": "wonko",
+  "dispatcher": "pilot_dispatcher",
+  "branch": "task/pilot-wonko-validation-20261010",
+  "owned_paths": [
+    "docs/research/manual-pilot-wonko-validation-20261010.md"
+  ],
+  "checks": [
+    "After both local stages pass and scoped remote qualification succeeds, actually receive and validate the pinned assignment on Wonko, prepare its owned worktree, then write a report of observed evidence only. Do not preclaim remote receipt, coding validation or integration.",
+    "Run bounded offline checks: tests/test_manual_assignment.py, tests/test_manual_cord.py, tests/test_manual_worktree.py and tests/test_manual_result.py. Record exact interpreter, source SHA, skybuild import path, command, pass/fail/skip counts and exit status; do not run full PostgreSQL gate.",
+    "Use the correct checkout interpreter; when reusing another checkout environment set PYTHONPATH to this worktree absolute src and verify skybuild.__file__ first. Report current scoped preflight outcome, public CA fingerprint and pushed exact report head without secret or Cord bodies.",
+    "Wonko has 24 GiB available remote capacity; check fresh host evidence before work. Existing approved SSH transport may need ssh -F /dev/null because local system config permissions are bad. Do not modify system SSH permissions, start services or widen access.",
+    "A manually selected sol/luna agent may execute bounded Wonko work through approved SSH without launching remote Codex. API relay receipt proves assignment validation, not model-launch authorization. Record execution host and actual command path accurately.",
+    "Read AGENTS.md, architecture working contract and relevant plan. Preparation base is e8c58d7109382c0efdf68281326f412aa6df46b6 (A41); staged local scope is in PR #66. Verify its published revision before work; reconcile conflicting source rather than editing architecture or plan.",
+    "Await SKYBUILD-BOOTSTRAP, dispatcher qualification and a committed, hashed manual-work-v2 assignment with current API task status/revision. Verify trusted pilot_dispatcher sender, exact worker, brief, base, branch and owned paths before receipt or worktree preparation.",
+    "Use only an owned worktree and the assigned branch/path. Preserve private TLS, pinned CA, scoped tokens and the sole API task authority. Never print secrets or message bodies. Stop on stale source, ownership conflict, failed qualification or uncertain live assignment.",
+    "Run rtk git diff --check. Check every documented command against current source/CLI help and resolve relative references. Record exact checks, changed paths and limitations; docs-only work needs no full PostgreSQL gate. Dispatcher runs the combined integration gate once.",
+    "Commit and push only the owned document. Return exact pushed head and evidence through validated Cord result; no task PR, merge, completion attestation or bundle mutation. Require separate qualified exact-head review and verified frozen-bundle inclusion before acceptance."
+  ],
+  "model_limit": "One manually started sol or luna worker using authorized subscription allowance only. No paid API, Brodson, subagents, daemon, automatic model launch or service start. Retain host memory reserve.",
+  "next_action": "Await SKYBUILD-BOOTSTRAP and scoped manual dispatch for the one-remote stage after both local stages pass. Receive a current API-bound manual-work-v2 envelope from pilot_dispatcher and create the owned worktree only after validation. Perform only this document task, run its checks, commit and push, and report exact head/evidence for independent review and bundled integration. No automatic worker launch is authorized."
+}
