@@ -170,6 +170,8 @@ def stage_firewall_payload(root: Path) -> dict:
 
 def _smoke_firewall_image(image_id: str) -> dict:
     """Exercise the exact nft-backed v4/v6 commands offline in a disposable netns."""
+    ipv4_marker = "SKYBUILD_IPV4_SAVE_BEGIN"
+    ipv6_marker = "SKYBUILD_IPV6_SAVE_BEGIN"
     script = "\n".join((
         "set -eu",
         "iptables -V", "ip6tables -V", "iptables-save --version", "ip6tables-save --version",
@@ -179,7 +181,6 @@ def _smoke_firewall_image(image_id: str) -> dict:
         "iptables -w -A INPUT -s 198.18.0.3/32 -p tcp --dport 5432 -j ACCEPT",
         "iptables -w -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
         "iptables -w -A OUTPUT -d 127.0.0.11/32 -j DROP",
-        "iptables -w -A OUTPUT -d 198.18.0.2/32 -p tcp --dport 5432 -j ACCEPT",
         "iptables -w -A OUTPUT -o lo -j ACCEPT",
         "iptables -w -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
         "ip6tables -w -F INPUT; ip6tables -w -F OUTPUT; ip6tables -w -F FORWARD",
@@ -188,17 +189,36 @@ def _smoke_firewall_image(image_id: str) -> dict:
         "ip6tables -w -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
         "ip6tables -w -A OUTPUT -o lo -j ACCEPT",
         "ip6tables -w -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
-        "iptables-save -t filter >/dev/null", "ip6tables-save -t filter >/dev/null",
+        "printf '%s\\n' " + ipv4_marker, "iptables-save -t filter",
+        "printf '%s\\n' " + ipv6_marker, "ip6tables-save -t filter",
     ))
     smoke_name = "skybuild-firewall-smoke-" + uuid4().hex[:12]
-    _run(["docker", "run", "--rm", "--name", smoke_name, "--network", "none",
+    result = _run(["docker", "run", "--rm", "--name", smoke_name, "--network", "none",
           "--memory=128m", "--memory-swap=128m",
           "--cpus=0.25", "--pids-limit=32", "--read-only", "--tmpfs", "/run:rw,noexec,nosuid,size=4m",
           "--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--security-opt=no-new-privileges",
           "--label", "skybuild.isolated.firewall-smoke=true", "--entrypoint", "/bin/sh",
           image_id, "-ceu", script], timeout=30)
+    lines = result.stdout.splitlines()
+    if lines.count(ipv4_marker) != 1 or lines.count(ipv6_marker) != 1:
+        raise BuildError("firewall smoke did not return both save outputs")
+    ipv4_start, ipv6_start = lines.index(ipv4_marker) + 1, lines.index(ipv6_marker) + 1
+    if ipv4_start >= ipv6_start:
+        raise BuildError("firewall smoke save outputs are out of order")
+    try:
+        ipv4_rules = gate._saved_rules("\n".join(lines[ipv4_start:ipv6_start - 1]))
+        ipv6_rules = gate._saved_rules("\n".join(lines[ipv6_start:]))
+    except gate.GateError as error:
+        raise BuildError("firewall smoke save output failed gate parser contract") from error
+    expected_ipv4 = gate._expected_firewall_rules("198.18.0.2", "198.18.0.3",
+                                                  ipv6=False, postgres_namespace=True)
+    expected_ipv6 = gate._expected_firewall_rules("198.18.0.2", "198.18.0.3",
+                                                  ipv6=True, postgres_namespace=True)
+    if ipv4_rules != expected_ipv4 or ipv6_rules != expected_ipv6:
+        raise BuildError("firewall smoke rules differ from gate parser contract")
     return {"status": "passed", "network": "none", "capabilities": ["NET_ADMIN"],
-            "commands": ["iptables", "ip6tables", "iptables-save", "ip6tables-save", "conntrack matcher"]}
+            "commands": ["iptables", "ip6tables", "iptables-save", "ip6tables-save", "conntrack matcher"],
+            "parser_contract": "exact dual-stack filter rules"}
 
 
 def _copy_pinned_package(source: Path, destination: Path, expected_sha256: str) -> Path:
