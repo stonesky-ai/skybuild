@@ -47,6 +47,9 @@ def test_workbench_docker_sources_are_included_by_root_build_context_filter():
     assert "COPY --chown=1000:1000 ops/runtime-ui/runtime_ui.py ops/runtime-ui/asset-pins.json ops/runtime-ui/navigation.html /runtime-ui/" in dockerfile
     assert "COPY --chown=1000:1000 ops/runtime-ui/ui/ /runtime-ui/ui/" in dockerfile
     assert "!ops/runtime-ui/api-source/" not in dockerignore
+    assert "RUN chmod g+x,o+x /app/src/skybuild" in dockerfile
+    assert "&& chmod -R a+rX /app/src/skybuild/static" in dockerfile
+    assert "--api-checkout\n      - /app" in (ROOT / "compose.yaml").read_text()
 
 
 def token_file(path: Path, value: str = TOKEN) -> Path:

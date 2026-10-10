@@ -127,8 +127,14 @@ Set `SKYBUILD_WORKBENCH_IMAGE` to the captured `sha256:<image-id>` in the privat
 Compose environment. Compose has no build rule and uses `pull_policy: never`;
 it cannot silently replace the reviewed local image. The runtime mounts only
 the installation CA/certificate/key plus the separate API-token and password
-files. It does not mount source code or task data. Building the image does not
-start a container or connect to PostgreSQL.
+files. It does not mount source code or task data. Image build does not start
+the Workbench service or connect to PostgreSQL.
+
+The base image keeps its Python package tree private to UID 10001, while the
+Workbench runs as UID 1000/GID 0. The image grants GID 0 and other users search
+permission on `/app/src/skybuild`, then read/search permission on the public
+`/app/src/skybuild/static` snapshot used for startup pin verification. It leaves
+the package contents and other source directories unchanged.
 
 Run inside the existing pilot Docker network using dependencies from the pinned
 base image. The image includes the runtime at `/runtime-ui`; mount the
