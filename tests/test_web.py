@@ -98,13 +98,23 @@ const task = {task_id: " task ", title: "Title", description: "Brief", status: "
   place: "working", evidence_freshness: "stale", dependencies: [" dep ", "dep"], acceptance_criteria: ["one\ntwo"], architecture_refs: ["ref\nsection"], revision: 7};
 const other = {...task, task_id: "other", revision: 3, acceptance_criteria: ["three"], dependencies: ["dep"]};
 const requests = [];
-let endPage = false, conflictWorkflow = false;
+let endPage = false, conflictWorkflow = false, loseWorkflowAck = false, workflowEffects = 0;
+const committedKeys = new Set();
+let workflowPlace = "working", workflowUntil = null, workflowMilestone = null;
 global.fetch = async (url, options) => {
   requests.push({url, options});
   if (conflictWorkflow && url.endsWith("/workflow") && options.method === "POST") return {ok: false, status: 409};
-  const data = url.endsWith("/workflow") ? {task, token: {place: "working", requirements: ["<requirement>"], links: ["javascript:alert(1)", "https://example.test/evidence"], findings: ["<finding>"], faults: ["Fix fault"], evidence: [{stage: "unit_tests", state: "passed", artifacts: [], findings: []}]}, available_actions: ["hold", "claim"], transitions: [{event: "claim", sources: ["ready"], destination: "working"}, {event: "submit", sources: ["working"], destination: "validating"}, {event: "freeze", sources: ["validating"], destination: "integrating"}, {event: "accept", sources: ["integrating"], destination: "done"}, {event: "hold", sources: ["ready", "working"], destination: "hold"}], disabled_actions: {release_hold: "Task is not held"}} : url.includes("/workflow-board?") ? {
+  if (url.endsWith("/workflow") && options.method === "POST") {
+    const key = options.headers["Idempotency-Key"];
+    if (!committedKeys.has(key)) { committedKeys.add(key); workflowEffects += 1; }
+    if (loseWorkflowAck) { loseWorkflowAck = false; throw new TypeError("Response lost after commit"); }
+  }
+  const data = url.endsWith("/workflow") ? {task, token: {place: workflowPlace, hold_reason: "Owner decision", deferred_until: workflowUntil, milestone_task_id: workflowMilestone, requirements: ["<requirement>"], links: ["javascript:alert(1)", "https://example.test/evidence"], findings: ["<finding>"], faults: ["Fix fault"], evidence: [{stage: "unit_tests", state: "passed", artifacts: [], findings: []}]}, available_actions: ["hold", "claim"], transitions: [{event: "claim", sources: ["ready"], destination: "working"}, {event: "submit", sources: ["working"], destination: "validating"}, {event: "freeze", sources: ["validating"], destination: "integrating"}, {event: "accept", sources: ["integrating"], destination: "done"}, {event: "hold", sources: ["ready", "working"], destination: "hold"}], disabled_actions: {release_hold: "Task is not held"}} : url.includes("/workflow-board?") ? {
     project_id: " project ", columns: ["ready", "working", "validating", "integrating", "done", "deferred", "hold"].map(place => ({place, count: place === "ready" ? 205 : 0, oldest_age_seconds: 60, unknown_age_count: 0})),
-    tasks: [{...task, place: "ready", evidence_freshness: "stale", validation: [{stage: "unit_tests", state: "passed"}], blocked_dependencies: [" dep "]}],
+    tasks: [{...task, place: "ready", evidence_freshness: "stale", validation: [{stage: "unit_tests", state: "passed"}], blocked_dependencies: [" dep "]},
+      {...task, task_id: "held", place: "hold", hold_reason: "Owner decision", blocked_dependencies: []},
+      {...task, task_id: "dated", place: "deferred", hold_reason: "Wait date", deferred_until: "2030-01-01T00:00:00+00:00", blocked_dependencies: []},
+      {...task, task_id: "milestone", place: "deferred", hold_reason: "Wait milestone", milestone_task_id: "dep", blocked_dependencies: []}],
     total: 205, unenrolled_count: 2, ready_dependencies_complete: 200, ready_dependencies_blocked: 5, next_offset: null
   } : url.includes("/reconcile-due?") ? (url.includes("after_task_id=") ?
       {scanned: 1, reassessed: ["due"], next_after_task_id: null} :
@@ -127,6 +137,10 @@ async function run() {
   get("connection-form").listeners.submit({preventDefault() {}}); await tick();
   assert.equal(get("workflow-board").children.length, 7);
   assert.match(get("board-summary").textContent, /205 workflow tasks/);
+  const boardText = get("workflow-board").querySelectorAll().map(button => button.textContent).join("\n");
+  assert.match(boardText, /Hold reason: Owner decision.*Release: explicit release/);
+  assert.match(boardText, /Resume condition: date 2030-01-01/);
+  assert.match(boardText, /Resume condition: milestone dep/);
   assert.match(get("workflow-board").querySelectorAll()[0].textContent, /unit_tests: passed/);
   assert.match(get("workflow-board").querySelectorAll()[0].textContent, /Evidence: stale/);
   assert.match(get("workflow-board").querySelectorAll()[0].textContent, /scans: unavailable/);
@@ -167,6 +181,41 @@ async function run() {
   get("refresh-selected").listeners.click(); await tick();
   assert.equal(get("workflow-submit").disabled, false);
   assert.equal(requests.filter(request => request.url.endsWith("/workflow") && request.options.method === "POST").length, conflictCount);
+  workflowPlace = "hold";
+  get("refresh-selected").listeners.click(); await tick();
+  assert.match(get("workflow-condition").textContent, /Hold reason: Owner decision.*Release: explicit release/);
+  workflowPlace = "deferred"; workflowUntil = "2030-01-01T00:00:00+00:00";
+  get("refresh-selected").listeners.click(); await tick();
+  assert.match(get("workflow-condition").textContent, /Resume condition: date 2030-01-01/);
+  workflowUntil = null; workflowMilestone = " milestone ";
+  get("refresh-selected").listeners.click(); await tick();
+  assert.match(get("workflow-condition").textContent, /Resume condition: milestone  milestone /);
+  assert.equal(get("workflow-dependencies").querySelectorAll().at(-1).textContent, "Milestone:  milestone ");
+  workflowPlace = "working"; workflowMilestone = null;
+  get("refresh-selected").listeners.click(); await tick();
+  const effectsBeforeLostAck = workflowEffects;
+  loseWorkflowAck = true;
+  get("workflow-event").value = "hold"; get("workflow-reason").value = "Keep exact reason";
+  get("workflow-form").listeners.submit({preventDefault() {}}); await tick();
+  const lostRequest = requests.filter(request => request.url.endsWith("/workflow") && request.options.method === "POST").at(-1);
+  assert.equal(get("workflow-retry").disabled, false);
+  assert.match(get("workflow-operation").textContent, /Outcome unknown/);
+  get("refresh-selected").listeners.click(); await tick();
+  assert.equal(get("workflow-retry").disabled, false);
+  assert.equal(get("workflow-submit").disabled, true);
+  assert.match(get("workflow-operation").textContent, new RegExp(lostRequest.options.headers["Idempotency-Key"]));
+  get("workflow-event").value = "hold"; get("workflow-reason").value = "Changed reason must not replace pending operation";
+  const requestsBeforeBlocked = requests.length;
+  get("workflow-form").listeners.submit({preventDefault() {}}); await tick();
+  assert.equal(requests.length, requestsBeforeBlocked);
+  get("workflow-retry").listeners.click(); await tick();
+  const replay = requests.filter(request => request.url.endsWith("/workflow") && request.options.method === "POST").at(-1);
+  assert.equal(replay.options.headers["Idempotency-Key"], lostRequest.options.headers["Idempotency-Key"]);
+  assert.equal(replay.options.headers["If-Match"], lostRequest.options.headers["If-Match"]);
+  assert.equal(replay.options.body, lostRequest.options.body);
+  assert.equal(workflowEffects, effectsBeforeLostAck + 1);
+  assert.equal(get("workflow-retry").disabled, true);
+  assert.equal(get("workflow-operation").textContent, "No pending operation.");
   assert.equal(get("history").children.length, 100);
   assert.equal(get("load-more-history").disabled, false);
   get("load-more-history").listeners.click(); await tick();
@@ -240,6 +289,10 @@ async function run() {
   get("next-tasks").listeners.click(); await tick();
   assert.equal(get("task-list").querySelectorAll().length, 100);
   assert.equal(get("next-tasks").disabled, true);
+  loseWorkflowAck = true;
+  get("workflow-event").value = "hold"; get("workflow-reason").value = "Pending before logout";
+  get("workflow-form").listeners.submit({preventDefault() {}}); await tick();
+  assert.equal(get("workflow-retry").disabled, false);
   get("logout").listeners.click();
   assert.equal(get("full-task-record").textContent, "No task selected.");
   assert.equal(get("lineage").children.length, 0);
@@ -247,6 +300,8 @@ async function run() {
   assert.equal(get("board-summary").textContent, "Not connected");
   assert.equal(get("workflow-evidence").children.length, 0);
   assert.equal(get("workflow-state").textContent, "No task selected.");
+  assert.equal(get("workflow-operation").textContent, "No pending operation.");
+  assert.equal(get("workflow-retry").disabled, true);
 }
 run().catch(error => { console.error(error); process.exitCode = 1; });
 '''

@@ -41,9 +41,11 @@ def board_snapshot(tasks, project_id, complete_dependencies, projection, *, limi
             dependencies_complete += not blocked
             dependencies_blocked += bool(blocked)
         if offset <= total < offset + limit:
+            token = task.get("metadata", {}).get("_skybuild_workflow", {}).get("petri", {}).get("token", {})
             cards.append({**{key: task.get(key) for key in (
                 "task_id", "title", "priority", "revision", "next_action", "blocker", "responsible", "dependencies")},
-                          **public, "place_entered_at": entered.isoformat() if entered else None,
+                          **public, **{key: token.get(key) for key in ("hold_reason", "deferred_until", "milestone_task_id")},
+                          "place_entered_at": entered.isoformat() if entered else None,
                           "blocked_dependencies": blocked})
         total += 1
     return {"project_id": project_id, "columns": list(columns.values()), "tasks": cards,

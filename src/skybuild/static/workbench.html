@@ -68,6 +68,7 @@
         <section aria-labelledby="workflow-details-title">
           <h3 id="workflow-details-title">Workflow details</h3>
           <p id="workflow-state">No task selected.</p>
+          <p id="workflow-condition"></p>
           <ol id="workflow-path" class="workflow-path" aria-label="Normal task progress"></ol>
           <details><summary>All workflow transitions</summary><ul id="workflow-transitions"></ul></details>
           <p class="hint">Confirmed validation or integration failures return to Ready. Hold and Deferred pause work. Release or resume returns to Ready.</p>
@@ -85,6 +86,7 @@
             <p class="hint">Use exactly one trigger for Defer. Every control uses the displayed revision. A conflict requires a refresh and a new decision.</p>
             <p id="workflow-operation" role="status">No pending operation.</p>
             <button id="workflow-submit" type="submit" disabled>Record workflow action</button>
+            <button id="workflow-retry" type="button" disabled>Retry unchanged operation</button>
           </form>
         </section>
         <form id="edit-form">
