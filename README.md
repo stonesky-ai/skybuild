@@ -34,9 +34,37 @@ At cycle closeout, merge the current `dev-NNN` branch to `main`, start the next 
 Use Python 3.12 or later and `uv`:
 
 ```sh
-uv sync --extra test
-uv run python -m pytest
+scripts/project_python -m pytest
 ```
+
+`scripts/project_python` runs Python through `uv` with this checkout's locked
+runtime and test dependencies, its own `.venv`, and its absolute `src` and
+`scripts` paths. Use
+it for repository scripts too, including help:
+
+```sh
+scripts/project_python scripts/marshall_bundle.py --help
+```
+
+The launcher preserves your working directory and Python arguments. From another
+directory, use absolute launcher and script/test paths. It replaces inherited
+`PYTHONPATH` and `UV_PROJECT_ENVIRONMENT`, so another checkout's editable install
+cannot select the package for this command. Dependency synchronization failure
+stops the invocation; no fallback to system Python occurs. The launcher requires
+`uv`, a POSIX shell, and the committed `pyproject.toml` and `uv.lock`. It does not
+start a service unless the Python command you explicitly supply does so.
+Its cache defaults to ignored `.uv-cache/` inside the checkout, which also works
+when the home directory is read-only. An explicit `UV_CACHE_DIR` remains supported
+for a writable shared cache.
+Python's `-P` mode suppresses implicit caller/script-directory imports; repository
+helpers resolve through the explicit `scripts` path. External scripts that depend
+on sibling imports need their own invocation instead. Python options such as
+`-E` or `-I` deliberately bypass `PYTHONPATH`; do not use them for source checks.
+The launcher clears inherited `UV_WORKING_DIR`, which could otherwise change the
+directory before Python resolves a relative script path.
+Reviewed integration and disposable PostgreSQL gates rebind the environment and
+source paths to their own candidate before running nested Python commands. The
+author checkout's launcher selection must not leak into candidate validation.
 
 PostgreSQL tests require explicit disposable targets. Without these variables, database integration tests skip:
 
@@ -44,7 +72,7 @@ PostgreSQL tests require explicit disposable targets. Without these variables, d
 export SKYBUILD_TEST_DSN='postgresql://USER:PASSWORD@127.0.0.1:PORT/skybuild_test'
 export SKYBUILD_HTTP_TEST_DSN='postgresql://USER:PASSWORD@127.0.0.1:PORT/skybuild_http_test'
 export SKYBUILD_IMPORT_TEST_DSN='postgresql://USER:PASSWORD@127.0.0.1:PORT/skybuild_import_test'
-uv run python -m pytest
+scripts/project_python -m pytest
 ```
 
 Use newly created, task-owned databases. These are example placeholders, not credentials or a command to reuse an application database. The HTTP integration suite requires a database name beginning with `skybuild_` and ending with `_test`; the importer suite requires the exact `skybuild_import_test` name and creates isolated test databases from it.
@@ -63,7 +91,7 @@ Provisioning reads a high-entropy bearer token from standard input or `SKYBUILD_
 
 `serve` binds to loopback. Tailscale exposure, browser-session handling and a restricted runtime database role require deployment qualification. Use a separate migration administrator; do not deploy the service using the disposable tests' PostgreSQL superuser. For the manual-worker pilot, `/api/v1/me` reports only the authenticated caller's identity and grants; `python -m skybuild.fleet_preflight` checks private HTTPS readiness and narrow Cord access from a worker using a mode-0600 token file. It is read-only and does not replace a Cord round trip.
 
-Open `/workbench` on that local service for task creation, paged list/detail/history, definition edits, lineage and guarded actions. It previews proposed-only split/merge plans before applying them. Enter the project and bearer token; the token stays only in page memory and is cleared on logout/reload. A stale edit requires an explicit refresh before saving. Definition and dependency changes durably invalidate readiness; this does not admit or start a worker. Migration 012 and guarded cutover are implemented and reviewed, but not deployed; the pilot still serves zero imported tasks.
+Open `/workbench` on the pilot service for task creation, paged list/detail/history, definition edits, lineage and guarded actions. It previews proposed-only split/merge plans before applying them. Enter the project and bearer token; the token stays only in page memory and is cleared on logout/reload. A stale edit requires an explicit refresh before saving. Definition and dependency changes durably invalidate readiness; this does not admit or start a worker. As verified on 2026-10-09, migration 012 and the guarded cutover are deployed: the authenticated API serves 60 tasks, including 38 imported from the frozen manifest and 22 created afterward. The three former ledger paths are retirement notices. The current manual pilot does not launch or reserve workers or models.
 
 Set `SKYBUILD_API_URL` and `SKYBUILD_TOKEN` for read-only CLI views:
 

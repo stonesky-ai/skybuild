@@ -1,8 +1,8 @@
 # Controlled manual pilot promotion from schema 011 to 012
 
-Task: `SKYBUILD-SELF-BUILD-MVP`, with `SKYBUILD-EXECUTION-CONTROLS` inspection support. Owner: main SkyBuild session. Phase: candidate preparation; no runtime promotion performed. The deployed source/image identity must come from retained deployment evidence and the read-only preflight; do not reuse the stale schema-010 source hash. Require an exact schema-011 runtime and reviewed candidate containing only migration 012 before proceeding.
+Task: `SKYBUILD-SELF-BUILD-MVP`, with `SKYBUILD-EXECUTION-CONTROLS` inspection support. Owner: main SkyBuild session. This is the retained runbook for the one-time schema-011-to-012 promotion and subsequent task cutover. The 2026-10-09 pilot verification found the promoted API ready on schema 12, and the API-authority receipt records the completed import. The API serves 60 tasks: 38 imported from the pinned source and 22 created later. The steps below describe the historical promotion sequence; do not repeat them against the current API-owned project. For that sequence, the deployed source/image identity had to come from retained deployment evidence and the read-only preflight, not the stale schema-010 source hash. The prerequisite was an exact schema-011 runtime and reviewed candidate containing only migration 012.
 
-This procedure preserves the dedicated database, credentials, application CA/leaf, non-root API UID, private binds and manual Cord assignments. It changes neither ledger authority nor worker/model admission. Execute live steps only under explicit runtime-promotion authority. Do not use root, sudo, self-SSH, Docker host mounts, changed privileges, or another database to bypass a failed prerequisite.
+The schema promotion step preserved the dedicated database, credentials, application CA/leaf, non-root API UID, private binds and manual Cord assignments. That step did not itself change ledger authority or worker/model admission. Live promotion required explicit runtime-promotion authority. Do not use root, sudo, self-SSH, Docker host mounts, changed privileges, or another database to bypass a failed prerequisite.
 
 ## Read-only preparation
 
@@ -211,7 +211,7 @@ On each qualified worker, rerun read-only `fleet_preflight` with existing scoped
 
 ## Follow-on task-authority cutover
 
-Perform this only after the candidate with migration 012 is deployed and healthy, the exact 38-task manifest below has passed the disposable rehearsal, and the owner has stopped Markdown task edits and all other ledger writers. Keep the stable deployment checkout clean at the reviewed published candidate. The live transaction independently checks the PostgreSQL system identifier, retained database container, backup archive database name and pinned backup evidence before it inserts all 38 tasks and the API-authority receipt atomically.
+This one-time cutover followed deployment of the healthy migration-012 candidate, disposable rehearsal of the exact 38-task manifest, and the stop of Markdown task edits and other ledger writers. The frozen source was commit `d79d2e1947d2c8e9edb577ab5f5093edfa3c94e3`, with content digest `307019c967c0531912be0441809da8d89ca506905ff63594976bf5463ba142c7` and the reviewed import digest in the command below. The command is retained as the historical operator procedure, not a command to rerun. The live transaction checked the PostgreSQL system identifier, retained database container, backup archive database name and pinned backup evidence before inserting all 38 tasks and the API-authority receipt atomically.
 
 ```sh
 export SKYBUILD_EXPECTED_DATABASE='skybuild_pilot'
@@ -227,10 +227,10 @@ nice -n 10 ./.venv/bin/python -m skybuild ledger-cutover \
   --database-container-id "$CURRENT_DB_CONTAINER"
 ```
 
-After the transaction, verify the authenticated owner API returns exactly the 38 frozen task IDs and that `SKYBUILD-TASK-CUTOVER` history contains the `imported` event. Then use one idempotent owner update to set the next action to retire the Markdown ledgers; verify the updated revision and second history event. Preserve the workflow phase through its guarded task-action interface. Keep the retired Markdown snapshot in Git history and replace the old `mastertodo.md` contents with a generated/read-only retirement notice or API export in a subsequent reviewed change. Do not re-import the edited snapshot or add bidirectional synchronization.
+Cutover verification found exactly the 38 frozen task IDs and an `imported` event in `SKYBUILD-TASK-CUTOVER` history. An idempotent owner update then set the next action to retire the Markdown ledgers, preserved the workflow phase, and produced a second history event. All three former ledger paths now contain retirement notices; their frozen source remains in Git history. The API later gained 22 created tasks, so its current total of 60 is not the frozen import count. Do not re-import the notices or add bidirectional synchronization.
 
 ## Rollback boundary and remaining gaps
 
 Migration 012 widens the ledger authority check and changes the row-lock helper so missing receipts fail closed while only an explicit API receipt permits writes and claims. The retained schema-011 image requires the exact migration list and rejects schema 012. **After confirmed 012 commit, the old image is not a qualified healthy rollback.** Failed candidate readiness requires evidence preservation and reviewed forward repair. Any restore must be isolated, explicitly authorized and tested, with acknowledged data-loss/effect reconciliation; never silently replace the live database or renew authority. Never delete 012's version record or objects to force old readiness.
 
-Old image/dump evidence is not tested disaster recovery. Builder memory qualification, later immutable image build, actual live preflight, migration and remote qualification remain unperformed by this source task. No credential/CA rotation, task cutover or worker launch is included. Task cutover follows only after this authority migration is deployed and separately rehearsed against a fresh pinned ledger manifest.
+Old image/dump evidence is not tested disaster recovery. The source rehearsal alone did not qualify a live build, preflight, migration or remote worker connection; the later live promotion and separately rehearsed task cutover are complete. This record does not establish remote worker qualification, credential/CA rotation or an automatic worker launch. Further recovery or worker admission needs its own evidence and controls.

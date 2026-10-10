@@ -18,6 +18,7 @@ import tempfile
 from uuid import uuid4
 from _repo_guard import RepoGuardError, verify_skybuild, verify_skybuild_remote
 from _worktree_capacity import reserve_worktree_slots, serialize_integrations
+from _project_environment import project_environment
 
 
 def run(argv, cwd):
@@ -29,7 +30,7 @@ def run(argv, cwd):
 
 def run_gate(argv, cwd):
     """Retain compact gate evidence without exposing captured test output."""
-    process = subprocess.run(argv, cwd=cwd, text=True, capture_output=True)
+    process = subprocess.run(argv, cwd=cwd, env=project_environment(cwd), text=True, capture_output=True)
     try:
         evidence = json.loads(process.stdout)
     except ValueError:

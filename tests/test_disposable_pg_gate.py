@@ -46,6 +46,11 @@ def fake_gate(tmp_path, monkeypatch):
                 raise config["cleanup_error"]
             return subprocess.CompletedProcess(argv, config["cleanup_code"])
         if argv == ["fake-test", "private-command-value"]:
+            assert kwargs["env"]["UV_PROJECT_ENVIRONMENT"] == str(checkout / '.venv')
+            assert kwargs["env"]["PYTHONPATH"] == ':'.join(map(str, [checkout / 'src', checkout / 'scripts', checkout]))
+            assert kwargs["env"]["PYTHONSAFEPATH"] == '1'
+            assert 'UV_NO_SYNC' not in kwargs['env'] and 'UV_NO_PROJECT' not in kwargs['env']
+            assert 'UV_WORKING_DIR' not in kwargs['env']
             assert "SKYBUILD_DSN" not in kwargs["env"]
             assert "SKYBUILD_ROLE_ADMIN_DSN" not in kwargs["env"]
             if config["test_error"]:
@@ -57,6 +62,11 @@ def fake_gate(tmp_path, monkeypatch):
     monkeypatch.setattr(gate.subprocess, "run", runner)
     monkeypatch.setenv("SKYBUILD_DSN", "private-live-dsn")
     monkeypatch.setenv("SKYBUILD_ROLE_ADMIN_DSN", "private-admin-dsn")
+    monkeypatch.setenv('UV_PROJECT_ENVIRONMENT', '/wrong/checkout/.venv')
+    monkeypatch.setenv('PYTHONPATH', '/wrong/checkout/src')
+    monkeypatch.setenv('UV_NO_SYNC', '1')
+    monkeypatch.setenv('UV_NO_PROJECT', '1')
+    monkeypatch.setenv('UV_WORKING_DIR', '/wrong/checkout')
 
     def run(**changes):
         options = dict(artifact_path=path, run_id="bounded-run", expected_head=HEAD, expected_tree=TREE)
@@ -84,6 +94,36 @@ def test_success_is_durable_bound_and_secret_free(fake_gate):
         assert secret not in path.read_text()
     assert passwords[0] not in Path(result["log"]).read_text()
     assert "pytest_summary" not in record
+
+
+def test_shared_gate_environment_imports_selected_checkout_in_real_child(tmp_path, monkeypatch):
+    checkout = Path(__file__).resolve().parents[1]
+    foreign = tmp_path / 'foreign checkout'
+    (foreign / 'scripts').mkdir(parents=True)
+    (foreign / 'scripts/__init__.py').write_text('raise AssertionError("foreign scripts imported")\n')
+    for name in ('skybuild', '_project_environment'):
+        (foreign / (name + '.py')).write_text('raise AssertionError("foreign module imported")\n')
+    monkeypatch.setenv('PYTHONPATH', str(foreign))
+    monkeypatch.setenv('UV_WORKING_DIR', str(foreign))
+    monkeypatch.setenv('UV_PROJECT_ENVIRONMENT', str(foreign / '.venv'))
+    env = gate.project_environment(checkout)
+    # The default gate uses this environment with Python directly, bypassing project_python.
+    result = subprocess.run([sys.executable, '-c', '''import json, os
+import scripts.manual_pilot_listener, _project_environment, skybuild
+print(json.dumps({
+    "listener": scripts.manual_pilot_listener.__file__,
+    "helper": _project_environment.__file__,
+    "package": skybuild.__file__,
+    "cwd": os.getcwd(), "working_dir": os.environ.get("UV_WORKING_DIR"),
+}))
+'''], cwd=foreign, env=env, text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        'listener': str(checkout / 'scripts/manual_pilot_listener.py'),
+        'helper': str(checkout / 'scripts/_project_environment.py'),
+        'package': str(checkout / 'src/skybuild/__init__.py'),
+        'cwd': str(foreign), 'working_dir': None,
+    }
 
 
 @pytest.mark.parametrize("error,status", [(KeyboardInterrupt(), "interrupted"),

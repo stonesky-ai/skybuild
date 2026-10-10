@@ -10,8 +10,9 @@ import subprocess
 import sys
 from uuid import uuid4
 
-# A shared editable environment may point at a different worktree.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+# Select this checkout's source and helpers, including when safe-path mode is enabled.
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path[:0] = [str(SCRIPT_DIR.parent / "src"), str(SCRIPT_DIR)]
 
 from _repo_guard import verify_skybuild
 import prepare_bundle as preparation
@@ -20,6 +21,19 @@ from skybuild.client import Client, ClientError
 from skybuild.integration_workflow import selection_fault
 from skybuild.fleet_preflight import _token_from_file, _resolved_addresses
 from skybuild.manual_dispatch import _private_endpoint
+
+
+_SAFE_ADMISSION_DIAGNOSTICS = frozenset({
+    'Available memory is below the required 6 GiB reserve',
+    'Available memory cannot be measured',
+    'Remote refs moved or are missing; freeze new inputs',
+})
+
+
+def safe_admission_diagnostic(error):
+    """Expose only exact static admission messages, never command stderr."""
+    detail = str(error)
+    return detail if detail in _SAFE_ADMISSION_DIAGNOSTICS else None
 
 
 def marshall(checkout, catalog, output, client, *, project, principal, prepare_next=False, gate_next=False, gate_runner=None):
@@ -216,6 +230,9 @@ def marshall(checkout, catalog, output, client, *, project, principal, prepare_n
         return report
     except Exception as error:
         report["error"] = type(error).__name__
+        detail = safe_admission_diagnostic(error)
+        if detail is not None:
+            report['error_detail'] = detail
         report["next_action"] = "Resolve the failure; preserve evidence and use a new output"
         save()
         raise
@@ -238,7 +255,11 @@ def main():
         print(json.dumps(report, sort_keys=True))
         return 1 if report.get("gate") and not report["gate_passed"] else 0
     except (OSError, ValueError, RuntimeError, ClientError, subprocess.SubprocessError) as error:
-        print(json.dumps({"ok": False, "error": type(error).__name__, "next_action": "Inspect retained evidence and frozen inputs"}))
+        failure = {"ok": False, "error": type(error).__name__, "next_action": "Inspect retained evidence and frozen inputs"}
+        detail = safe_admission_diagnostic(error)
+        if detail is not None:
+            failure['error_detail'] = detail
+        print(json.dumps(failure))
         return 1
 
 
