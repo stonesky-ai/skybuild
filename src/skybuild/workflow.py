@@ -476,8 +476,10 @@ class TaskWorkflow:
             _record_error("Unsupported fields for normal workflow transition")
         changes = {"place": spec.destination or token.place, "revision": token.revision + 1}
         if spec.event == "claim":
+            # Evidence is scoped to the previous claim fence/attempt and can no
+            # longer affect readiness. Its full payload remains in task_journal.
             changes.update(attempt_id=context["attempt_id"], claim_fence=context["claim_fence"],
-                           responsible=context["responsible"])
+                           responsible=context["responsible"], evidence=())
         elif spec.event == "freeze":
             changes["bundle_id"] = context.get("bundle_id") if context["publication_required"] else None
         if spec.event in {"freeze", "accept"}:

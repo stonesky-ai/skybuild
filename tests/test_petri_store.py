@@ -193,6 +193,97 @@ def test_submission_binds_author_output_without_rewriting_claim_inputs(store, ac
     assert caught.value.code == "idempotency_conflict"
 
 
+def test_changed_source_submission_clears_evidence_but_keeps_prior_state_in_journal(store, actors):
+    from psycopg.types.json import Jsonb
+
+    project, people = actors
+    task = enrolled(store, people, project, "changed-source-evidence")
+    claim = store.claim_task(people["worker"], project, task["task_id"], task["revision"], "claim")
+    task = store.get_task(people["owner"], project, task["task_id"])
+    token = Store.workflow_token(task)
+    old_head, base = "a" * 40, "b" * 40
+    prior = ValidationResult(project, task["task_id"], ValidationStage.UNIT_TESTS, ResultState.PASSED,
+        source_head=old_head, target_base=base, attempt_id=token.attempt_id,
+        claim_fence=claim["fence"], input_generation=token.input_generation,
+        definition_revision=token.definition_revision, policy_version=token.policy_version,
+        producer=people["worker"].principal_id, check_id="prior-input-result",
+        artifacts=("artifact/" + "x" * 2500,))
+    token = replace(token, source_head=old_head, target_base=base, evidence=(prior,))
+    metadata = deepcopy(task["metadata"])
+    metadata["_skybuild_workflow"]["petri"]["token"] = token.to_dict()
+    with store._connection() as connection:
+        connection.execute("UPDATE tasks SET metadata = %s WHERE project_id = %s AND task_id = %s",
+                           (Jsonb(metadata), project, task["task_id"]))
+
+    receipt = author_receipt(token)
+    receipt.update(source_head="c" * 40, target_base=base)
+    submitted = store.workflow_transition(people["worker"], project, task["task_id"], "submit",
+        receipt, token.revision, "submit-changed-source")
+    after = Store.workflow_token(submitted["task"])
+    assert after.input_generation == token.input_generation + 1
+    assert after.source_head == receipt["source_head"]
+    assert after.evidence == ()
+
+    history = store.task_history(people["owner"], project, task["task_id"])
+    submit_event = next(row for row in history if row["operation"] == "workflow.submit")
+    before_token = submit_event["before_state"]["metadata"]["_skybuild_workflow"]["petri"]["token"]
+    assert before_token["evidence"] == [prior.to_dict()]
+
+
+def test_repeated_five_stage_attempts_bound_token_and_keep_full_result_journal(store, actors):
+    import json
+
+    project, people = actors
+    task = enrolled(store, people, project, "bounded-evidence")
+    journal_results = []
+    for attempt_number in range(5):
+        claim = store.claim_task(people["worker"], project, task["task_id"], task["revision"],
+                                f"claim-{attempt_number}")
+        task = store.get_task(people["owner"], project, task["task_id"])
+        token = Store.workflow_token(task)
+        assert token.evidence == ()
+        receipt = author_receipt(token)
+        receipt["source_head"] = format(attempt_number + 10, "x") * 40
+        submitted = store.workflow_transition(people["worker"], project, task["task_id"], "submit",
+            receipt, token.revision, f"submit-{attempt_number}")
+        view = submitted
+        for stage in ValidationStage:
+            token = Store.workflow_token(view["task"])
+            producer = people["owner"] if stage == ValidationStage.CODE_REVIEW else people["worker"]
+            size = 2500 if attempt_number == 4 and stage == ValidationStage.LONG_TESTS else 600
+            result = ValidationResult(project, task["task_id"], stage, ResultState.PASSED,
+                source_head=token.source_head, target_base=token.target_base,
+                attempt_id=token.attempt_id, claim_fence=token.claim_fence,
+                input_generation=token.input_generation, definition_revision=token.definition_revision,
+                policy_version=token.policy_version, producer=producer.principal_id,
+                check_id=f"attempt-{attempt_number}-{stage.value}", tool_version="bounded-evidence-test",
+                artifacts=("artifact/" + "x" * size,))
+            journal_results.append(result.to_dict())
+            view = store.workflow_transition(producer, project, task["task_id"], "validation_result",
+                {"result": result.to_dict()}, token.revision,
+                f"result-{attempt_number}-{stage.value}")
+        current = Store.workflow_token(view["task"])
+        assert len(current.evidence) == len(ValidationStage)
+        assert len(json.dumps(current.to_dict(), ensure_ascii=False, separators=(",", ":")).encode()) < 16_384
+
+        store.release_claim(people["worker"], project, task["task_id"], claim["fence"],
+                           view["task"]["revision"], f"release-{attempt_number}", reason="End test attempt")
+        task = store.get_task(people["owner"], project, task["task_id"])
+        if attempt_number < 4:
+            held = store.workflow_transition(people["owner"], project, task["task_id"], "hold",
+                {"reason": "Repeat the bounded-evidence regression attempt"}, task["revision"],
+                f"hold-{attempt_number}")
+            ready_again = store.workflow_transition(people["owner"], project, task["task_id"], "release_hold",
+                {"reason": "No external effects remain in this test"}, held["task"]["revision"],
+                f"release-hold-{attempt_number}")
+            task = ready_again["task"]
+
+    journal = store.task_history(people["owner"], project, task["task_id"], limit=100)
+    persisted = [entry["event_facts"]["result"] for entry in journal
+                 if entry.get("event_facts") and entry["event_facts"].get("event") == "validation_result"]
+    assert persisted == journal_results
+
+
 def test_submission_rejects_stale_former_worker_and_forged_snapshot(store, actors):
     project, people = actors
     task = enrolled(store, people, project)
