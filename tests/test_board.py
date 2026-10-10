@@ -85,3 +85,13 @@ def test_snapshot_is_configured_before_database_identity_read(monkeypatch):
     with store._connection():
         pass
     assert calls[0] == "SELECT current_database() AS name"
+
+
+def test_board_cards_expose_hold_reason_and_deferral_condition():
+    row = task(1, "deferred")
+    token = row["metadata"]["_skybuild_workflow"]["petri"]["token"]
+    token.update(hold_reason="Wait for milestone", milestone_task_id="M1", deferred_until=None)
+    card = board_snapshot([row], "project", set(), project)["tasks"][0]
+    assert card["hold_reason"] == "Wait for milestone"
+    assert card["milestone_task_id"] == "M1"
+    assert card["deferred_until"] is None
