@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -299,6 +300,16 @@ def test_worker_has_no_git_or_api_credential_inputs():
     assert "git_token_file" not in source
     assert "send_result" not in source
     assert "renew_assignment" not in source
+
+
+def test_worker_git_helper_runs_with_declared_container_environment(monkeypatch):
+    for name in tuple(os.environ):
+        if name.startswith("GIT_"):
+            monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HOME", "/tmp")
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+    monkeypatch.setenv("PYTHONPATH", "/input/source/src:/input/source/scripts:/input/source")
+    assert worker._git(None, "--version").startswith(b"git version ")
 
 
 @pytest.mark.parametrize("revised", [False, True])

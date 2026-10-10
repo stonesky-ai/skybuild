@@ -80,6 +80,7 @@ def test_container_argv_has_no_network_or_credentials_and_pins_all_mounts(tmp_pa
     assert '--memory-swap' in argv and argv[argv.index('--memory-swap') + 1] == str(permit['memory_max_bytes'])
     assert argv[argv.index('--user') + 1] == f'{bridge.os.getuid()}:{bridge.os.getgid()}'
     assert not any('token' in item.lower() or 'credential' in item.lower() for item in argv)
+    assert not any(item.startswith('GIT_') for item in argv)
     assert all(str(path) in ' '.join(argv) for path in (source, inputs, output))
     assert len(run_id) == 64 and name == 'skybuild-cpu-' + run_id[:24]
 
