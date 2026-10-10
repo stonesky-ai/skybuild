@@ -37,9 +37,42 @@ port 8443 on loopback; verified loopback probes retain the certificate hostname
 with `curl --resolve`. The API publishes port 8000 only on loopback. Workbench
 publishes on loopback and the explicit installation Tailscale interface.
 
-Use an existing authorized project token to connect. Starting the stack does not
-start a worker, dispatcher, inference process, or usage collector. Those processes
-retain their own task, credential, budget and lifecycle controls.
+Default gateway mode uses an existing authorized project token entered in the
+browser. Starting the stack does not start a worker, dispatcher, inference
+process, or usage collector. Those processes retain their own task, credential,
+budget and lifecycle controls.
+
+## Optional private MVP mode
+
+The owner-directed private MVP mode removes browser token entry for one configured
+project. Enable it only by passing both explicit options to `runtime_ui.py`:
+
+```sh
+--workbench-token-file /run/secrets/skybuild-workbench-token \
+--workbench-project skybuild
+```
+
+Mount the selected token as a read-only regular file owned by the Workbench process
+user with mode `0600`. The gateway rejects symlinks, group/world-readable files,
+other owners, malformed values, or a missing option. Do not mount or auto-select
+the pilot owner-token path. Keep the token outside Git, browser assets, HTML,
+responses and logs. The browser receives only the configured project ID.
+
+Private mode injects the server token only for the configured project's task CRUD,
+task-action, history, lineage, task workflow, and workflow-board routes. It denies
+Cord, claim, reconcile, split/merge, other projects and unrelated API routes.
+Caller-supplied Authorization headers are rejected in this mode. Every private API
+fetch requires `X-Skybuild-Workbench: 1`; every mutation also requires an exact
+same-origin `Origin` and same-origin Fetch Metadata when the browser supplies it.
+Revision and idempotency headers remain unchanged. The
+gateway redacts the configured credential if an upstream response echoes it.
+The existing unauthenticated `/health/live` and `/health/ready` checks remain
+available without credential injection.
+
+This is a temporary private installation adapter, not a change to direct REST API
+authentication, worker/fleet credentials, or gateway defaults. Keep the existing
+loopback/Tailscale listeners and certificate checks. Do not deploy an unreviewed
+candidate.
 
 ## Composition
 
@@ -80,22 +113,24 @@ existing internal port. The gateway connects to the fixed Docker service name,
 verifies the installation CA and the explicit certificate hostname, and ignores
 ambient proxy and CA environment settings. Redirects are not followed.
 
-The gateway forwards bearer authentication, If-Match, and Idempotency-Key
-unchanged. It drops cookies and forwarded-host headers. Cross-origin mutations
-are refused. Requests and responses have bounded sizes. Upstream errors return
-a fixed message, and Uvicorn access logging is disabled.
+In default mode, the gateway forwards caller bearer authentication, If-Match, and
+Idempotency-Key unchanged. It drops cookies and forwarded-host headers. Cross-origin
+mutations are refused. Requests and responses have bounded sizes. Upstream errors
+return a fixed message, and Uvicorn access logging is disabled.
 
 Focused checks:
 
 ```sh
 rtk proxy scripts/project_python -m pytest \
-  tests/test_runtime_ui_gateway.py tests/test_runtime_stack_startup.py -q
+  tests/test_runtime_ui_gateway.py tests/test_runtime_ui_private_mode.py \
+  tests/test_runtime_stack_startup.py -q
 ```
 
-Result: 22 passed. These checks cover routes, empty lists, installation trust,
-SNI, fixed destination, bearer and concurrency headers, request limits,
-unavailable panels, origin/Host checks, redirects, sanitized failures, qualified
-database checks, startup ordering, changed-asset refusal, oversized upstream responses and refusal after readiness failure.
+Result: 34 passed. These checks cover routes, empty lists, installation trust,
+SNI, fixed destination, caller and server credential boundaries, task CRUD/history/
+workflow loading, mutation intent, request limits, unavailable panels, origin/Host
+checks, redirects, sanitized failures, qualified database checks, startup ordering,
+changed-asset refusal, oversized upstream responses and refusal after readiness failure.
 
 The independently reviewed startup command was exercised against the retained
 installation on 2026-10-10. Both API and Workbench reported ready; authenticated
