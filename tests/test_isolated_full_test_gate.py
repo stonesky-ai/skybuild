@@ -160,6 +160,25 @@ def test_dns_probe_rejects_any_received_response(monkeypatch):
     assert network_probe._dns_blocked() is False
 
 
+def test_dns_probe_does_not_treat_receive_eperm_as_firewall_block(monkeypatch):
+    class FakeSocket:
+        def settimeout(self, _timeout):
+            pass
+
+        def sendto(self, payload, _address):
+            return len(payload)
+
+        def recvfrom(self, _size):
+            raise PermissionError(errno.EPERM, "unclassified receive failure")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(network_probe.socket, "socket", lambda *_args: FakeSocket())
+
+    assert network_probe._dns_blocked() is False
+
+
 def test_network_probe_does_not_turn_indeterminate_results_into_passes(monkeypatch):
     output = io.StringIO()
     monkeypatch.setattr(network_probe, "_connect", lambda *_args: (None, "EINTR"))
