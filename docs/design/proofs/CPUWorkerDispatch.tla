@@ -99,7 +99,7 @@ NaturalTerminal ==
     /\ pinnedInvocation # "none"
     /\ unitTerminal = FALSE
     /\ unitTerminal' = TRUE
-    /\ UNCHANGED <<reservation, effect, controlsEnabled, leaseLive, approvalLive,
+    /\ UNCHANGED <<dispatch, reservation, effect, controlsEnabled, leaseLive, approvalLive,
                     launchAuthorized, startCount, unitInvocation, pinnedInvocation,
                     observedInvocation, resultVerified, taskPhase>>
 
