@@ -149,16 +149,19 @@ def recover(state, unit, evidence_path, env):
         receipt_path = history / f"{unit}.json"
         slot_path = state / "merge-slot.json"
         slot = read_record(slot_path) if slot_path.exists() else None
-        if slot is not None and (slot.get("unit") != unit or slot.get("target_ref") != record["target_ref"]):
-            raise SessionError("The merge slot has a different owner; no slot was released")
-        if slot is None and not receipt_path.exists():
-            raise SessionError("This service has no merge slot or prior recovery receipt")
+        owns_slot = slot is not None and slot.get("unit") == unit and slot.get("target_ref") == record["target_ref"]
         if receipt_path.exists():
             receipt = read_record(receipt_path)
             if (receipt.get("unit") != unit or receipt.get("invocation_id") != result["invocation_id"]
                     or receipt.get("resolution_sha256") != digest):
                 raise SessionError("The retained recovery receipt has different evidence")
+            if not owns_slot:
+                return receipt
         else:
+            if slot is not None and not owns_slot:
+                raise SessionError("The merge slot has a different owner; no slot was released")
+            if slot is None:
+                raise SessionError("This service has no merge slot or prior recovery receipt")
             receipt = {"schema": "skybuild.merge-recovery.v1", "unit": unit,
                        "invocation_id": result["invocation_id"], "target_ref": record["target_ref"],
                        "publication_state": evidence["publication_state"], "resolution_sha256": digest,

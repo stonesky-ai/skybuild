@@ -132,3 +132,12 @@ def test_status_reports_service_without_releasing_slot(records):
     assert report["services"][0]["physical_exit_confirmed"] is True
     assert report["merge_slot"]["unit"] == UNIT
     assert (registry / "merge-slot.json").is_file()
+
+
+def test_repeat_returns_receipt_and_preserves_new_slot(records):
+    registry, resolution = records
+    first = state.recover(registry, UNIT, resolution, {})
+    other = "skybuild-merge-" + "d" * 32 + ".service"
+    write_new(registry / "merge-slot.json", {"unit": other, "target_ref": "refs/heads/dev-006"})
+    assert state.recover(registry, UNIT, resolution, {}) == first
+    assert json.loads((registry / "merge-slot.json").read_text())["unit"] == other
