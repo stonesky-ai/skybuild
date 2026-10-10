@@ -195,7 +195,7 @@ BEGIN
                   AND o.phase = 'completed' AND o.result = 'success' AND o.exit_status = 0
                   AND o.action_id = d.action_id AND o.host_id = d.host_id
                   AND o.unit_name = d.unit_name AND o.launch_nonce = d.launch_nonce
-                  AND o.invocation_id = d.invocation_id))))
+                  AND o.invocation_id = d.invocation_id)))
     ) THEN RAISE EXCEPTION 'CPU reservation identity or release proof is invalid'; END IF;
     RETURN NEW;
 END;
