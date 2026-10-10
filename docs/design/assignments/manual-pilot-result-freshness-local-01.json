@@ -1,0 +1,27 @@
+{
+  "schema": "manual-work-brief-v1",
+  "assignment_id": "MWP-20261010-PILOT-RESULT-FRESHNESS-001",
+  "task_id": "SKYBUILD-PILOT-RESULT-FRESHNESS",
+  "worker": "local_worker_01",
+  "dispatcher": "pilot_dispatcher",
+  "branch": "task/pilot-result-freshness-local-01",
+  "owned_paths": [
+    "src/skybuild/manual_result.py",
+    "tests/test_manual_result.py"
+  ],
+  "checks": [
+    "Fix receive_result routing: it verifies pushed Git evidence but never rereads the REST task before queue-independent-review. For v2 assignments, use authenticated bounded get_task and require exact task ID, pinned revision and matching eligible ready/in-progress status before review_required=true.",
+    "Stale, blocked, done, malformed or unavailable current tasks and legacy API-unbound assignments must never route automatic review or model work. Preserve verified private result/Git evidence and expose a concrete blocked/owner-attention disposition, without handling or claiming completion.",
+    "Keep existing in-progress record-only and blocked owner-attention routing. Extend current receive_result routing directly; do not add a classifier abstraction. Preserve stage-one exact four-grant dispatcher checks, remaining timeout budget, no automatic retries and no model launch.",
+    "Add focused regressions for current matching eligible task, stale edit/revision, task-ID/status mismatch, blocked/done/malformed/unavailable task, bounded read timeout/failure and legacy-unbound result. Assert no stale result requires review and verified evidence is retained.",
+    "Run focused tests/test_manual_result.py, tests/test_manual_dispatch.py, tests/test_manual_cord.py and tests/test_fleet_preflight.py via rtk pytest -q using the verified owned source import. No PostgreSQL service start or full local gate.",
+    "Read AGENTS.md, architecture working contract and relevant task/cutover sections. Preparation base: e8c58d7109382c0efdf68281326f412aa6df46b6, A41; staged local scope is PR #66. Execution must pin the published post-stage-one source and current task revision, not this preparation base.",
+    "Await accepted and merged SKYBUILD-PILOT-RESULT-COLLECTOR plus SKYBUILD-BOOTSTRAP. Verify scoped access and trusted pilot_dispatcher manual-work-v2 pins; create only an owned worktree for this branch. Prepared briefs are not dispatch authority or task claims.",
+    "Observe memory without broad cleanup. Owner direction permits lightweight focused checks, not a local heavy gate or service start. Full disposable PostgreSQL gate is dispatcher work on Wonko after independent review with its separately enforced 6 GiB admission floor.",
+    "Keep private TLS, pinned public CA, project-scoped tokens and API-only task authority. No secrets, service starts, live database mutation, automatic model launch, completion attestation, task PR or merge. Stop and reconcile stale pins or uncertain prior assignment ownership.",
+    "Run rtk git diff --check. Use the correct checkout interpreter; when reusing an environment set PYTHONPATH to the owned worktree absolute src and verify skybuild.__file__. Report exact commands, source/import path, pass/fail/skip counts, exit status and any unrun checks.",
+    "Commit and push only owned files; return exact pushed head and checks through validated Cord. Require separate qualified adversarial exact-head review, retest/re-review fixes and frozen-bundle integration. Preserve all collection/import authority controls; no parent/architecture/plan edits."
+  ],
+  "model_limit": "One manually started sol or luna worker using authorized subscription allowance only. No paid API, Brodson, subagents, daemon, automatic model launch or service start. Retain host memory reserve.",
+  "next_action": "Await SKYBUILD-BOOTSTRAP and accepted/merged SKYBUILD-PILOT-RESULT-COLLECTOR. After stage-one ownership is reconciled, dispatch this substantive stage-two code task concurrently with the other local worker on disjoint source paths. Validate a fresh post-stage-one base and current API task revision, work only in owned files, run bounded checks, commit/push and return exact head for independent review and bundled integration."
+}
