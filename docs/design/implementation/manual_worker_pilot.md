@@ -1,5 +1,51 @@
 # Manual parallel-worker pilot
 
+## Petri worker assignments
+
+For a task enrolled in Petri, the worker receives the same `manual-work-v2` assignment.
+The dispatcher sends only Ready tasks without a pending control request.
+The worker's `manual_cord receive` command acquires an exclusive API claim before it records the Cord receipt.
+The claim and movement to Working occur in one API transaction.
+This command starts no worker or model process.
+
+An operator must provision a project-scoped Petri worker credential separately.
+Its exact grants are `tasks:read`, `tasks:claim`, `tasks:write`, `cord:read`, `cord:send` and `cord:handle`.
+Add `--workflow` to `fleet_preflight` and `manual_cord` to select this explicit credential profile.
+The legacy profile still rejects the additional grants.
+This procedure does not create credentials or expand a deployed credential's permissions.
+
+The receiver stores two private files beside the assignment file.
+The `.workflow.json.intent` file preserves the claim request before network I/O.
+The `.workflow.json` file preserves the returned claim, attempt and input snapshot.
+Keep these files with the assignment. Do not edit them or copy another assignment's snapshot.
+Duplicate delivery reuses the same claim request and assignment identity.
+A lost claim reply requires a retry with the original files. It does not permit another assignment or claim.
+
+The claim lease lasts at most 300 seconds.
+Before the lease expires, run this one-shot renewal command with the same worker credential:
+
+```text
+python -m skybuild.manual_cord --url <private-url> --project <project> --token-file <private-token-file> --worker <worker> --checkout <checkout> --workflow renew --assignment <private-assignment-file>
+```
+
+Supply the existing `--ca-file` option when the service uses its dedicated application CA.
+Renewal checks the saved attempt, fence and current inputs. It cannot restore an expired lease.
+Schedule explicit CPU renewals before expiry while the authorized worker runs.
+Do not poll a model to renew ownership. This command creates no renewal daemon.
+If a renewal reply is lost, retain the saved binding and reconcile the current lease through the API.
+Do not acquire a replacement claim to resolve an unknown renewal result.
+
+The `manual_cord result` command reads the saved binding.
+A `ready-for-review` result submits its exact head, branch, base, attempt, fence and input versions through the API.
+The API records proposed output and moves the task to Validating.
+This output is not independent validation, review, publication or acceptance.
+Only after the submission succeeds does the command send the unchanged `manual-work-v1` result through Cord.
+The `.workflow.json.submit` file preserves the exact submission body, revision and operation key before I/O.
+A lost reply reuses that request. A different result cannot reuse the same submission intent.
+Old attempts, changed inputs and pending control requests prevent new submission.
+
+Legacy tasks retain the read-only assignment and result behavior described below.
+
 Architecture revision A41. This is a pre-MVP coding pilot, not automatic worker admission. The authenticated REST API is task authority; committed Git briefs pin each bounded assignment. The main session dispatches, reconciles, reviews and integrates; Cord transports assignments/results. Start at most one interactive Codex worker each on `wonko` and `wowbaggers` after access checks. Do not start a worker daemon, paid model, VM or second task queue.
 
 ## Ready before dispatch
