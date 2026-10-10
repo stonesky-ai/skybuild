@@ -18,7 +18,6 @@ import socket
 import stat
 import subprocess
 import sys
-from typing import Any
 from uuid import uuid4
 
 from scripts.skybuild_job_unit import JobSpec, JobUnitError, JobUnitManager, JobUnitState
@@ -26,6 +25,7 @@ from scripts.skybuild_job_unit import JobSpec, JobUnitError, JobUnitManager, Job
 from .contracts import valid_identifier
 from . import cpu_worker_dispatch as _dispatch_module
 from . import client as _client_module
+from .client import Client
 
 
 PROFILE = 'bounded-trusted-cpu-patch-v1'
@@ -74,6 +74,7 @@ class CPUWorkerPlan:
     ca_file: Path
     permit_file: Path
     permit_digest: str
+    owner_token_file: Path
     weekly_usage_file: Path
     hostwatch_file: Path
     external_state_dir: Path
@@ -97,6 +98,8 @@ class PreparedCPUWorker:
     controller_head: str
     controller_source_digest: str
     controller_profile_digest: str
+    ca_digest: str
+    owner_token_digest: str
     assignment_digest: str
     argv_digest: str
     unit_name: str
@@ -140,6 +143,36 @@ def _unit_manager(state_dir: Path) -> JobUnitManager:
     if type(manager) is not JobUnitManager or manager.run is not subprocess.run:
         raise CPUWorkerBridgeError('CPU bridge requires the pinned JobUnitManager and subprocess runner')
     return manager
+
+
+def _trusted_client(plan: CPUWorkerPlan, expected_ca_digest: str | None = None,
+                    expected_owner_token_digest: str | None = None) -> Client:
+    """Build the owner-only API client from private operator configuration."""
+    if not re.fullmatch(r'https://[^\s]+', plan.url):
+        raise CPUWorkerBridgeError('Owner API endpoint must be HTTPS')
+    owner_token_path = plan.owner_token_file.resolve(strict=True)
+    if (owner_token_path.is_relative_to(plan.checkout.resolve(strict=True))
+            or owner_token_path.is_relative_to(plan.external_state_dir.resolve(strict=True))):
+        raise CPUWorkerBridgeError('Owner API token must remain outside source and worker state')
+    token_bytes = _file_bytes(plan.owner_token_file, limit=4096, private=True)
+    token_digest = _digest(token_bytes)
+    if expected_owner_token_digest is not None and token_digest != expected_owner_token_digest:
+        raise CPUWorkerBridgeError('Owner API token differs from the prepared private credential')
+    try:
+        token = token_bytes.decode('utf-8').removesuffix('\n')
+    except UnicodeError:
+        raise CPUWorkerBridgeError('Owner API token is not UTF-8') from None
+    if not 32 <= len(token) <= 4096 or any(character.isspace() for character in token):
+        raise CPUWorkerBridgeError('Owner API token file is malformed')
+    ca_bytes = _file_bytes(plan.ca_file, limit=1_048_576, private=False, owner=False)
+    ca_digest = _digest(ca_bytes)
+    if expected_ca_digest is not None and ca_digest != expected_ca_digest:
+        raise CPUWorkerBridgeError('Owner API CA differs from the prepared trust pin')
+    try:
+        return Client(plan.url, token, retries=0, timeout=10, trust_env=False,
+                      ca_file=plan.ca_file, expected_ca_sha256=ca_digest)
+    except (ValueError, OSError) as error:
+        raise CPUWorkerBridgeError(f'Owner API client configuration failed: {type(error).__name__}') from None
 
 
 def _write_exclusive(path: Path, data: bytes, mode: int = 0o600) -> None:
@@ -193,7 +226,8 @@ def _controller_pin(plan: CPUWorkerPlan, interpreter_digest: str) -> tuple[str, 
     except (ValueError, UnicodeError):
         raise CPUWorkerBridgeError('Trusted controller profile is malformed') from None
     if not isinstance(profile, dict) or set(profile) != {
-            'schema', 'profile_id', 'controller_head', 'controller_files', 'interpreter_sha256'}:
+            'schema', 'profile_id', 'project_id', 'api_url', 'controller_head',
+            'controller_files', 'interpreter_sha256'}:
         raise CPUWorkerBridgeError('Trusted controller profile fields differ')
     env = {key: os.environ[key] for key in ('PATH', 'LANG', 'LC_ALL') if key in os.environ}
     if any(key.startswith('GIT_') and key != 'GIT_PAGER' for key in os.environ):
@@ -225,6 +259,8 @@ def _controller_pin(plan: CPUWorkerPlan, interpreter_digest: str) -> tuple[str, 
         file_digests[relative] = _digest(current)
     if (profile.get('schema') != 'skybuild.cpu-worker-controller-profile.v1'
             or profile.get('profile_id') != PROFILE
+            or profile.get('project_id') != plan.project_id
+            or profile.get('api_url') != plan.url
             or profile.get('controller_head') != head.stdout.strip()
             or profile.get('controller_files') != file_digests
             or profile.get('interpreter_sha256') != interpreter_digest):
@@ -318,7 +354,7 @@ def _validate_permit(plan: CPUWorkerPlan, assignment: dict, assignment_digest: s
     return permit, approved_until
 
 
-def prepare_worker(client: Any, plan: CPUWorkerPlan, *, action_id: str, operation_id: str) -> PreparedCPUWorker:
+def prepare_worker(plan: CPUWorkerPlan, *, action_id: str, operation_id: str) -> PreparedCPUWorker:
     """Validate immutable inputs, prepare API intent, then return one fixed JobSpec."""
     for name, value in [('project_id', plan.project_id), ('worker_id', plan.worker_id),
                         ('dispatcher_id', plan.dispatcher_id), ('action_id', action_id),
@@ -339,7 +375,20 @@ def prepare_worker(client: Any, plan: CPUWorkerPlan, *, action_id: str, operatio
         raise CPUWorkerBridgeError('Approved patch bytes differ from pinned digest')
     for path in (plan.worker_token_file, plan.git_token_file):
         _file_bytes(path, limit=1024, private=True)
+    owner_token_bytes = _file_bytes(plan.owner_token_file, limit=4096, private=True)
+    worker_token_bytes = _file_bytes(plan.worker_token_file, limit=1024, private=True)
+    git_token_bytes = _file_bytes(plan.git_token_file, limit=1024, private=True)
+    secret_paths = {path.resolve(strict=True) for path in
+                    (plan.owner_token_file, plan.worker_token_file, plan.git_token_file)}
+    if len(secret_paths) != 3 or len({owner_token_bytes, worker_token_bytes, git_token_bytes}) != 3:
+        raise CPUWorkerBridgeError('Owner, worker and Git credentials must be distinct private files')
+    owner_token_path = plan.owner_token_file.resolve(strict=True)
+    if (owner_token_path.is_relative_to(checkout)
+            or owner_token_path.is_relative_to(plan.external_state_dir.resolve(strict=True))):
+        raise CPUWorkerBridgeError('Owner API token must remain outside source and worker state')
+    owner_token_digest = _digest(owner_token_bytes)
     ca_bytes = _file_bytes(plan.ca_file, limit=1_048_576, private=False, owner=False)
+    ca_digest = _digest(ca_bytes)
     permit, approved_until = _validate_permit(plan, assignment, assignment_digest)
     interpreter = Path(sys.executable).resolve(strict=True)
     interpreter_info = interpreter.stat()
@@ -379,7 +428,7 @@ def prepare_worker(client: Any, plan: CPUWorkerPlan, *, action_id: str, operatio
             '--approved-until', permit['approved_until'], '--permit', str(plan.permit_file),
             '--permit-sha256', plan.permit_digest)
     argv_digest = _digest(json.dumps({'argv': args, 'interpreter_sha256': interpreter_digest,
-                                      'ca_sha256': _digest(ca_bytes), 'source_head': source_head},
+                                      'ca_sha256': ca_digest, 'source_head': source_head},
                                      sort_keys=True, separators=(',', ':')).encode())
     task_id = assignment.get('task_id')
     remaining_seconds = int((approved_until - datetime.now(timezone.utc)).total_seconds())
@@ -403,7 +452,8 @@ def prepare_worker(client: Any, plan: CPUWorkerPlan, *, action_id: str, operatio
                'permit_digest': plan.permit_digest, 'assignment_digest': assignment_digest,
                'patch_digest': plan.patch_digest, 'argv_digest': argv_digest,
                'approved_until': permit['approved_until']}
-    response = client.prepare_cpu_worker_dispatch(plan.project_id, request)
+    with _trusted_client(plan, ca_digest, owner_token_digest) as client:
+        response = client.prepare_cpu_worker_dispatch(plan.project_id, request)
     if (response.get('operation_id') != operation_id or response.get('action_id') != action_id
             or response.get('unit_name') != unit_name or response.get('launch_nonce') != launch_nonce
             or response.get('source_digest') != SOURCE_DIGEST
@@ -417,11 +467,18 @@ def prepare_worker(client: Any, plan: CPUWorkerPlan, *, action_id: str, operatio
                              assignment['assignment_id'], task_id, attempt_id,
                              preclaim['claim_fence'], approved_until, source_head, SOURCE_DIGEST,
                              interpreter_digest, controller_head, controller_source_digest,
-                             controller_profile_digest,
+                             controller_profile_digest, ca_digest,
+                             owner_token_digest,
                              assignment_digest, argv_digest, unit_name, launch_nonce)
 
 
-def launch_worker(client: Any, prepared: PreparedCPUWorker) -> dict:
+def launch_worker(prepared: PreparedCPUWorker) -> dict:
+    with _trusted_client(prepared.plan, prepared.ca_digest,
+                         prepared.owner_token_digest) as client:
+        return _launch_worker(client, prepared)
+
+
+def _launch_worker(client: Client, prepared: PreparedCPUWorker) -> dict:
     def verify_pins() -> None:
         if prepared.plan.checkout.resolve(strict=True) != Path(__file__).resolve().parents[2]:
             raise CPUWorkerBridgeError('Worker import checkout differs from the controller source root')
@@ -469,7 +526,13 @@ def launch_worker(client: Any, prepared: PreparedCPUWorker) -> dict:
             'launch_nonce': prepared.launch_nonce}
 
 
-def reconcile_worker(client: Any, prepared: PreparedCPUWorker) -> dict:
+def reconcile_worker(prepared: PreparedCPUWorker) -> dict:
+    with _trusted_client(prepared.plan, prepared.ca_digest,
+                         prepared.owner_token_digest) as client:
+        return _reconcile_worker(client, prepared)
+
+
+def _reconcile_worker(client: Client, prepared: PreparedCPUWorker) -> dict:
     """Persist exact natural completion; any mismatch or uncertainty stays held."""
     def verify_pins() -> None:
         if _controller_pin(prepared.plan, prepared.interpreter_digest) != (
