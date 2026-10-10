@@ -68,3 +68,22 @@ A passing bounded model is not proof of SQL or remote publication correctness.
 
 The final record must identify the frozen branch heads, independent exact-head review, combined gate receipt and published task inclusion.
 Keep runtime promotion separate from repository integration.
+
+
+## First combined gate and correction batch
+
+The first combined PostgreSQL gate failed with 24 failed tests, 1813 passed tests and one skipped test.
+The gate cleanup completed. This failed run is not acceptance evidence.
+Its private log is `skybuild-gate-tmp/petri-implementation/gate-001.log`.
+
+The correction batch keeps default Petri creation active in production.
+Compatibility tests construct explicit pre-Petri input only when they test the old task-action or completion contract.
+Read assertions compare stored fields separately from additive workflow display fields.
+Schema assertions now require migration 013.
+The schema-010 promotion rehearsal models the old controller's exact journal write columns in its fixture subclass.
+Production code has no old-schema fallback. The rehearsal retains its role audit and atomic upgrade checks.
+Completion checks owner/admin authority before rejecting the legacy completion route for enrolled tasks.
+A new HTTP regression requires worker rejection with 403 and owner rejection with 409, with no task or history change.
+
+The correction batch's scoped checks pass: 64 tests passed and 150 PostgreSQL cases skipped.
+These checks do not rerun the failed PostgreSQL cases. A new frozen-head independent review and combined PostgreSQL gate are required.

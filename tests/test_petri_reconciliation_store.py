@@ -47,6 +47,8 @@ def test_deferred_edit_preserves_trigger_and_due_resume_is_cpu_only(store, actor
 
 
 def test_milestone_done_label_without_current_completion_cannot_resume(store, actors):
+    from skybuild.completion import current_completion
+
     project, people = actors
     owner = people["owner"]
     create(store, owner, project, "milestone")
@@ -54,10 +56,19 @@ def test_milestone_done_label_without_current_completion_cannot_resume(store, ac
     task = store.task_action(owner, project, "waiting", "defer", {"reason": "Wait", "milestone_task_id": "milestone"},
                              task["revision"], "defer")
     task = store.initialize_workflow(owner, project, "waiting", task["revision"], "initialize")["task"]
+    persisted = store.get_task(owner, project, "waiting")
+    projection = Store.workflow_projection(persisted)
+    assert {key: task[key] for key in projection} == projection
+    generation = Store.workflow_token(persisted).input_generation
+    history = store.task_history(owner, project, "waiting")
     with store._connection() as connection:
         connection.execute("UPDATE tasks SET status = 'done' WHERE project_id = %s AND task_id = 'milestone'", (project,))
+    assert not current_completion(store.get_task(owner, project, "milestone"))
     assert store.reconcile_due_deferrals(owner, project, "sweep")["reassessed"] == []
-    assert store.get_task(owner, project, "waiting") == task
+    after = store.get_task(owner, project, "waiting")
+    assert after == persisted
+    assert Store.workflow_token(after).input_generation == generation
+    assert store.task_history(owner, project, "waiting") == history
 
 
 def test_ready_can_show_unmet_dependency_but_claim_cannot_start(store, actors):

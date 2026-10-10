@@ -1022,11 +1022,11 @@ class Store(Claims, CPUAdmission, Observations, ExecutionStatus, BoardQueries):
         _body(body, {'reason', 'generation', 'source_head', 'author', 'policy_ref',
                      'acceptance', 'checks', 'review', 'publication'})
         def changes(before, connection):
-            if self._petri(before):
-                raise DomainError('workflow_conflict', 'Petri completion requires verified workflow acceptance', 409)
             current = self._principal(connection, principal.principal_id)
             if not current.is_admin:
                 raise DomainError('authorization', 'Only an owner/admin may attest completion', 403)
+            if self._petri(before):
+                raise DomainError('workflow_conflict', 'Petri completion requires verified workflow acceptance', 409)
             self._require_current_dependencies(connection, project_id, before)
             return completion_change(before, body, current.principal_id)
         return self._change_task(principal, project_id, task_id, expected_revision, idempotency_key,

@@ -300,3 +300,24 @@ def test_default_creation_dispatches_verified_assignment_without_legacy_ready_ac
     assert sent[0]["task_status"] == "ready" and sent[0]["task_revision"] == 1
     assert verify_assignment(sent[0], repo, worker=envelope["worker"])["verified"] is True
     assert store.get_task(people["owner"], project, task["task_id"]) == task
+
+
+def test_actual_petri_completion_preserves_admin_authorization_before_route_conflict(store, actors):
+    from fastapi.testclient import TestClient
+    from skybuild.api import create_app
+
+    project, people = actors
+    task = create(store, people["owner"], project, "completion-authorization",
+                  acceptance_criteria=["Verify feature"])
+    assert Store.workflow_token(task).place == Place.READY
+    before = store.get_task(people["owner"], project, task["task_id"])
+    history = store.task_history(people["owner"], project, task["task_id"])
+    path = f"/api/v1/projects/{project}/tasks/{task['task_id']}/complete"
+    with TestClient(create_app(store)) as client:
+        for actor, expected in (("worker", 403), ("owner", 409)):
+            response = client.post(path, json={"reason": "Requires verified Petri acceptance"}, headers={
+                "Authorization": "Bearer " + people[actor + "_token"],
+                "If-Match": str(task["revision"]), "Idempotency-Key": "complete-" + actor})
+            assert response.status_code == expected, response.text
+    assert store.get_task(people["owner"], project, task["task_id"]) == before
+    assert store.task_history(people["owner"], project, task["task_id"]) == history

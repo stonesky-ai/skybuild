@@ -71,15 +71,15 @@ def test_authenticated_assignment_and_result_roundtrip(relay_assignment, restric
     scopes = ["tasks:read", "cord:send", "cord:read", "cord:handle"]
     dispatcher_token, worker_token = uuid4().hex + uuid4().hex, uuid4().hex + uuid4().hex
     admin.provision_principal(dispatcher, dispatcher_token, grants={project: scopes})
-    admin.provision_principal(worker, worker_token, grants={project: scopes})
+    admin.provision_principal(worker, worker_token, grants={project: scopes + ["tasks:claim", "tasks:write"]})
     owner_token = uuid4().hex + uuid4().hex
     admin.provision_principal("owner-" + project, owner_token, is_admin=True)
     owner = admin.authenticate(owner_token)
     task = admin.create_task(owner, project, {
         "task_id": brief["task_id"], "title": "Relay coding task", "description": "Bounded relay test",
         "acceptance_criteria": ["Worker receives an API-bound assignment and reports a result"]}, "create")
-    task = admin.task_action(owner, project, task["task_id"], "ready", {"reason": "Ready for manual relay"},
-                             task["revision"], "ready")
+    assert task["status"] == "ready"
+    assert Store.workflow_token(task).place.value == "ready"
     with TestClient(create_app(Store(runtime_dsn, database))) as api:
         def transport(request):
             response = api.request(request.method, str(request.url),
@@ -92,19 +92,24 @@ def test_authenticated_assignment_and_result_roundtrip(relay_assignment, restric
         sent = dispatch_assignment(relay_assignment, tmp_path, client_factory, project, dispatcher_token)
         destination = tmp_path / "received.json"
         with client_factory("https://controller.ts.net", worker_token) as receiver:
-            receive_assignment(receiver, project, repo, worker=worker, dispatcher=dispatcher,
-                               message_id=sent["message_id"], destination=destination)
+            received = receive_assignment(receiver, project, repo, worker=worker, dispatcher=dispatcher,
+                                          message_id=sent["message_id"], destination=destination)
             assignment = json.loads(destination.read_text())
             assert assignment["schema"] == "manual-work-v2"
             assert assignment["task_revision"] == task["revision"]
             assert assignment["task_status"] == "ready"
+            assert received["place"] == "working"
+            claimed = Store.workflow_token(admin.get_task(owner, project, task["task_id"]))
+            assert claimed.attempt_id == received["attempt_id"]
+            assert claimed.claim_fence == received["claim_fence"]
             worktree = tmp_path / "worker"
             _git(repo, "worktree", "add", "-b", assignment["branch"], str(worktree), assignment["base_sha"])
             result = {"schema": "manual-work-v1", "assignment_id": assignment["assignment_id"],
                       "phase": "blocked", "branch": assignment["branch"], "head_sha": assignment["base_sha"],
                       "checks": [], "changed_paths": [], "risks": [], "next_action": "Reconcile blocker"}
             report = send_result(receiver, project, repo, worktree, worker=worker,
-                                 assignment=assignment, result=result)
+                                 assignment=assignment, result=result,
+                                 workflow_state=destination.with_name(destination.name + ".workflow.json"))
         with client_factory("https://controller.ts.net", dispatcher_token) as sender:
             inbox = sender.inbox(project)
             assert len(inbox) == 1

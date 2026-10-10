@@ -8,6 +8,7 @@ import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -126,11 +127,14 @@ def test_http_task_revision_replay_and_scope(service):
     assert len(history.json()) == 2
 
 
-def test_http_manual_task_action_preserves_reason_and_revision(service):
-    client, _, project, _, _, owner_token, _ = service
+def test_http_legacy_manual_task_action_preserves_reason_and_revision(service):
+    client, store, project, _, _, owner_token, _ = service
     base = f"/api/v1/projects/{project}/tasks"
-    created = client.post(base, json={"task_id": "action", "title": "Act", "description": "Review"},
-                          headers=headers(owner_token, "action-create"))
+    # Build the pre-Petri compatibility case through the same HTTP transaction.
+    # Default creation is tested separately and retains automatic enrollment.
+    with patch.object(store, '_new_task_metadata', side_effect=lambda task: task['metadata']):
+        created = client.post(base, json={"task_id": "action", "title": "Act", "description": "Review"},
+                              headers=headers(owner_token, "action-create"))
     assert created.status_code == 201
     action = client.post(base + "/action/actions/rework",
                          json={"reason": "Check failed", "next_action": "Fix failed check"},
@@ -145,16 +149,36 @@ def test_http_manual_task_action_preserves_reason_and_revision(service):
 
 
 def test_http_ready_requires_acceptance_and_does_not_start_work(service):
-    client, _, project, _, _, owner_token, _ = service
+    client, store, project, _, _, owner_token, _ = service
     base = f"/api/v1/projects/{project}/tasks"
     created = client.post(base, json={"task_id": "ready-task", "title": "Ready task", "description": "Brief",
-                                      "acceptance_criteria": ["Check result"]}, headers=headers(owner_token, "create-ready"))
-    assert created.status_code == 201
+                                      "acceptance_criteria": ["Check result"],
+                                      "next_action": "Await explicit admission and ownership"},
+                          headers=headers(owner_token, "create-ready"))
+    assert created.status_code == 201, created.text
+    task = created.json()
+    assert (task["status"], task["phase"]) == ("ready", "ready")
+    token = Store.workflow_token(task)
+    assert token.place.value == "ready"
+    assert token.attempt_id is None and token.claim_fence is None
+    assert task["next_action"] == "Await explicit admission and ownership"
+    # Automatic enrollment already assessed the definition. A legacy Ready action
+    # cannot create a second readiness transition or launch work.
     response = client.post(base + "/ready-task/actions/ready", json={"reason": "Definition reviewed"},
-                           headers=headers(owner_token, "mark-ready", 1))
-    assert response.status_code == 200
-    assert (response.json()["status"], response.json()["phase"]) == ("ready", "ready-for-work")
-    assert response.json()["next_action"] == "Await explicit admission and ownership"
+                           headers=headers(owner_token, "mark-ready", task["revision"]))
+    assert response.status_code == 409
+    loaded = client.get(base + "/ready-task", headers=headers(owner_token)).json()
+    assert loaded == {**task, "place": "ready", "validation": [],
+                      "enabled_actions": [], "evidence_freshness": "unavailable"}
+    assert store.claim_history(store.authenticate(owner_token), project, "ready-task") == []
+    incomplete = client.post(base, json={"task_id": "undefined-task", "title": "Incomplete", "description": "Brief"},
+                             headers=headers(owner_token, "create-undefined"))
+    assert incomplete.status_code == 201
+    assert Store.workflow_token(incomplete.json()).place.value == "hold"
+    refused = client.post(base + "/undefined-task/actions/ready", json={"reason": "Missing acceptance"},
+                          headers=headers(owner_token, "undefined-ready", incomplete.json()["revision"]))
+    assert refused.status_code == 409
+    assert store.claim_history(store.authenticate(owner_token), project, "undefined-task") == []
 
 
 def test_http_task_id_cursor_lists_next_page(service):
@@ -233,6 +257,15 @@ def test_http_cord_handling_and_transactional_reply(service):
     assert owner_inbox[0]["reply_to"] == message_id
 
 
+def assert_unchanged_hold_record_with_projection(loaded, persisted):
+    """Check every persisted field and each additive GET field after restart."""
+    projection = {"place": "hold", "validation": [], "enabled_actions": [], "evidence_freshness": "unavailable"}
+    assert not set(persisted) & set(projection)
+    assert loaded == {**persisted, **projection}
+    assert Store.workflow_token(persisted).place.value == "hold"
+    assert Store.workflow_token(persisted).attempt_id is None
+
+
 def test_http_readiness_and_persistence_across_app_recreation(service):
     client, store, project, _, _, token, _ = service
     assert client.get("/health/ready").status_code == 200
@@ -242,7 +275,7 @@ def test_http_readiness_and_persistence_across_app_recreation(service):
     with TestClient(create_app(store), raise_server_exceptions=False) as restarted:
         loaded = restarted.get(base + "/persistent", headers=headers(token))
         assert loaded.status_code == 200
-        assert loaded.json() == response.json()
+        assert_unchanged_hold_record_with_projection(loaded.json(), response.json())
 
 
 def test_http_preserves_literal_unicode_escape_but_rejects_nul(service):
@@ -255,7 +288,10 @@ def test_http_preserves_literal_unicode_escape_but_rejects_nul(service):
     }, headers=headers(token, "escape-create"))
     assert created.status_code == 201, created.text
     assert created.json()["description"] == literal
-    assert created.json()["metadata"] == {literal: literal}
+    metadata = created.json()["metadata"]
+    assert {key: value for key, value in metadata.items() if key != "_skybuild_workflow"} == {literal: literal}
+    assert set(metadata) == {literal, "_skybuild_workflow"}
+    assert Store.workflow_token(created.json()).place.value == "hold"
     changed = client.patch(base + "/escape", json={"description": literal + " updated"}, headers=headers(token, "escape-update", 1))
     assert changed.status_code == 200, changed.text
     assert changed.json()["description"] == literal + " updated"
@@ -307,7 +343,7 @@ def test_cli_service_process_restart_preserves_task(service, tmp_path):
                     else:
                         response = http.get(task_path + "/process-restart", headers=headers(token))
                         assert response.status_code == 200, response.text
-                        assert response.json() == created
+                        assert_unchanged_hold_record_with_projection(response.json(), created)
             finally:
                 process.terminate()
                 try:

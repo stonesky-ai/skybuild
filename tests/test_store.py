@@ -386,7 +386,7 @@ def test_identity_guard_and_readiness(store):
     assert error('database_identity', wrong.migrate).status_code == 503
     error('database_identity', wrong.readiness)
     store.migrate()
-    assert store.readiness() == {'ready': True, 'schema_version': 12}
+    assert store.readiness() == {'ready': True, 'schema_version': 13}
 
 
 def test_store_can_bind_operations_to_postgres_system_identifier(store):
@@ -420,7 +420,7 @@ def test_upgrade_001_to_002_preserves_existing_records_and_is_repeatable(store):
         error('schema_mismatch', upgraded.readiness)
         upgraded.migrate()
         upgraded.migrate()
-        assert upgraded.readiness() == {'ready': True, 'schema_version': 12}
+        assert upgraded.readiness() == {'ready': True, 'schema_version': 13}
         with upgraded._connection() as connection:
             assert connection.execute('SELECT * FROM tasks').fetchone() == task_before
             assert connection.execute('SELECT * FROM messages').fetchone() == message_before
@@ -466,9 +466,12 @@ def test_revision_history_restart_and_idempotency(store, actors):
     project, people = actors
     worker = people['worker']
     body = {'task_id': 'T1', 'title': 'Unicode: café λ', 'description': 'Complete description', 'metadata': {'resume': 'handoff'}}
-    first = store.create_task(worker, project, body, 'same-key')
-    assert store.create_task(worker, project, dict(reversed(list(body.items()))), 'same-key') == first
-    error('idempotency_conflict', lambda: store.create_task(worker, project, {**body, 'title': 'Different'}, 'same-key'))
+    # This test covers pre-Petri worker actions and their original history.
+    # Replace only enrollment while constructing the synthetic legacy task.
+    with patch.object(store, '_new_task_metadata', side_effect=lambda task: task['metadata']):
+        first = store.create_task(worker, project, body, 'same-key')
+        assert store.create_task(worker, project, dict(reversed(list(body.items()))), 'same-key') == first
+        error('idempotency_conflict', lambda: store.create_task(worker, project, {**body, 'title': 'Different'}, 'same-key'))
     changed = store.task_action(worker, project, 'T1', 'reassess', {'reason': 'Needs decision'}, 1, 'change')
     assert changed['revision'] == 2
     assert store.task_action(worker, project, 'T1', 'reassess', {'reason': 'Needs decision'}, 1, 'change') == changed
