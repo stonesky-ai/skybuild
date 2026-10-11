@@ -45,7 +45,7 @@ WORKER_SOURCE = {
     'src/skybuild/auto_patch_permit.py': 'd18ba6aa4d2993d69e9cd31c890c63eb4f0e64ae0d8fb8eb5667e60962cbdf51',
     'src/skybuild/manual_assignment.py': '349dc9f367ba63e0bf6c2f3e2d63b7d45c6e5dadcb715f6b67295ad86b65daf7',
     'src/skybuild/manual_cord.py': '3cf3b393a18c39aa5c13dd19975211caba88171fd7be19025c24d47d9d59ca90',
-    'src/skybuild/manual_dispatch.py': '7baad50262ad315c4d1d48cf6edb27c592b5369b23c3fb81004994a966a667cc',
+    'src/skybuild/manual_dispatch.py': 'be04e9b943848c4cb9927bc2eafb071731e0dcde34c39db5fd66b4ca12283590',
 }
 SOURCE_DIGEST = hashlib.sha256(json.dumps(WORKER_SOURCE, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 _HEX64 = re.compile(r'[0-9a-f]{64}\Z')

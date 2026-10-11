@@ -146,6 +146,12 @@ def _read_state(path: Path) -> dict | None:
     return state
 
 
+def _assignment_key(project: str, envelope: dict) -> str:
+    encoded = json.dumps(envelope, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    identity = hashlib.sha256((project + "\0" + encoded).encode()).hexdigest()
+    return f"manual-work-v2:{identity}"
+
+
 def dispatch(repo: Path, brief_path: str, *, worker: str, dispatcher: str, project: str,
              principal: str, url: str, token_file: Path, state_dir: Path,
              ca_file: Path | None = None, base_ref: str = "refs/heads/dev-003",
@@ -200,7 +206,13 @@ def dispatch(repo: Path, brief_path: str, *, worker: str, dispatcher: str, proje
             if expected_envelope.get("schema") != "manual-work-v2" or envelope not in (expected_initial, expected_envelope):
                 raise DispatchError("Selected assignment differs from approved exact envelope")
         identity = hashlib.sha256(f"{project}\0{envelope['assignment_id']}".encode()).hexdigest()
-        key = f"manual-work-v1:{identity}"
+        legacy_key = f"manual-work-v1:{identity}"
+        key = _assignment_key(project, envelope) if envelope.get("schema") == "manual-work-v2" else legacy_key
+        if state is not None:
+            # A retained intent keeps its exact key. Never change an uncertain send.
+            if state.get("idempotency_key") not in {legacy_key, key}:
+                raise DispatchError("Dispatch key differs from pinned assignment")
+            key = state["idempotency_key"]
         body = {"recipient": worker, "subject": f"Manual assignment {envelope['assignment_id']}",
                 "body": json.dumps(envelope, sort_keys=True, separators=(",", ":")),
                 "category": "manual-work", "urgency": "normal"}
@@ -260,6 +272,7 @@ def dispatch(repo: Path, brief_path: str, *, worker: str, dispatcher: str, proje
                                 "category": "manual-work", "urgency": "normal"}
                         if len(body["body"]) > 32768 or len(body["subject"]) > 500:
                             raise DispatchError("Cord assignment exceeds message size limit")
+                        key = _assignment_key(project, envelope)
                         intended = {"schema": "manual-dispatch-intent-v1", "project": project,
                                     "principal": principal, "endpoint": endpoint, "idempotency_key": key,
                                     "message": body, "assignment": envelope}

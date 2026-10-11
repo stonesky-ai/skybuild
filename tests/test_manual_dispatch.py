@@ -325,3 +325,67 @@ def test_retry_cannot_change_frozen_development_ref(tmp_path, monkeypatch):
                                  base_ref="refs/heads/dev-004", **kwargs)
     assert next(state.glob("*.json")).read_bytes() == before
     assert len(client.calls) == 1
+
+
+class _IdempotencyConnection:
+    """Use the real Store validator with an in-memory SQL result boundary."""
+
+    def __init__(self):
+        self.rows = {}
+        self.row = None
+
+    def execute(self, sql, args):
+        if sql.startswith("SELECT payload_hash"):
+            self.row = self.rows.get(tuple(args))
+        elif sql.startswith("INSERT INTO idempotency"):
+            self.rows[tuple(args[:4])] = {"payload_hash": args[4], "response": args[5].obj}
+        return self
+
+    def fetchone(self):
+        return self.row
+
+
+def test_new_assignment_revision_uses_real_store_idempotency(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from skybuild.store import Store, DomainError
+
+    connection = _IdempotencyConnection()
+    principal = SimpleNamespace(principal_id="pilot_dispatcher")
+    store = object.__new__(Store)
+
+    class StoreClient(FakeClient):
+        def send_message(self, project, body, *, idempotency_key):
+            self.calls.append((project, body, idempotency_key))
+            return store._idempotent(connection, principal, project, "cord.send", idempotency_key,
+                body, lambda: {"message_id": str(len(connection.rows))})
+
+    client = StoreClient()
+    repo, state, _, kwargs = _dispatch(tmp_path, monkeypatch, client)
+    manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
+    first = client.calls[-1]
+    client.task["revision"] = 5
+    kwargs["state_dir"] = tmp_path / "new-state"
+    manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
+    second = client.calls[-1]
+    assert first[2] != second[2]
+    assert len(connection.rows) == 2
+    with pytest.raises(DomainError, match="different input"):
+        store._idempotent(connection, principal, "skybuild", "cord.send", first[2], second[1], lambda: {})
+    manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
+    assert len(client.calls) == 2
+
+
+def test_legacy_sending_intent_keeps_its_exact_key(tmp_path, monkeypatch):
+    client = FakeClient()
+    client.fail_once = True
+    repo, state, _, kwargs = _dispatch(tmp_path, monkeypatch, client)
+    with pytest.raises(manual_dispatch.DispatchError):
+        manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
+    path = next(state.glob("*.json"))
+    retained = json.loads(path.read_text())
+    identity = hashlib.sha256(b"skybuild\0MWP-test-1").hexdigest()
+    retained["idempotency_key"] = "manual-work-v1:" + identity
+    path.write_text(json.dumps(retained))
+    manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
+    assert client.calls[-1][2] == retained["idempotency_key"]
+    assert client.calls[-1][1] == retained["message"]
