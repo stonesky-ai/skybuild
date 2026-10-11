@@ -33,7 +33,8 @@ from .cpu_worker_bridge import (CPUWorkerBridgeError, CPUWorkerPlan, launch_work
                                 prepare_worker, reconcile_worker, recover_worker,
                                 _docker_container_state, _file_bytes, _write_exclusive)
 from .manual_dispatch import (DispatchError, _private_endpoint, _state_directory,
-                              build_envelope, dispatch)
+                              build_envelope)
+from .controller_cord_dispatch import dispatch
 
 
 class AutoControllerError(ValueError):
