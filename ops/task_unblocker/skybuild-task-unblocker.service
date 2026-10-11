@@ -1,0 +1,24 @@
+[Unit]
+Description=SkyBuild TaskUnblocker every two hours
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/kevin/my_code/skybuild-task-unblocker-20261011
+Environment=PATH=/home/kevin/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=UV_OFFLINE=1
+Environment=UV_CACHE_DIR=/home/kevin/my_code/skybuild-task-unblocker-runtime-20261011/uv-cache
+ExecStart=/usr/bin/python3 /home/kevin/my_code/skybuild-observability/telemetry_namespace.py run --name task-unblocker -- /home/kevin/my_code/skybuild-task-unblocker-20261011/scripts/project_python /home/kevin/my_code/skybuild-task-unblocker-20261011/scripts/task_unblocker_watch.py --config /home/kevin/my_code/skybuild-task-unblocker-runtime-20261011/config.json
+Restart=on-failure
+RestartSec=2h
+KillMode=control-group
+TimeoutStopSec=20
+MemoryMax=256M
+MemorySwapMax=0
+CPUQuota=10%
+TasksMax=32
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

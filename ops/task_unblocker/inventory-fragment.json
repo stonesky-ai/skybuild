@@ -1,0 +1,7 @@
+{
+  "host": "wonko",
+  "kind": "unit",
+  "name": "skybuild-task-unblocker.service",
+  "fragment": "/home/kevin/.config/systemd/user/skybuild-task-unblocker.service",
+  "management": "persistent"
+}
