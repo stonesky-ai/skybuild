@@ -3,6 +3,10 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import datetime, timezone
 from uuid import uuid4
+from threading import Barrier
+
+from psycopg.types.json import Jsonb
+from skybuild.contracts import DomainError
 
 import psycopg
 import pytest
@@ -142,3 +146,54 @@ def test_sql_cannot_cancel_unproved_launch_intent(cpu_dispatch):
     ]:
         with pytest.raises(psycopg.Error), admin._connection() as connection:
             connection.execute(sql, (key,))
+
+
+def test_concurrent_invocation_and_recovery_have_one_terminal_winner(cpu_dispatch):
+    admin, runtime, client, project, people, tokens = cpu_dispatch
+    pins, base, body, _ = _case(cpu_dispatch)
+    barrier = Barrier(2)
+    def recover():
+        barrier.wait()
+        try:
+            return CPUWorkerRecovery(runtime).recover(people['owner'], project, pins['operation_id'], **body)['state']
+        except DomainError as error:
+            return error.code
+    def invoke():
+        barrier.wait()
+        try:
+            return CPUWorkerDispatch(runtime).record_invocation(
+                people['owner'], project, pins['operation_id'], **_unit_identity(pins))['state']
+        except DomainError as error:
+            return error.code
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        a, b = pool.submit(recover), pool.submit(invoke)
+        results = (a.result(), b.result())
+    assert results in [('cancelled', 'effect_conflict'), ('effect_conflict', 'running')]
+    d, e, r, _ = _persisted(admin, project, pins['action_id'], pins['operation_id'])
+    if d['state'] == 'running':
+        assert e['exposure_held'] and r['state'] == 'reserved'
+    else:
+        assert not e['exposure_held'] and r['state'] == 'cancelled'
+
+
+def test_committed_exact_replay_does_not_require_new_host_observation(cpu_dispatch, monkeypatch):
+    admin, runtime, client, project, people, tokens = cpu_dispatch
+    pins, base, body, _ = _case(cpu_dispatch)
+    first = client.post(base + '/recover-unstarted', headers=_headers(tokens['owner']), json=body)
+    assert first.status_code == 200
+    def stale(_proof):
+        raise DomainError('effect_conflict', 'Old host proof', 409)
+    monkeypatch.setattr('skybuild.cpu_worker_recovery.validate_proof', stale)
+    assert client.post(base + '/recover-unstarted', headers=_headers(tokens['owner']), json=body).json() == first.json()
+
+
+def test_database_rejects_contradictory_receipt(cpu_dispatch):
+    admin, runtime, client, project, people, tokens = cpu_dispatch
+    pins, base, body, _ = _case(cpu_dispatch)
+    body['proof']['launcher_fenced'] = False
+    with pytest.raises(psycopg.Error), admin._connection() as connection:
+        connection.execute(
+            'INSERT INTO cpu_worker_recoveries (recovery_id, operation_id, action_id, actor, request_digest, evidence) '
+            'VALUES (%s, %s, %s, %s, %s, %s)',
+            (body['recovery_id'], pins['operation_id'], pins['action_id'], people['owner'].principal_id,
+             'f' * 64, Jsonb({key: value for key, value in body.items() if key != 'recovery_id'})))
