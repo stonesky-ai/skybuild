@@ -166,3 +166,11 @@ def test_watch_timeout_kills_late_child(tmp_path):
     import time
     time.sleep(1.1)
     assert not saved.exists()
+
+
+def test_unrelated_metadata_heartbeat_does_not_repeat_finding(tmp_path):
+    c = Fake(); c.task['metadata']['telemetry'] = {'heartbeat_at': 'old'}
+    first = invoke(c, tmp_path / 'state')
+    c.task['metadata']['telemetry']['heartbeat_at'] = 'new'
+    second = invoke(c, tmp_path / 'state')
+    assert len(first['findings']) == 1 and second['findings'] == []

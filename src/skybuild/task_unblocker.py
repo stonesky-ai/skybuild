@@ -194,8 +194,10 @@ def history_proves(client, project, task_id, operation, revision, *, check=lambd
 
 def task_facts(task):
     """Select definition and workflow fields; omit display and heartbeat fields."""
-    return {k: task.get(k) for k in ('task_id', 'revision', 'status', 'phase', 'blocker',
-            'dependencies', 'metadata')}
+    facts = {k: task.get(k) for k in ('task_id', 'revision', 'status', 'phase', 'blocker', 'dependencies')}
+    metadata = task.get('metadata', {})
+    facts['metadata'] = {k: metadata.get(k) for k in ('_skybuild_workflow', '_skybuild_completion')}
+    return facts
 
 
 def decision_evidence(task, workflow, execution, by_id):
