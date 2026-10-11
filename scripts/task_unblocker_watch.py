@@ -47,10 +47,9 @@ def bounded_run(args, seconds=150):
                 os.killpg(child.pid, sig)
             except ProcessLookupError:
                 pass
-            try:
-                child.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                continue
+        # Keep the leader unreaped until both signals are sent. Its process-group
+        # identity cannot be reused while that child PID still belongs to us.
+        child.wait(timeout=5)
         return 1
 
 
