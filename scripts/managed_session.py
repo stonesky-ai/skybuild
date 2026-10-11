@@ -128,7 +128,7 @@ def validate(args):
     return service_environment(args.expected_host)
 
 
-def service_command(args, unit):
+def service_command(args, unit, verified_environment):
     # The main command's exit stops the service and all remaining descendants.
     props = ["Type=exec", "ExitType=main", "RemainAfterExit=no", "KillMode=control-group",
              "TimeoutStopSec=10", "SendSIGKILL=yes", "OOMPolicy=kill", "MemoryAccounting=yes",
@@ -147,6 +147,13 @@ def service_command(args, unit):
     # Do not copy credentials from the launcher's environment into unit arguments.
     environment = {key: os.environ[key] for key in ("HOME", "USER", "LOGNAME", "LANG", "TERM", "PATH")
                    if key in os.environ}
+    # Use only the same-host bus metadata checked by validate().
+    runtime = f"/run/user/{os.getuid()}"
+    bus_environment = {"XDG_RUNTIME_DIR": runtime,
+                       "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime}/bus"}
+    if any(verified_environment.get(key) != value for key, value in bus_environment.items()):
+        raise SessionError("The verified user service bus metadata is unavailable")
+    environment.update(bus_environment)
     environment["UV_CACHE_DIR"] = str(args.state_dir / "uv-cache")
     environment["PATH"] = str(Path.home() / ".local/bin") + os.pathsep + environment.get("PATH", os.defpath)
     environment["SKYBUILD_SESSION_UNIT"] = unit
@@ -196,7 +203,7 @@ def run(args):
     finally:
         os.close(descriptor)
     # A lost launch reply retains both intent and merge ownership. Never retry here.
-    result = subprocess.run(service_command(args, unit), env=env, check=False)
+    result = subprocess.run(service_command(args, unit, env), env=env, check=False)
     props = dict(line.split("=", 1) for line in checked(
         ["systemctl", "--user", "show", unit, "-p", "LoadState", "-p", "ActiveState", "-p", "SubState",
          "-p", "MemoryPeak", "-p", "ControlGroup", "-p", "Result", "-p", "ExecMainStatus"], env=env

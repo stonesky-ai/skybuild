@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -19,8 +20,13 @@ def arguments(tmp_path, **changes):
     return argparse.Namespace(**values)
 
 
+def bus_environment():
+    runtime = f"/run/user/{os.getuid()}"
+    return {"XDG_RUNTIME_DIR": runtime, "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime}/bus"}
+
+
 def setup_run(monkeypatch):
-    monkeypatch.setattr(session, "validate", lambda args: {})
+    monkeypatch.setattr(session, "validate", lambda args: bus_environment())
     monkeypatch.setattr(session, "available_memory", lambda: 24 * session.GIB)
 
 
@@ -108,7 +114,7 @@ def test_private_state_rejects_shared_directory(tmp_path):
 
 def test_service_keeps_arguments_and_stops_all_children(tmp_path):
     args = arguments(tmp_path, command=["/usr/bin/printf", "%s", "refs/heads/dev-006"])
-    argv = session.service_command(args, "skybuild-merge-test.service")
+    argv = session.service_command(args, "skybuild-merge-test.service", bus_environment())
     assert argv[-3:] == args.command
     assert argv.index("--") > argv.index("--property")
     assert {"KillMode=control-group", "RemainAfterExit=no", "OOMPolicy=kill",
@@ -120,7 +126,31 @@ def test_service_keeps_arguments_and_stops_all_children(tmp_path):
 
 def test_fractional_threshold_and_user_tool_path(tmp_path):
     args = arguments(tmp_path, memory_high_gib=1.9999, memory_max_gib=2)
-    argv = session.service_command(args, "skybuild-merge-test.service")
+    argv = session.service_command(args, "skybuild-merge-test.service", bus_environment())
     assert f"MemoryHigh={int(1.9999 * session.GIB)}" in argv
     path = next(value.removeprefix("PATH=") for value in argv if value.startswith("PATH="))
     assert path.split(":")[0] == str(Path.home() / ".local/bin")
+
+
+
+def test_clean_child_gets_only_verified_bus_metadata(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/untrusted/runtime")
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/untrusted/bus")
+    monkeypatch.setenv("OWNER_TOKEN", "must-not-enter-the-child")
+    verified = {**bus_environment(), "OWNER_TOKEN": "must-not-enter-the-child"}
+    argv = session.service_command(arguments(tmp_path), "skybuild-merge-test.service", verified)
+    assert all(f"{key}={value}" in argv for key, value in bus_environment().items())
+    assert not any("untrusted" in value or "OWNER_TOKEN" in value for value in argv)
+    assert argv[argv.index("--") + 1:argv.index("--") + 3] == ["/usr/bin/env", "-i"]
+
+
+@pytest.mark.parametrize("field", ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"])
+def test_child_refuses_missing_or_changed_verified_bus(tmp_path, field):
+    for value in (None, "unix:path=/another-user/bus"):
+        verified = bus_environment()
+        if value is None:
+            del verified[field]
+        else:
+            verified[field] = value
+        with pytest.raises(session.SessionError, match="verified user service bus"):
+            session.service_command(arguments(tmp_path), "skybuild-merge-test.service", verified)
