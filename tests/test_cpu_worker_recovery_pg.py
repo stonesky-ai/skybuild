@@ -1,5 +1,6 @@
 """Real PostgreSQL guards and HTTP recovery contract; no physical launch."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -16,6 +17,17 @@ from skybuild.cpu_worker_recovery import CPUWorkerRecovery
 from test_cpu_worker_dispatch_pg import (
     cpu_dispatch, _headers, _make_reservation, _pins, _prepare, _persisted, _unit_identity,
 )
+
+
+
+@contextmanager
+def _guard_rejects(message):
+    # Store translates database errors; assert the original trigger and SQLSTATE.
+    with pytest.raises(DomainError) as caught:
+        yield
+    assert caught.value.code == 'unavailable'
+    assert isinstance(caught.value.__cause__, psycopg.errors.RaiseException)
+    assert str(caught.value.__cause__).splitlines()[0] == message
 
 
 def _case(env, *, lease_seconds=60):
@@ -112,14 +124,16 @@ def test_recovery_rejects_late_invocation_and_never_regrants_start(cpu_dispatch)
     assert client.post(base + '/recover-unstarted', headers=_headers(tokens['owner']), json=body).status_code == 200
     assert client.post(base + '/begin', headers=_headers(tokens['owner'])).json()['start_once'] is False
     assert client.post(base + '/invocation', headers=_headers(tokens['owner']), json=_unit_identity(pins)).status_code == 409
-    for sql in [
-        "UPDATE cpu_worker_dispatches SET state = 'running', invocation_id = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' WHERE operation_id = %s",
-        "DELETE FROM cpu_worker_recoveries WHERE operation_id = %s",
-        "UPDATE cpu_worker_recoveries SET request_digest = repeat('f',64) WHERE operation_id = %s",
+    for sql, message in [
+        ("UPDATE cpu_worker_dispatches SET state = 'running', invocation_id = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' WHERE operation_id = %s",
+         'CPU worker dispatch identity or state transition is invalid'),
+        ("DELETE FROM cpu_worker_recoveries WHERE operation_id = %s", 'CPU worker recovery receipts are append-only'),
+        ("UPDATE cpu_worker_recoveries SET request_digest = repeat('f',64) WHERE operation_id = %s",
+         'CPU worker recovery receipts are append-only'),
     ]:
-        with pytest.raises(psycopg.Error), admin._connection() as connection:
+        with _guard_rejects(message), admin._connection() as connection:
             connection.execute(sql, (pins['operation_id'],))
-    with pytest.raises(psycopg.Error), admin._connection() as connection:
+    with _guard_rejects('CPU worker recovery receipts are append-only'), admin._connection() as connection:
         connection.execute('TRUNCATE cpu_worker_recoveries')
 
 
@@ -139,12 +153,15 @@ def test_concurrent_exact_recovery_releases_once(cpu_dispatch):
 def test_sql_cannot_cancel_unproved_launch_intent(cpu_dispatch):
     admin, runtime, client, project, people, tokens = cpu_dispatch
     pins, base, body, _ = _case(cpu_dispatch)
-    for sql, key in [
-        ("UPDATE cpu_worker_dispatches SET state = 'cancelled' WHERE operation_id = %s", pins['operation_id']),
-        ("UPDATE task_effects SET state = 'cancelled', exposure_held = false WHERE operation_id = %s", pins['operation_id']),
-        ("UPDATE cpu_reservations SET state = 'cancelled' WHERE action_id = %s", pins['action_id']),
+    for sql, key, message in [
+        ("UPDATE cpu_worker_dispatches SET state = 'cancelled' WHERE operation_id = %s", pins['operation_id'],
+         'CPU worker dispatch identity or state transition is invalid'),
+        ("UPDATE task_effects SET state = 'cancelled', exposure_held = false WHERE operation_id = %s", pins['operation_id'],
+         'Effect identity and terminal observations are immutable'),
+        ("UPDATE cpu_reservations SET state = 'cancelled' WHERE action_id = %s", pins['action_id'],
+         'CPU reservation identity or release proof is invalid'),
     ]:
-        with pytest.raises(psycopg.Error), admin._connection() as connection:
+        with _guard_rejects(message), admin._connection() as connection:
             connection.execute(sql, (key,))
 
 
@@ -191,7 +208,7 @@ def test_database_rejects_contradictory_receipt(cpu_dispatch):
     admin, runtime, client, project, people, tokens = cpu_dispatch
     pins, base, body, _ = _case(cpu_dispatch)
     body['proof']['launcher_fenced'] = False
-    with pytest.raises(psycopg.Error), admin._connection() as connection:
+    with _guard_rejects('CPU worker recovery requires an owner and an unstarted held intent'), admin._connection() as connection:
         connection.execute(
             'INSERT INTO cpu_worker_recoveries (recovery_id, operation_id, action_id, actor, request_digest, evidence) '
             'VALUES (%s, %s, %s, %s, %s, %s)',
