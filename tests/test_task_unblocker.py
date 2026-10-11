@@ -174,3 +174,62 @@ def test_unrelated_metadata_heartbeat_does_not_repeat_finding(tmp_path):
     c.task['metadata']['telemetry']['heartbeat_at'] = 'new'
     second = invoke(c, tmp_path / 'state')
     assert len(first['findings']) == 1 and second['findings'] == []
+
+
+class ControlFake(Fake):
+    def __init__(self):
+        super().__init__()
+        from skybuild.workflow import TaskToken, Place
+        self.task.update(blocker='Wait until the explicit UTC date', next_action='Recheck the date')
+        self.token = TaskToken(project_id='P', task_id='T', place=Place.DEFERRED,
+            deferred_until='2099-01-01T00:00:00Z', blocker=self.task['blocker'],
+            hold_reason=self.task['blocker'], next_action=self.task['next_action'], revision=1).to_dict()
+        self.task['metadata']['_skybuild_workflow']['petri']['token'] = deepcopy(self.token)
+    def task_workflow(self, *a):
+        return {'task': deepcopy(self.task), 'token': deepcopy(self.token), 'available_actions': ['update_control']}
+    def workflow_transition(self, project, task, event, body, **kw):
+        from skybuild.workflow import TaskToken, TaskWorkflow
+        self.posts.append(kw)
+        before = TaskToken.from_dict(self.token)
+        record = dict(event=event, operation_id=kw['idempotency_key'], expected_revision=kw['expected_revision'], **body)
+        context = {k: self.token[k] for k in ('source_head','target_base','definition_revision','input_generation','policy_version')}
+        context.update(current_inputs=True, control_authorized=True, effects_resolved=True)
+        after = TaskWorkflow().apply(before, record, context)
+        self.token = after.to_dict()
+        self.task.update(revision=after.revision, blocker=after.blocker, next_action=after.next_action)
+        self.task['metadata']['_skybuild_workflow']['petri']['token'] = deepcopy(self.token)
+        self.execution['revision'] = after.revision
+        self.history.append({'event_facts': TaskWorkflow.journal_facts(before, after, record),
+                             'operation': 'workflow.' + event, 'revision': after.revision})
+
+
+def test_current_future_deferral_note_is_journaled_once_with_real_kernel(tmp_path):
+    c = ControlFake(); state = tmp_path / 'state'
+    first = invoke(c, state, apply=True)
+    assert first['actions'][0]['outcome'] == 'confirmed_history'
+    assert c.token['place'] == 'deferred' and c.token['deferred_until'] == '2099-01-01T00:00:00Z'
+    assert c.token['blocker'].startswith('Wait until the explicit UTC date')
+    assert 'TaskUnblocker verified at ' in c.token['blocker']
+    invoke(c, state, apply=True)
+    assert len(c.posts) == 1
+
+
+@pytest.mark.parametrize('change', ['effect','claim','pending','truncated','milestone','not_available'])
+def test_control_note_requires_all_current_guards(change):
+    c = ControlFake()
+    if change == 'effect': c.execution['effects']['items'] = [{'exposure_held': True}]
+    if change == 'claim': c.execution['claim'] = {'held': True, 'lease_until': '2020-01-01T00:00:00Z'}
+    if change == 'pending': c.token['pending_action'] = 'hold'
+    if change == 'truncated': c.execution['observations']['truncated'] = True
+    if change == 'milestone': c.token['milestone_task_id'] = 'M'
+    workflow = c.task_workflow()
+    if change == 'not_available': workflow['available_actions'] = []
+    assert diagnose(c.task, workflow, c.execution, {}, datetime.now(timezone.utc))['action'] is None
+
+
+def test_generic_hold_and_integrating_have_no_automatic_journal_route():
+    c = ControlFake(); c.token.update(place='hold', deferred_until=None)
+    assert diagnose(c.task,c.task_workflow(),c.execution,{},datetime.now(timezone.utc))['action'] is None
+    c.token['place'] = 'integrating'
+    result = diagnose(c.task,c.task_workflow(),c.execution,{},datetime.now(timezone.utc))
+    assert result['action'] is None and 'no_api_journal_route' in result['codes']

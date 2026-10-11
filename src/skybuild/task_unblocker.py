@@ -109,7 +109,7 @@ def diagnose(task, workflow, execution, all_tasks, now):
         return {'codes': ['immutable'], 'guidance': 'Keep the accepted or retired task unchanged', 'action': None}
     petri = task.get('metadata', {}).get('_skybuild_workflow', {}).get('petri', {})
     if petri.get('schema_version') != 1 or not isinstance(workflow, dict) or 'token' not in workflow:
-        codes = ['legacy_or_unverified_workflow']
+        codes = ['legacy_or_unverified_workflow', 'no_api_journal_route']
         notes = ['Owner must verify and enroll the task through the accepted workflow']
         dependencies = [all_tasks.get(x) for x in task.get('dependencies', [])]
         if dependencies:
@@ -170,26 +170,69 @@ def diagnose(task, workflow, execution, all_tasks, now):
             and 'resume_deferred' in workflow.get('available_actions', [])):
         codes.append('elapsed_utc_deferral'); notes.append('The explicit UTC deferral has elapsed; resume only to Ready for reassessment')
         action = 'resume_deferred'
+    safe_control = not pending and not truncated and not held and not claim.get('held')
+    original_blocker = original_text(task.get('blocker') or token.get('hold_reason') or '')
+    future_utc = place == 'deferred' and until and until > now and not token.get('milestone_task_id')
+    dependency_blocker = ('dependencies_unresolved' in codes and
+                          ('dependenc' in original_blocker.lower() or any(
+                              name in original_blocker for name in task.get('dependencies', []))))
+    if (not action and place in {'hold', 'deferred'} and safe_control and original_blocker
+            and (future_utc or dependency_blocker) and 'update_control' in workflow.get('available_actions', [])):
+        codes.append('verified_blocker_retained')
+        notes.append('Attach current facts to the existing blocker; keep this place and every admission guard')
+        action = 'update_control'
+    if not action:
+        codes.append('no_api_journal_route')
+        notes.append('No supported automatic API journal route is proved for this finding')
     if not codes:
         codes.append('no_clearance_proof'); notes.append('Retain the current state until its stated blocker has exact proof')
     return {'codes': codes, 'guidance': '; '.join(notes), 'action': action}
 
 
-def history_proves(client, project, task_id, operation, revision, *, check=lambda: None):
+def history_proves(client, project, task_id, operation, revision, *, event='resume_deferred',
+                   place='deferred', check=lambda: None):
     for offset in range(0, 2000, 100):
         check()
         rows = client.task_history(project, task_id, limit=100, offset=offset)
         for row in rows:
             facts = row.get('event_facts') or {}
-            if (facts.get('operation_id') == operation and row.get('operation') == 'workflow.resume_deferred'
+            if (facts.get('operation_id') == operation and row.get('operation') == 'workflow.' + event
                     and row.get('revision') == revision + 1
                     and facts.get('project_id') == project and facts.get('task_id') == task_id
-                    and facts.get('event') == 'resume_deferred'
-                    and facts.get('from_place') == 'deferred' and facts.get('to_place') == 'ready'):
+                    and facts.get('event') == event and facts.get('from_place') == place
+                    and facts.get('to_place') == ('ready' if event == 'resume_deferred' else place)):
                 return True
         if len(rows) < 100:
             return False
     return False
+
+
+NOTE = '\n[TaskUnblocker verified at '
+
+
+def original_text(value):
+    return value.split(NOTE, 1)[0] if isinstance(value, str) else value
+
+
+def stable_evidence(value):
+    """Remove this tool's appended verification note and its own revision changes."""
+    if isinstance(value, list):
+        return [stable_evidence(x) for x in value]
+    if isinstance(value, dict):
+        return {k: stable_evidence(v) for k, v in value.items()}
+    return original_text(value)
+
+
+def finding_fingerprint(evidence, decision, binding):
+    value = stable_evidence({'evidence': evidence, 'decision': decision, 'source_binding': binding})
+    value['evidence']['task'].pop('revision', None)
+    token = value['evidence']['workflow'].get('token') or {}
+    token.pop('revision', None)
+    petri = value['evidence']['task']['metadata'].get('_skybuild_workflow') or {}
+    petri.get('petri', {}).get('token', {}).pop('revision', None)
+    value['source_binding'].pop('task_revision', None)
+    return fingerprint(value)
+
 
 
 def task_facts(task):
@@ -270,7 +313,8 @@ def run(client, project, state, *, apply=False, expected_principal, api_url, sec
                 outcome = read_json(journal / 'outcome.json') if (journal / 'outcome.json').exists() else {}
                 if outcome.get('outcome') == 'rejected':
                     continue
-                if history_proves(client, project, intent['task_id'], intent['operation_id'], intent['revision'], check=check):
+                if history_proves(client, project, intent['task_id'], intent['operation_id'], intent['revision'],
+                                  event=intent.get('event', 'resume_deferred'), place=intent.get('place', 'deferred'), check=check):
                     write_json(journal / 'confirmed.json', {'history_proven': True}, create=True)
                 else:
                     unresolved.add(intent['task_id'])
@@ -310,11 +354,19 @@ def run(client, project, state, *, apply=False, expected_principal, api_url, sec
                 row = dispatch_bindings[0]
                 binding.update(worker_id=row['worker_id'], host_id=row['host_id'], assignment_sha256=row['assignment_digest'])
             bindings.append(binding)
-            fp = fingerprint({'evidence': evidence, 'decision': decision, 'source_binding': binding})
+            fp = finding_fingerprint(evidence, decision, binding)
             next_cache[task_id] = fp
             if previous.get(task_id) != fp:
                 finding = {'task_id': task_id, 'revision': task['revision'], 'fingerprint': fp,
                            'verified_at_utc': observed.isoformat(), **decision,
+                           'evidence_sources': {'task_updated_at': task.get('updated_at'),
+                               'task_created_at': task.get('created_at'),
+                               'task_api_path': '/api/v1/projects/' + project + '/tasks/' + task_id,
+                               'workflow_api_path': '/api/v1/projects/' + project + '/tasks/' + task_id + '/workflow',
+                               'execution_api_path': '/api/v1/projects/' + project + '/tasks/' + task_id + '/execution-status',
+                               'observation_times': [{k: row.get(k) for k in ('event_id','observed_at','received_at')}
+                                   for row in execution.get('observations', {}).get('items', [])],
+                               'check_provenance': 'Authenticated GETs; deterministic diagnosis; external artifact bytes were not reverified'},
                            'source_binding': binding}
                 finding_path = state / 'findings' / (fp + '.json')
                 if finding_path.exists():
@@ -330,7 +382,13 @@ def run(client, project, state, *, apply=False, expected_principal, api_url, sec
             fresh = client.get_task(project, task_id)
             fresh_workflow = client.task_workflow(project, task_id)
             fresh_execution = client.execution_status(project, task_id, limit=100)
-            if (decision_evidence(fresh, fresh_workflow, fresh_execution, by_id) != evidence):
+            fresh_dependencies = dict(by_id)
+            for dependency in task.get('dependencies', []):
+                check()
+                fresh_dependencies[dependency] = client.get_task(project, dependency)
+            fresh_decision = diagnose(fresh, fresh_workflow, fresh_execution, fresh_dependencies, datetime.now(timezone.utc))
+            if (decision_evidence(fresh, fresh_workflow, fresh_execution, fresh_dependencies) != evidence
+                    or fresh_decision['action'] != decision['action']):
                 actions.append({'task_id': task_id, 'outcome': 'changed_before_send'}); continue
             operation = 'taskunblocker-' + fp
             journal = private_dir(state / 'actions' / operation)
@@ -339,26 +397,44 @@ def run(client, project, state, *, apply=False, expected_principal, api_url, sec
                 intent = read_json(intent_path)
             else:
                 intent = {'project_id': project, 'task_id': task_id, 'revision': task['revision'],
-                          'fingerprint': fp, 'operation_id': operation,
+                          'fingerprint': fp, 'operation_id': operation, 'event': decision['action'],
+                          'place': workflow['token']['place'],
                           'body': {'reason': 'TaskUnblocker verified elapsed UTC deferral at ' + observed.isoformat() + '; evidence SHA-256 ' + fp,
                                    'next_action': 'Reassess the current task definition and dependencies'}}
+                if decision['action'] == 'update_control':
+                    until = workflow['token'].get('deferred_until')
+                    facts = ('Explicit deferred_until=' + until + ' was future at verification' if until else
+                             'Dependencies lacked current accepted completion at verification: ' + ','.join(
+                                 name for name in task.get('dependencies', [])
+                                 if not by_id.get(name) or not current_completion(by_id[name])))
+                    if task.get('updated_at'):
+                        facts += '; source task updated_at=' + str(task['updated_at'])
+                    note = NOTE + observed.isoformat() + '; evidence SHA-256 ' + fp + '; facts: ' + facts + ']'
+                    reason = original_text(task.get('blocker') or workflow['token'].get('hold_reason') or '')
+                    next_action = original_text(task.get('next_action') or workflow['token'].get('next_action') or 'Recheck the retained blocker')
+                    intent['body'] = {'reason': reason + note, 'next_action': next_action + note}
+                    if any(len(value) > 4096 for value in intent['body'].values()):
+                        actions.append({'task_id': task_id, 'outcome': 'control_note_exceeds_bound'})
+                        continue
                 write_json(intent_path, intent, create=True)
             if (journal / 'sent.json').exists():
-                proven = history_proves(client, project, task_id, operation, intent['revision'], check=check)
+                proven = history_proves(client, project, task_id, operation, intent['revision'],
+                                        event=intent.get('event', 'resume_deferred'), place=intent.get('place', 'deferred'), check=check)
                 actions.append({'task_id': task_id, 'outcome': 'confirmed_history' if proven else 'ambiguous_no_replay'})
                 if proven:
                     write_json(journal / 'confirmed.json', {'history_proven': True}, create=True)
                 continue
             write_json(journal / 'sent.json', {'operation_id': operation}, create=True)
             try:
-                client.workflow_transition(project, task_id, 'resume_deferred', intent['body'],
+                client.workflow_transition(project, task_id, intent.get('event', 'resume_deferred'), intent['body'],
                                            expected_revision=intent['revision'], idempotency_key=operation)
             except ClientError as error:
                 outcome = 'rejected' if error.status_code in {400, 401, 403, 404, 409, 422} else 'ambiguous_no_replay'
                 write_json(journal / 'outcome.json', {'outcome': outcome, 'code': error.code,
                                                      'http_status': error.status_code}, create=True)
                 actions.append({'task_id': task_id, 'outcome': outcome}); continue
-            proven = history_proves(client, project, task_id, operation, intent['revision'], check=check)
+            proven = history_proves(client, project, task_id, operation, intent['revision'],
+                                        event=intent.get('event', 'resume_deferred'), place=intent.get('place', 'deferred'), check=check)
             actions.append({'task_id': task_id, 'outcome': 'confirmed_history' if proven else 'ambiguous_no_replay'})
             if proven:
                 write_json(journal / 'confirmed.json', {'history_proven': True}, create=True)

@@ -650,3 +650,5 @@ The A30 audit adds effect-boundary, gate-union, allocation and recovery-epoch re
 
 
 TaskUnblocker is a P4 CPU-only queue check every two hours. Its bounded diagnosis, exact-revision UTC deferral release, durable no-replay journal and source binding gap are specified in [TaskUnblocker](implementation/task_unblocker.md). Worker admission and task acceptance guards remain required.
+
+TaskUnblocker can append verified changed blocker facts through the existing `update_control` event on safe Hold or Deferred tasks. This preserves the place and blocker; unsupported states retain an explicit evidence-routing gap. The exact conditions and one-send journal are defined in the linked TaskUnblocker specification.
