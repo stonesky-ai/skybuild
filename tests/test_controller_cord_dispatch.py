@@ -211,3 +211,40 @@ def test_legacy_sending_intent_keeps_its_exact_key(tmp_path, monkeypatch):
     manual_dispatch.dispatch(repo, "docs/design/assignments/test.json", **kwargs)
     assert client.calls[-1][2] == retained["idempotency_key"]
     assert client.calls[-1][1] == retained["message"]
+
+
+@pytest.mark.parametrize("error_kind", ["client", "dispatch"])
+def test_private_controller_exception_has_no_secret_text(tmp_path, error_kind):
+    from skybuild.auto_patch_controller import _save_exception_evidence
+    from skybuild.client import ClientError
+    secret = "private-credential-must-never-be-recorded"
+    tmp_path.chmod(0o700)
+    try:
+        if error_kind == "client":
+            raise ClientError("idempotency_conflict", secret)
+        raise manual_dispatch.DispatchError("Private SkyBuild API request failed (idempotency_conflict)")
+    except (ClientError, manual_dispatch.DispatchError) as error:
+        _save_exception_evidence(tmp_path, error)
+    path = next(tmp_path.glob("controller-failure-*.json"))
+    raw = path.read_bytes()
+    record = json.loads(raw)
+    assert secret.encode() not in raw
+    assert "locals" not in record and "message" not in record
+    assert record["error_code"] == "idempotency_conflict"
+    assert 0 < len(record["frames"]) <= 8
+    assert len(raw) <= 8192
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_controller_diagnostics_refuse_public_or_linked_directory(tmp_path):
+    from skybuild.auto_patch_controller import _save_exception_evidence
+    root = tmp_path / "private"
+    root.mkdir(mode=0o700)
+    linked = tmp_path / "linked"
+    linked.symlink_to(root, target_is_directory=True)
+    with pytest.raises(OSError):
+        _save_exception_evidence(linked, ValueError("secret"))
+    root.chmod(0o755)
+    with pytest.raises(OSError):
+        _save_exception_evidence(root, ValueError("secret"))
+    assert list(root.iterdir()) == []

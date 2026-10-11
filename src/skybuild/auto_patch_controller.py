@@ -385,6 +385,44 @@ def _save_new(path: Path, value: dict) -> None:
         os.close(directory)
 
 
+def _save_exception_evidence(state_dir: Path, error: BaseException) -> None:
+    """Keep bounded frame identities. Do not retain exception text or locals."""
+    directory = os.open(state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(directory)
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise OSError("Diagnostic directory is not private")
+        safe_codes = {"idempotency_conflict", "authentication", "authorization", "not_found",
+                      "unavailable", "conflict", "invalid", "usage_conflict"}
+        code = error.code if isinstance(error, ClientError) and error.code in safe_codes else None
+        if isinstance(error, DispatchError):
+            code = next((item for item in safe_codes
+                         if str(error) == f"Private SkyBuild API request failed ({item})"), None)
+        frames = []
+        current = error.__traceback__
+        while current is not None:
+            frame = current.tb_frame.f_code
+            frames.append({"file": frame.co_filename[-256:], "function": frame.co_name[:80],
+                           "line": current.tb_lineno})
+            frames = frames[-8:]
+            current = current.tb_next
+        record = {"schema": "skybuild.controller-failure.v1", "exception_class": type(error).__name__[:80],
+                  "error_code": code, "frames": frames}
+        data = (json.dumps(record, sort_keys=True) + "\n").encode()
+        if len(data) > 8192:
+            raise ValueError("Diagnostic record exceeds its bound")
+        name = "controller-failure-" + uuid4().hex + ".json"
+        descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600, dir_fd=directory)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 def _cpu_controls(client: Client, project: str, *, required_free: int = 2) -> None:
     identity = client.whoami()
     if not isinstance(identity, dict) or identity.get("is_admin") is not True:
@@ -795,7 +833,11 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, sort_keys=True))
         return 0 if result["submitted"] else 2
     except (AutoControllerError, DispatchError, ManualCordError, ClientError, PreflightError,
-            PermitError, JobUnitError, CPUWorkerBridgeError, OSError, ValueError, TypeError, subprocess.SubprocessError):
+            PermitError, JobUnitError, CPUWorkerBridgeError, OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
+        try:
+            _save_exception_evidence(args.state_dir, error)
+        except (OSError, ValueError):
+            pass
         print(json.dumps({"submitted": False, "reason": "Controller stopped; preserve private run evidence"}),
               file=sys.stderr)
         return 2
