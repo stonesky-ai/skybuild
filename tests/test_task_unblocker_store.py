@@ -15,8 +15,8 @@ def test_taskunblocker_attaches_future_deferral_evidence_without_release(store, 
     view = store.initialize_workflow(people['owner'], project, task['task_id'], task['revision'], 'unblocker-initialize')
     until = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
     deferred = store.workflow_transition(people['owner'], project, task['task_id'],
-        {'event':'defer','until':until,'reason':'Wait for the explicit UTC date','next_action':'Recheck the date'},
-        view['task']['revision'], 'unblocker-defer')
+        event='defer', body={'until':until,'reason':'Wait for the explicit UTC date','next_action':'Recheck the date'},
+        expected_revision=view['task']['revision'], idempotency_key='unblocker-defer')
     original_revision = deferred['task']['revision']
     with TestClient(create_app(store)) as web:
         with Client('http://testserver', people['owner_token'], retries=0, trust_env=False, transport=web._transport) as client:
