@@ -15,6 +15,7 @@ from starlette.exceptions import HTTPException
 from . import __version__
 from .contracts import DomainError, Principal, valid_identifier
 from .cpu_worker_dispatch import CPUWorkerDispatch
+from .cpu_worker_recovery import CPUWorkerRecovery
 from .web import install_workbench
 from .workflow import TRANSITIONS, _workflow_event
 
@@ -269,6 +270,15 @@ class CPUWorkerObservation(CPUWorkerInvocation):
         elif self.result is not None or self.exit_status is not None or self.worker_result_digest is not None:
             raise ValueError("Nonterminal observation cannot include result fields")
         return self
+
+
+class CPUWorkerRecoverUnstarted(Input):
+    recovery_id: Annotated[str, StringConstraints(pattern=r"^[0-9a-fA-F-]{36}$")]
+    expected_revision: Annotated[StrictInt, Field(gt=0, lt=2**63)]
+    claim_fence: Annotated[StrictInt, Field(gt=0, lt=2**63)]
+    attempt_id: Identifier
+    reservation_hash: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+    proof: dict[str, Any]
 
 
 class CPUWorkerSettle(Input):
@@ -558,6 +568,15 @@ def create_app(store: Any, *, trusted_integration: dict | None = None) -> FastAP
     def settle_cpu_worker(project_id: ProjectPath, operation_id: RecordPath,
                           body: CPUWorkerSettle, actor: Actor) -> dict:
         return cpu_worker.settle(actor, project_id, operation_id, **body.model_dump())
+
+    @app.get(base + "/cpu-worker-dispatches/{operation_id}/recover-unstarted")
+    def get_unstarted_cpu_worker_recovery(project_id: ProjectPath, operation_id: RecordPath, actor: Actor) -> dict:
+        return CPUWorkerRecovery(store).get(actor, project_id, operation_id)
+
+    @app.post(base + "/cpu-worker-dispatches/{operation_id}/recover-unstarted")
+    def recover_unstarted_cpu_worker(project_id: ProjectPath, operation_id: RecordPath,
+                                     body: CPUWorkerRecoverUnstarted, actor: Actor) -> dict:
+        return CPUWorkerRecovery(store).recover(actor, project_id, operation_id, **body.model_dump())
 
     @app.post(base + "/tasks", status_code=201)
     def create_task(project_id: ProjectPath, body: TaskCreate, actor: Actor, idem: Key) -> dict:

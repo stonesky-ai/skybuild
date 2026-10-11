@@ -47,6 +47,26 @@ def test_promotion_accepts_only_exact_schema_013_to_016_migration_set():
         controller._verify_schema_transition(current, candidate, "013-to-017")
 
 
+
+def test_promotion_accepts_only_exact_schema_016_to_017_migration():
+    current = {f"migrations/{version:03d}_migration.sql": f"{version:064x}"
+               for version in range(1, 17)}
+    migration = "migrations/017_unstarted_cpu_recovery.sql"
+    candidate = {**current, migration: "f" * 64}
+    assert controller._verify_schema_transition(current, candidate, "016-to-017") == (16, 17)
+    missing_prefix = dict(current)
+    del missing_prefix["migrations/014_migration.sql"]
+    wrong_name = {**current, "migrations/017_other.sql": "f" * 64}
+    invalid_candidates = (current, wrong_name,
+                          {**candidate, "migrations/016_migration.sql": "e" * 64},
+                          {**candidate, "migrations/018_other.sql": "a" * 64})
+    for invalid in invalid_candidates:
+        with pytest.raises(ValueError, match="unchanged schema 001-016"):
+            controller._verify_schema_transition(current, invalid, "016-to-017")
+    with pytest.raises(ValueError, match="unchanged schema 001-016"):
+        controller._verify_schema_transition(missing_prefix, candidate, "016-to-017")
+
+
 def test_secret_initialization_is_private_and_never_rotates(tmp_path):
     state = tmp_path / "new-pilot-state"
     result = init_secrets(state)

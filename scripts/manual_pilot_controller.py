@@ -138,6 +138,7 @@ SCHEMA_TRANSITIONS: dict[str, tuple[int, int, tuple[str, ...]]] = {
         "migrations/015_trusted_integration.sql",
         "migrations/016_task_usage_history.sql",
     )),
+    "016-to-017": (16, 17, ("migrations/017_unstarted_cpu_recovery.sql",)),
 }
 
 

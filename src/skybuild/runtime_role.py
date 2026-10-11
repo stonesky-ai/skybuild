@@ -14,7 +14,7 @@ from psycopg import sql
 READ_ONLY = {"schema_migrations", "principals", "principal_grants", "ledger_imports"}
 APPEND_ONLY = {"task_journal", "cord_journal", "effect_journal", "claim_journal",
                "cpu_journal", "observation_events", "task_lineage", "idempotency",
-               "task_usage_events", "cpu_worker_observations"}
+               "task_usage_events", "cpu_worker_observations", "cpu_worker_recoveries"}
 MUTABLE = {"tasks", "messages", "task_readiness", "task_effects", "task_claims",
            "cpu_pools", "cpu_reservations", "observation_projections",
            "cpu_fake_dispatches", "cpu_fake_receipts", "cpu_worker_dispatches"}
